@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"lazymind/core/acl"
 	"lazymind/core/common"
@@ -114,6 +115,37 @@ type algoGroupInfoResp struct {
 		Type        string `json:"type"`
 		DisplayName string `json:"display_name"`
 	} `json:"data"`
+}
+
+const (
+	maxDatasetTags     = 10
+	maxDatasetTagRunes = 20
+)
+
+func normalizeAndValidateDatasetTags(tags []string) ([]string, error) {
+	if len(tags) == 0 {
+		return []string{}, nil
+	}
+	seen := make(map[string]struct{}, len(tags))
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		t := strings.TrimSpace(tag)
+		if t == "" {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		if utf8.RuneCountInString(t) > maxDatasetTagRunes {
+			return nil, fmt.Errorf("tag exceeds max length of %d", maxDatasetTagRunes)
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	if len(out) > maxDatasetTags {
+		return nil, fmt.Errorf("too many tags, max is %d", maxDatasetTags)
+	}
+	return out, nil
 }
 
 func parseDatasetTags(ext json.RawMessage) []string {
@@ -781,6 +813,12 @@ func CreateDataset(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "dataset name uses reserved prefix", http.StatusBadRequest)
 		return
 	}
+	normalizedTags, err := normalizeAndValidateDatasetTags(body.Tags)
+	if err != nil {
+		common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	body.Tags = normalizedTags
 	// Provide explicit feedback for duplicate dataset names under the same user.
 	var existed int64
 	if err := corestore.DB().
@@ -1114,6 +1152,12 @@ func UpdateDataset(w http.ResponseWriter, r *http.Request) {
 	if newCover == "" {
 		newCover = ds.CoverImage
 	}
+	normalizedTags, err := normalizeAndValidateDatasetTags(body.Tags)
+	if err != nil {
+		common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	body.Tags = normalizedTags
 
 	// Update ext: tags / algo
 	algo := parseDatasetAlgo(ds.Ext)
