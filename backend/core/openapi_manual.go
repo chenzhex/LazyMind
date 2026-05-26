@@ -386,8 +386,18 @@ func manualPaths() map[string]any {
 			"get":    op("Get conversation", nil, nil, response(200, "Conversationtext", refSchema("ConversationItem"))),
 			"delete": op("Delete conversation", nil, nil, response(200, "Deleted successfully", refSchema("EmptyObject"))),
 		},
-		"/conversations/{name}:detail":       map[string]any{"get": op("Get conversationtext", nil, nil, response(200, "Conversation details", refSchema("ConversationDetailResponse")))},
-		"/conversations/{name}:history":      map[string]any{"get": op("List conversation history", queryParams(param("query", "page_size", false, intSchema()), param("query", "page_token", false, strSchema())), nil, response(200, "Paginated conversation history", refSchema("ConversationHistoryListResponse")))},
+		"/conversations/{name}:detail": map[string]any{"get": op(
+			"Get conversation metadata",
+			[]map[string]any{param("path", "name", true, strSchema())},
+			nil,
+			response(200, "Conversation metadata (no chat history; use :history)", refSchema("ConversationDetailResponse")),
+		)},
+		"/conversations/{name}:history": map[string]any{"get": op(
+			"List conversation history (paginated)",
+			conversationHistoryListParams(),
+			nil,
+			response(200, "Chat history page ordered by seq descending; may include in-flight turns from Redis", refSchema("ConversationHistoryListResponse")),
+		)},
 		"/conversations":                     map[string]any{"get": op("Conversation list", queryParams(param("query", "keyword", false, strSchema()), param("query", "page_size", false, intSchema()), param("query", "page_token", false, strSchema())), nil, response(200, "Conversation list", refSchema("ConversationListResponse")))},
 		"/conversations:setChatHistory":      map[string]any{"post": op("Set conversation history", nil, jsonBody(refSchema("ConversationSetHistoryRequest"), true), response(200, "Set result", refSchema("SetChatHistoryResponse")))},
 		"/conversations:batchDelete":         map[string]any{"post": op("Batch delete conversations", nil, jsonBody(refSchema("ConversationBatchDeleteRequest"), true), response(200, "Batch deleted conversations", refSchema("ConversationBatchDeleteResponse")))},
@@ -452,6 +462,23 @@ func param(in, name string, required bool, schema map[string]any) map[string]any
 }
 
 func queryParams(params ...map[string]any) []map[string]any { return params }
+
+func conversationHistoryListParams() []map[string]any {
+	return []map[string]any{
+		param("path", "name", true, map[string]any{
+			"type":        "string",
+			"description": "Conversation ID or resource name (e.g. conv-1 or conversations/conv-1; :history suffix is stripped)",
+		}),
+		param("query", "page_size", false, map[string]any{
+			"type":        "integer",
+			"description": "Page size (default 20, max 100)",
+		}),
+		param("query", "page_token", false, map[string]any{
+			"type":        "string",
+			"description": "Pagination offset token from a previous response next_page_token",
+		}),
+	}
+}
 
 func jsonBody(schema map[string]any, required bool) map[string]any {
 	return map[string]any{"required": required, "content": map[string]any{"application/json": map[string]any{"schema": schema}}}
