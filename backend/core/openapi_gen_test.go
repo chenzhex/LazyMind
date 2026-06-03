@@ -194,3 +194,67 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 		}
 	}
 }
+
+func TestOpenAPISpecCoversEvalSetOperations(t *testing.T) {
+	r := mux.NewRouter()
+	registerAllRoutes(r)
+
+	specJSON, err := buildOpenAPISpecFromRouter(r)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	paths, ok := spec["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("paths missing in openapi spec")
+	}
+
+	cases := []struct {
+		method string
+		path   string
+		tag    string
+	}{
+		{"get", "/api/core/eval-sets", "eval-sets"},
+		{"post", "/api/core/eval-sets", "eval-sets"},
+		{"get", "/api/core/eval-sets/datasets", "eval-sets"},
+		{"get", "/api/core/eval-sets/question-types", "eval-sets"},
+		{"get", "/api/core/eval-sets/{eval_set_id}", "eval-sets"},
+		{"patch", "/api/core/eval-sets/{eval_set_id}", "eval-sets"},
+		{"delete", "/api/core/eval-sets/{eval_set_id}", "eval-sets"},
+		{"get", "/api/core/eval-sets/{eval_set_id}/items", "eval-set-items"},
+		{"post", "/api/core/eval-sets/{eval_set_id}/items", "eval-set-items"},
+		{"patch", "/api/core/eval-sets/{eval_set_id}/items/{item_id}", "eval-set-items"},
+		{"delete", "/api/core/eval-sets/{eval_set_id}/items/{item_id}", "eval-set-items"},
+		{"post", "/api/core/eval-sets/{eval_set_id}/items:batchDelete", "eval-set-items"},
+		{"get", "/api/core/eval-set-import-templates/{file_type}", "eval-set-imports"},
+		{"post", "/api/core/eval-sets/imports:preview", "eval-set-imports"},
+		{"post", "/api/core/eval-sets:import", "eval-set-imports"},
+		{"post", "/api/core/eval-sets/{eval_set_id}/imports", "eval-set-imports"},
+		{"get", "/api/core/eval-set-import-tasks/{task_id}", "eval-set-imports"},
+	}
+
+	for _, tc := range cases {
+		pathItem, ok := paths[tc.path].(map[string]any)
+		if !ok {
+			t.Fatalf("path missing from openapi spec: %s", tc.path)
+		}
+		op, ok := pathItem[tc.method].(map[string]any)
+		if !ok {
+			t.Fatalf("operation missing from openapi spec: %s %s", tc.method, tc.path)
+		}
+		tags, ok := op["tags"].([]any)
+		if !ok || len(tags) == 0 || tags[0] != tc.tag {
+			t.Fatalf("expected tag %q for %s %s, got %#v", tc.tag, tc.method, tc.path, op["tags"])
+		}
+	}
+
+	for _, legacyPath := range []string{"/api/core/qa-datasets", "/api/core/qa-dataset-import-tasks/{task_id}"} {
+		if _, ok := paths[legacyPath]; ok {
+			t.Fatalf("unexpected legacy qa dataset path in openapi spec: %s", legacyPath)
+		}
+	}
+}
