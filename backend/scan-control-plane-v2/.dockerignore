@@ -1,8 +1,0 @@
-.codex-gocache/
-.codex-gomodcache/
-.git/
-*.test
-bin/
-dist/
-tmp/
-coverage.out
