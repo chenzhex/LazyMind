@@ -32,7 +32,7 @@ CREATE TABLE public.eval_sets (
     id character varying(64) NOT NULL,
     name character varying(255) NOT NULL,
     description text DEFAULT ''::text NOT NULL,
-    dataset_id character varying(255) DEFAULT ''::character varying NOT NULL,
+    dataset_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
     owner_id character varying(255) NOT NULL,
     group_id character varying(255) DEFAULT ''::character varying NOT NULL,
     shard_id character varying(64) NOT NULL,
@@ -49,7 +49,7 @@ CREATE TABLE public.eval_sets (
 
 CREATE INDEX idx_eval_sets_owner ON public.eval_sets(owner_id);
 CREATE INDEX idx_eval_sets_group ON public.eval_sets(group_id);
-CREATE INDEX idx_eval_sets_dataset ON public.eval_sets(dataset_id);
+CREATE INDEX idx_eval_sets_dataset_ids ON public.eval_sets USING gin (dataset_ids);
 CREATE INDEX idx_eval_sets_shard ON public.eval_sets(shard_id);
 CREATE INDEX idx_eval_sets_status ON public.eval_sets(status);
 

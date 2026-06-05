@@ -18,7 +18,7 @@ import (
 func TestEvalSetIntegrationManualMaintenance(t *testing.T) {
 	db := newEvalSetTestDB(t)
 
-	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets", `{"name":"manual cases"}`, "u1")
+	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets", `{"name":"manual cases","dataset_ids":["dataset_1"]}`, "u1")
 	CreateEvalSet(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected create eval set status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -115,7 +115,7 @@ func TestEvalSetIntegrationCSVCreateImportSuccess(t *testing.T) {
 	}
 	preview := decodeOKData[ImportPreviewResponse](t, rec)
 
-	rec, req = requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"csv cases","import_token":"`+preview.ImportToken+`"}`, "u1")
+	rec, req = requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"csv cases","dataset_ids":["dataset_1"],"import_token":"`+preview.ImportToken+`"}`, "u1")
 	CreateEvalSetByImport(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected import status 200, got %d: %s", rec.Code, rec.Body.String())

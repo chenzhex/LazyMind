@@ -23,7 +23,7 @@ func (s *Service) CreateByImport(ctx context.Context, req CreateEvalSetByImportR
 	createReq := CreateEvalSetRequest{
 		Name:        strings.TrimSpace(req.Name),
 		Description: strings.TrimSpace(req.Description),
-		DatasetID:   strings.TrimSpace(req.DatasetID),
+		DatasetIDs:  normalizeDatasetIDs(req.DatasetIDs),
 		GroupID:     strings.TrimSpace(req.GroupID),
 	}
 	if err := validateCreateRequest(createReq); err != nil {
@@ -51,7 +51,7 @@ func (s *Service) CreateByImport(ctx context.Context, req CreateEvalSetByImportR
 				EvalSetID:   evalSetID,
 				Name:        createReq.Name,
 				Description: createReq.Description,
-				DatasetID:   createReq.DatasetID,
+				DatasetIDs:  createReq.DatasetIDs,
 				GroupID:     createReq.GroupID,
 				ImportToken: importToken,
 				TempPath:    preview.TempPath,
@@ -153,8 +153,10 @@ func (s *Service) GetImportTask(ctx context.Context, taskID, userID string, grou
 		evalSetID = job.ResourceID
 	}
 
+	var datasetIDs []string
 	evalSet, err := s.repo.GetActive(ctx, evalSetID)
 	if err == nil {
+		datasetIDs = parseDatasetIDsJSON(evalSet.DatasetIDs)
 		perms := evalSetPermissionsForUser(evalSet, userID, groupIDs)
 		if !hasPermission(perms, acl.PermissionEvalSetRead) && !hasPermission(perms, acl.PermissionEvalSetWrite) {
 			return nil, errForbidden
@@ -163,11 +165,13 @@ func (s *Service) GetImportTask(ctx context.Context, taskID, userID string, grou
 		if job.CreateUserID != userID {
 			return nil, errForbidden
 		}
+		datasetIDs = normalizeDatasetIDs(payload.DatasetIDs)
 	} else {
 		return nil, err
 	}
 
-	return importTaskResponse(job, payload), nil
+	names, _ := s.repo.DatasetNames(ctx, datasetIDs)
+	return importTaskResponse(job, payload, datasetIDs, names), nil
 }
 
 func consumeReadyImportPreview(ctx context.Context, tx *gorm.DB, importToken, userID string) (*orm.EvalSetImportPreview, error) {
@@ -193,7 +197,7 @@ func consumeReadyImportPreview(ctx context.Context, tx *gorm.DB, importToken, us
 	return &preview, nil
 }
 
-func importTaskResponse(job *orm.AsyncJob, payload EvalSetImportJobPayload) *EvalSetImportTaskResponse {
+func importTaskResponse(job *orm.AsyncJob, payload EvalSetImportJobPayload, datasetIDs []string, datasetNames map[string]string) *EvalSetImportTaskResponse {
 	result := importJobResult{}
 	if len(job.ResultJSON) > 0 {
 		_ = json.Unmarshal(job.ResultJSON, &result)
@@ -212,6 +216,8 @@ func importTaskResponse(job *orm.AsyncJob, payload EvalSetImportJobPayload) *Eva
 	return &EvalSetImportTaskResponse{
 		ID:              job.ID,
 		EvalSetID:       evalSetID,
+		DatasetIDs:      datasetIDs,
+		DatasetNames:    datasetNamesForIDs(datasetIDs, datasetNames),
 		Status:          job.Status,
 		FileName:        payload.FileName,
 		FileType:        payload.FileType,

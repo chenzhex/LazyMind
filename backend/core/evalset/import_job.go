@@ -33,18 +33,18 @@ const (
 )
 
 type EvalSetImportJobPayload struct {
-	Mode        string `json:"mode"`
-	EvalSetID   string `json:"eval_set_id"`
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
-	DatasetID   string `json:"dataset_id,omitempty"`
-	GroupID     string `json:"group_id,omitempty"`
-	ImportToken string `json:"import_token"`
-	TempPath    string `json:"temp_path"`
-	FileName    string `json:"file_name"`
-	FileType    string `json:"file_type"`
-	TotalRows   int64  `json:"total_rows"`
-	ValidRows   int64  `json:"valid_rows"`
+	Mode        string   `json:"mode"`
+	EvalSetID   string   `json:"eval_set_id"`
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	DatasetIDs  []string `json:"dataset_ids,omitempty"`
+	GroupID     string   `json:"group_id,omitempty"`
+	ImportToken string   `json:"import_token"`
+	TempPath    string   `json:"temp_path"`
+	FileName    string   `json:"file_name"`
+	FileType    string   `json:"file_type"`
+	TotalRows   int64    `json:"total_rows"`
+	ValidRows   int64    `json:"valid_rows"`
 }
 
 type importJobResult struct {
@@ -151,12 +151,16 @@ func decodeImportJobPayload(raw json.RawMessage) (EvalSetImportJobPayload, error
 	}
 	payload.Mode = strings.TrimSpace(payload.Mode)
 	payload.EvalSetID = strings.TrimSpace(payload.EvalSetID)
+	payload.DatasetIDs = normalizeDatasetIDs(payload.DatasetIDs)
 	payload.ImportToken = strings.TrimSpace(payload.ImportToken)
 	payload.TempPath = strings.TrimSpace(payload.TempPath)
 	if payload.Mode != importModeCreate && payload.Mode != importModeAppend {
 		return payload, errors.New("invalid import mode")
 	}
 	if payload.EvalSetID == "" || payload.ImportToken == "" || payload.TempPath == "" || payload.ValidRows < 0 {
+		return payload, errors.New("invalid import payload")
+	}
+	if payload.Mode == importModeCreate && len(payload.DatasetIDs) == 0 {
 		return payload, errors.New("invalid import payload")
 	}
 	return payload, nil
@@ -200,7 +204,7 @@ func prepareImportTarget(ctx context.Context, tx *gorm.DB, payload EvalSetImport
 			ID:             payload.EvalSetID,
 			Name:           payload.Name,
 			Description:    payload.Description,
-			DatasetID:      payload.DatasetID,
+			DatasetIDs:     datasetIDsJSON(payload.DatasetIDs),
 			OwnerID:        job.CreateUserID,
 			GroupID:        payload.GroupID,
 			ShardID:        shard.ID,

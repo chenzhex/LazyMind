@@ -3,25 +3,25 @@ package evalset
 import "time"
 
 type CreateEvalSetRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	DatasetID   string `json:"dataset_id"`
-	GroupID     string `json:"group_id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	DatasetIDs  []string `json:"dataset_ids"`
+	GroupID     string   `json:"group_id"`
 }
 
 type UpdateEvalSetRequest struct {
-	Name        *string `json:"name"`
-	Description *string `json:"description"`
-	DatasetID   *string `json:"dataset_id"`
-	GroupID     *string `json:"group_id"`
+	Name        *string   `json:"name"`
+	Description *string   `json:"description"`
+	DatasetIDs  *[]string `json:"dataset_ids"`
+	GroupID     *string   `json:"group_id"`
 }
 
 type EvalSetResponse struct {
 	ID            string    `json:"id"`
 	Name          string    `json:"name"`
 	Description   string    `json:"description"`
-	DatasetID     string    `json:"dataset_id"`
-	DatasetName   string    `json:"dataset_name"`
+	DatasetIDs    []string  `json:"dataset_ids"`
+	DatasetNames  []string  `json:"dataset_names"`
 	GroupID       string    `json:"group_id"`
 	ShardID       string    `json:"shard_id"`
 	ItemCount     int64     `json:"item_count"`
@@ -40,10 +40,10 @@ type ListEvalSetsResponse struct {
 }
 
 type ListEvalSetsQuery struct {
-	Keyword   string `query:"keyword"`
-	DatasetID string `query:"dataset_id"`
-	Page      int    `query:"page"`
-	PageSize  int    `query:"page_size"`
+	Keyword    string   `query:"keyword"`
+	DatasetIDs []string `query:"dataset_ids"`
+	Page       int      `query:"page"`
+	PageSize   int      `query:"page_size"`
 }
 
 type EvalSetPathParams struct {

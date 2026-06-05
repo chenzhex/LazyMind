@@ -27,7 +27,7 @@ func NewService(db *gorm.DB) *Service {
 
 func (s *Service) List(ctx context.Context, userID string, groupIDs []string, filter ListFilter) (*ListEvalSetsResponse, error) {
 	filter.Keyword = strings.TrimSpace(filter.Keyword)
-	filter.DatasetID = strings.TrimSpace(filter.DatasetID)
+	filter.DatasetIDs = normalizeDatasetIDs(filter.DatasetIDs)
 	if filter.Page < 1 {
 		filter.Page = 1
 	}
@@ -57,7 +57,7 @@ func (s *Service) List(ctx context.Context, userID string, groupIDs []string, fi
 func (s *Service) Create(ctx context.Context, req CreateEvalSetRequest, userID, userName string) (*EvalSetResponse, error) {
 	req.Name = strings.TrimSpace(req.Name)
 	req.Description = strings.TrimSpace(req.Description)
-	req.DatasetID = strings.TrimSpace(req.DatasetID)
+	req.DatasetIDs = normalizeDatasetIDs(req.DatasetIDs)
 	req.GroupID = strings.TrimSpace(req.GroupID)
 	if err := validateCreateRequest(req); err != nil {
 		return nil, err
@@ -67,8 +67,9 @@ func (s *Service) Create(ctx context.Context, req CreateEvalSetRequest, userID, 
 	if err != nil {
 		return nil, err
 	}
-	names, _ := s.repo.DatasetNames(ctx, []string{row.DatasetID})
-	return evalSetResponse(row, names[row.DatasetID], []string{acl.PermissionEvalSetRead, acl.PermissionEvalSetWrite}), nil
+	datasetIDs := parseDatasetIDsJSON(row.DatasetIDs)
+	names, _ := s.repo.DatasetNames(ctx, datasetIDs)
+	return evalSetResponse(row, names, []string{acl.PermissionEvalSetRead, acl.PermissionEvalSetWrite}), nil
 }
 
 func (s *Service) Get(ctx context.Context, id, userID string, groupIDs []string) (*EvalSetResponse, error) {
@@ -83,8 +84,9 @@ func (s *Service) Get(ctx context.Context, id, userID string, groupIDs []string)
 	if !hasPermission(perms, acl.PermissionEvalSetRead) && !hasPermission(perms, acl.PermissionEvalSetWrite) {
 		return nil, errForbidden
 	}
-	names, _ := s.repo.DatasetNames(ctx, []string{row.DatasetID})
-	return evalSetResponse(row, names[row.DatasetID], normalizedEvalSetPermissions(perms)), nil
+	datasetIDs := parseDatasetIDsJSON(row.DatasetIDs)
+	names, _ := s.repo.DatasetNames(ctx, datasetIDs)
+	return evalSetResponse(row, names, normalizedEvalSetPermissions(perms)), nil
 }
 
 func (s *Service) Update(ctx context.Context, id string, req UpdateEvalSetRequest, userID string, groupIDs []string) (*EvalSetResponse, error) {
@@ -108,8 +110,9 @@ func (s *Service) Update(ctx context.Context, id string, req UpdateEvalSetReques
 	if err != nil {
 		return nil, err
 	}
-	names, _ := s.repo.DatasetNames(ctx, []string{updated.DatasetID})
-	return evalSetResponse(updated, names[updated.DatasetID], evalSetPermissionsForUser(updated, userID, groupIDs)), nil
+	datasetIDs := parseDatasetIDsJSON(updated.DatasetIDs)
+	names, _ := s.repo.DatasetNames(ctx, datasetIDs)
+	return evalSetResponse(updated, names, evalSetPermissionsForUser(updated, userID, groupIDs)), nil
 }
 
 func (s *Service) Delete(ctx context.Context, id, userID string, groupIDs []string) error {
@@ -158,18 +161,7 @@ func (s *Service) ListQuestionTypeOptions() QuestionTypeOptionsResponse {
 }
 
 func (s *Service) responsesForRows(ctx context.Context, rows []orm.EvalSet, userID string, groupIDs []string) ([]EvalSetResponse, error) {
-	datasetIDs := make([]string, 0, len(rows))
-	seen := map[string]struct{}{}
-	for _, row := range rows {
-		if row.DatasetID == "" {
-			continue
-		}
-		if _, ok := seen[row.DatasetID]; ok {
-			continue
-		}
-		seen[row.DatasetID] = struct{}{}
-		datasetIDs = append(datasetIDs, row.DatasetID)
-	}
+	datasetIDs := collectEvalSetDatasetIDs(rows)
 	names, err := s.repo.DatasetNames(ctx, datasetIDs)
 	if err != nil {
 		return nil, err
@@ -178,7 +170,7 @@ func (s *Service) responsesForRows(ctx context.Context, rows []orm.EvalSet, user
 	out := make([]EvalSetResponse, 0, len(rows))
 	for i := range rows {
 		row := rows[i]
-		out = append(out, *evalSetResponse(&row, names[row.DatasetID], evalSetPermissionsForUser(&row, userID, groupIDs)))
+		out = append(out, *evalSetResponse(&row, names, evalSetPermissionsForUser(&row, userID, groupIDs)))
 	}
 	return out, nil
 }
@@ -193,8 +185,8 @@ func validateCreateRequest(req CreateEvalSetRequest) error {
 	if utf8.RuneCountInString(req.Description) > 4096 {
 		return errors.New("description too long")
 	}
-	if utf8.RuneCountInString(req.DatasetID) > 255 {
-		return errors.New("dataset_id too long")
+	if err := validateDatasetIDs(req.DatasetIDs); err != nil {
+		return err
 	}
 	if utf8.RuneCountInString(req.GroupID) > 255 {
 		return errors.New("group_id too long")
@@ -203,7 +195,7 @@ func validateCreateRequest(req CreateEvalSetRequest) error {
 }
 
 func normalizeUpdateRequest(req UpdateEvalSetRequest) (EvalSetUpdate, error) {
-	if req.Name == nil && req.Description == nil && req.DatasetID == nil && req.GroupID == nil {
+	if req.Name == nil && req.Description == nil && req.DatasetIDs == nil && req.GroupID == nil {
 		return EvalSetUpdate{}, errors.New("at least one field required")
 	}
 
@@ -225,12 +217,12 @@ func normalizeUpdateRequest(req UpdateEvalSetRequest) (EvalSetUpdate, error) {
 		}
 		update.Description = &description
 	}
-	if req.DatasetID != nil {
-		datasetID := strings.TrimSpace(*req.DatasetID)
-		if utf8.RuneCountInString(datasetID) > 255 {
-			return EvalSetUpdate{}, errors.New("dataset_id too long")
+	if req.DatasetIDs != nil {
+		datasetIDs := normalizeDatasetIDs(*req.DatasetIDs)
+		if err := validateDatasetIDs(datasetIDs); err != nil {
+			return EvalSetUpdate{}, err
 		}
-		update.DatasetID = &datasetID
+		update.DatasetIDs = &datasetIDs
 	}
 	if req.GroupID != nil {
 		groupID := strings.TrimSpace(*req.GroupID)
@@ -291,13 +283,26 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
-func evalSetResponse(row *orm.EvalSet, datasetName string, permissions []string) *EvalSetResponse {
+func validateDatasetIDs(datasetIDs []string) error {
+	if len(datasetIDs) == 0 {
+		return errors.New("dataset_ids required")
+	}
+	for _, id := range datasetIDs {
+		if utf8.RuneCountInString(id) > 255 {
+			return errors.New("dataset_ids too long")
+		}
+	}
+	return nil
+}
+
+func evalSetResponse(row *orm.EvalSet, datasetNames map[string]string, permissions []string) *EvalSetResponse {
+	datasetIDs := parseDatasetIDsJSON(row.DatasetIDs)
 	return &EvalSetResponse{
 		ID:            row.ID,
 		Name:          row.Name,
 		Description:   row.Description,
-		DatasetID:     row.DatasetID,
-		DatasetName:   datasetName,
+		DatasetIDs:    datasetIDs,
+		DatasetNames:  datasetNamesForIDs(datasetIDs, datasetNames),
 		GroupID:       row.GroupID,
 		ShardID:       row.ShardID,
 		ItemCount:     row.ItemCount,

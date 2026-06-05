@@ -54,11 +54,11 @@ type ImportValidationErrorResponse struct {
 }
 
 type CreateEvalSetByImportRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	DatasetID   string `json:"dataset_id"`
-	GroupID     string `json:"group_id"`
-	ImportToken string `json:"import_token"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	DatasetIDs  []string `json:"dataset_ids"`
+	GroupID     string   `json:"group_id"`
+	ImportToken string   `json:"import_token"`
 }
 
 type CreateEvalSetByImportResponse struct {
@@ -81,6 +81,8 @@ type EvalSetImportTaskPathParams struct {
 type EvalSetImportTaskResponse struct {
 	ID              string                        `json:"id"`
 	EvalSetID       string                        `json:"eval_set_id"`
+	DatasetIDs      []string                      `json:"dataset_ids"`
+	DatasetNames    []string                      `json:"dataset_names"`
 	Status          string                        `json:"status"`
 	FileName        string                        `json:"file_name"`
 	FileType        string                        `json:"file_type"`

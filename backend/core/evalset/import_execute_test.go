@@ -26,7 +26,7 @@ func TestCreateImportAPIEnqueuesWithoutCreatingEvalSet(t *testing.T) {
 		{Question: "q", GroundTruth: "a", QuestionType: "1"},
 	}, true)
 
-	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"cases","description":"desc","dataset_id":"dataset_1","group_id":"group_1","import_token":"import_tmp_create_api"}`, "user_1")
+	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"cases","description":"desc","dataset_ids":["dataset_1","dataset_2"],"group_id":"group_1","import_token":"import_tmp_create_api"}`, "user_1")
 	CreateEvalSetByImport(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -70,7 +70,7 @@ func TestCreateImportWorkerCreatesEvalSetAndUploadItems(t *testing.T) {
 		{Question: "q2", GroundTruth: "a2", QuestionType: "2", IsDeleted: true},
 	}, true)
 
-	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"cases","description":"desc","dataset_id":"dataset_1","group_id":"group_1","import_token":"import_tmp_create_worker"}`, "user_1")
+	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"cases","description":"desc","dataset_ids":["dataset_1","dataset_2"],"group_id":"group_1","import_token":"import_tmp_create_worker"}`, "user_1")
 	CreateEvalSetByImport(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -83,7 +83,7 @@ func TestCreateImportWorkerCreatesEvalSetAndUploadItems(t *testing.T) {
 	if err := db.First(&evalSet, "id = ?", resp.EvalSetID).Error; err != nil {
 		t.Fatalf("query eval set: %v", err)
 	}
-	if evalSet.Status != StatusActive || evalSet.ItemCount != 2 || evalSet.Name != "cases" || evalSet.DatasetID != "dataset_1" {
+	if evalSet.Status != StatusActive || evalSet.ItemCount != 2 || evalSet.Name != "cases" || strings.Join(parseDatasetIDsJSON(evalSet.DatasetIDs), ",") != "dataset_1,dataset_2" {
 		t.Fatalf("unexpected eval set: %#v", evalSet)
 	}
 
@@ -118,7 +118,7 @@ func TestCreateImportWorkerAllowsZeroValidRows(t *testing.T) {
 	withTempImportDir(t)
 	seedImportPreviewRows(t, db, "import_tmp_zero_valid", "user_1", importFileTypeCSV, []ImportNormalizedRow{}, true)
 
-	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"empty valid cases","import_token":"import_tmp_zero_valid"}`, "user_1")
+	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"empty valid cases","dataset_ids":["dataset_1"],"import_token":"import_tmp_zero_valid"}`, "user_1")
 	CreateEvalSetByImport(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -199,7 +199,7 @@ func TestCreateImportBatchInsertFailureRollsBackAllRowsAndEvalSet(t *testing.T) 
 	}, true)
 	registerFailEvalSetItemCreateCallback(t, db)
 
-	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"cases","import_token":"import_tmp_insert_fail"}`, "user_1")
+	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"cases","dataset_ids":["dataset_1"],"import_token":"import_tmp_insert_fail"}`, "user_1")
 	CreateEvalSetByImport(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -230,7 +230,7 @@ func TestCreateImportMissingTempFileFailsWithoutFormalWrites(t *testing.T) {
 		{Question: "q", GroundTruth: "a", QuestionType: "1"},
 	}, false)
 
-	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"cases","import_token":"import_tmp_missing_temp"}`, "user_1")
+	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets:import", `{"name":"cases","dataset_ids":["dataset_1"],"import_token":"import_tmp_missing_temp"}`, "user_1")
 	CreateEvalSetByImport(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())

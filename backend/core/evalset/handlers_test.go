@@ -58,11 +58,15 @@ func seedEvalSetShard(t *testing.T, db *orm.DB, id string, actualRows, estimated
 
 func seedEvalSet(t *testing.T, db *orm.DB, id, ownerID, groupID, datasetID string, updatedAt time.Time) orm.EvalSet {
 	t.Helper()
+	datasetIDs := []string{"dataset_default"}
+	if strings.TrimSpace(datasetID) != "" {
+		datasetIDs = strings.Split(datasetID, ",")
+	}
 	row := orm.EvalSet{
 		ID:             id,
 		Name:           id,
 		Description:    "description " + id,
-		DatasetID:      datasetID,
+		DatasetIDs:     datasetIDsJSON(datasetIDs),
 		OwnerID:        ownerID,
 		GroupID:        groupID,
 		ShardID:        DefaultShardID,
@@ -123,7 +127,7 @@ func TestCreateEvalSetRequiresUser(t *testing.T) {
 func TestCreateEvalSetWritesOwnerACL(t *testing.T) {
 	db := newEvalSetTestDB(t)
 
-	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets", `{"name":"cases","description":"desc","dataset_id":"dataset_1","group_id":"group_1"}`, "owner_1")
+	rec, req := requestWithUser(http.MethodPost, "/api/core/eval-sets", `{"name":"cases","description":"desc","dataset_ids":["dataset_1","dataset_2"],"group_id":"group_1"}`, "owner_1")
 	CreateEvalSet(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -135,6 +139,9 @@ func TestCreateEvalSetWritesOwnerACL(t *testing.T) {
 	}
 	if resp.ShardID == "" {
 		t.Fatalf("expected non-empty shard_id")
+	}
+	if strings.Join(resp.DatasetIDs, ",") != "dataset_1,dataset_2" {
+		t.Fatalf("unexpected dataset_ids: %#v", resp.DatasetIDs)
 	}
 
 	var ownerRows []orm.ACLModel
@@ -192,6 +199,34 @@ func TestListEvalSetsOnlyReturnsAccessibleRows(t *testing.T) {
 	}
 }
 
+func TestListEvalSetsFiltersByAnyDatasetID(t *testing.T) {
+	db := newEvalSetTestDB(t)
+	now := time.Now().UTC()
+	seedEvalSet(t, db, "eval_set_match_a", "user_1", "", "dataset_a,dataset_b", now)
+	seedEvalSet(t, db, "eval_set_match_b", "user_1", "", "dataset_c,dataset_d", now.Add(-time.Minute))
+	seedEvalSet(t, db, "eval_set_skip", "user_1", "", "dataset_e", now.Add(-2*time.Minute))
+
+	rec, req := requestWithUser(http.MethodGet, "/api/core/eval-sets?dataset_ids=dataset_b,dataset_d&page=1&page_size=10", "", "user_1")
+	ListEvalSets(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeOKData[ListEvalSetsResponse](t, rec)
+	got := make([]string, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		got = append(got, item.ID)
+	}
+	sort.Strings(got)
+	want := []string{"eval_set_match_a", "eval_set_match_b"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected ids %v, got %v", want, got)
+	}
+	if resp.Total != int64(len(want)) {
+		t.Fatalf("expected total %d, got %d", len(want), resp.Total)
+	}
+}
+
 func TestGetEvalSetForbiddenWithoutPermission(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	seedEvalSet(t, db, "eval_set_private", "owner_1", "", "", time.Now().UTC())
@@ -209,7 +244,7 @@ func TestUpdateEvalSetMetadata(t *testing.T) {
 	db := newEvalSetTestDB(t)
 	seedEvalSet(t, db, "eval_set_update", "user_1", "", "dataset_old", time.Now().UTC())
 
-	body := `{"name":"new name","description":"new desc","dataset_id":"dataset_new"}`
+	body := `{"name":"new name","description":"new desc","dataset_ids":["dataset_new","dataset_extra"]}`
 	rec, req := requestWithUser(http.MethodPatch, "/api/core/eval-sets/eval_set_update", body, "user_1")
 	req = mux.SetURLVars(req, map[string]string{"eval_set_id": "eval_set_update"})
 	UpdateEvalSet(rec, req)
@@ -218,7 +253,7 @@ func TestUpdateEvalSetMetadata(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	resp := decodeOKData[EvalSetResponse](t, rec)
-	if resp.Name != "new name" || resp.Description != "new desc" || resp.DatasetID != "dataset_new" {
+	if resp.Name != "new name" || resp.Description != "new desc" || strings.Join(resp.DatasetIDs, ",") != "dataset_new,dataset_extra" {
 		t.Fatalf("unexpected response: %#v", resp)
 	}
 
@@ -226,7 +261,7 @@ func TestUpdateEvalSetMetadata(t *testing.T) {
 	if err := db.First(&row, "id = ?", "eval_set_update").Error; err != nil {
 		t.Fatalf("query updated eval set: %v", err)
 	}
-	if row.Name != "new name" || row.Description != "new desc" || row.DatasetID != "dataset_new" {
+	if row.Name != "new name" || row.Description != "new desc" || strings.Join(parseDatasetIDsJSON(row.DatasetIDs), ",") != "dataset_new,dataset_extra" {
 		t.Fatalf("unexpected row: %#v", row)
 	}
 }

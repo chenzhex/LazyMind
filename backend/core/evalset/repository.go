@@ -18,16 +18,16 @@ type Repository struct {
 }
 
 type ListFilter struct {
-	Keyword   string
-	DatasetID string
-	Page      int
-	PageSize  int
+	Keyword    string
+	DatasetIDs []string
+	Page       int
+	PageSize   int
 }
 
 type EvalSetUpdate struct {
 	Name        *string
 	Description *string
-	DatasetID   *string
+	DatasetIDs  *[]string
 	GroupID     *string
 }
 
@@ -58,21 +58,23 @@ func (r *Repository) List(ctx context.Context, userID string, groupIDs []string,
 		like := "%" + filter.Keyword + "%"
 		q = q.Where("(name LIKE ? OR description LIKE ?)", like, like)
 	}
-	if filter.DatasetID != "" {
-		q = q.Where("dataset_id = ?", filter.DatasetID)
-	}
-
-	var total int64
-	if err := q.Count(&total).Error; err != nil {
+	var rows []orm.EvalSet
+	if err := q.Order("updated_at DESC").Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
-
-	var rows []orm.EvalSet
-	err = q.Order("updated_at DESC").
-		Offset((filter.Page - 1) * filter.PageSize).
-		Limit(filter.PageSize).
-		Find(&rows).Error
-	return rows, total, err
+	if len(filter.DatasetIDs) > 0 {
+		rows = filterRowsByDatasetIDs(rows, filter.DatasetIDs)
+	}
+	total := int64(len(rows))
+	start := (filter.Page - 1) * filter.PageSize
+	if start >= len(rows) {
+		return []orm.EvalSet{}, total, nil
+	}
+	end := start + filter.PageSize
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return rows[start:end], total, nil
 }
 
 func (r *Repository) accessibleEvalSetIDs(ctx context.Context, userID string, groupIDs []string) ([]string, error) {
@@ -122,7 +124,7 @@ func (r *Repository) Create(ctx context.Context, req CreateEvalSetRequest, userI
 			ID:             newEvalSetID(),
 			Name:           req.Name,
 			Description:    req.Description,
-			DatasetID:      req.DatasetID,
+			DatasetIDs:     datasetIDsJSON(req.DatasetIDs),
 			OwnerID:        userID,
 			GroupID:        req.GroupID,
 			ShardID:        shard.ID,
@@ -204,8 +206,8 @@ func (r *Repository) Update(ctx context.Context, id string, update EvalSetUpdate
 		if update.Description != nil {
 			values["description"] = *update.Description
 		}
-		if update.DatasetID != nil {
-			values["dataset_id"] = *update.DatasetID
+		if update.DatasetIDs != nil {
+			values["dataset_ids"] = datasetIDsJSON(*update.DatasetIDs)
 		}
 		if update.GroupID != nil {
 			values["group_id"] = *update.GroupID

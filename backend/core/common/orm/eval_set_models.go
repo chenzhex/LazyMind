@@ -1,21 +1,24 @@
 package orm
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type EvalSet struct {
-	ID             string    `gorm:"column:id;type:varchar(64);primaryKey"`
-	Name           string    `gorm:"column:name;type:varchar(255);not null"`
-	Description    string    `gorm:"column:description;type:text;not null;default:''"`
-	DatasetID      string    `gorm:"column:dataset_id;type:varchar(255);not null;default:'';index"`
-	OwnerID        string    `gorm:"column:owner_id;type:varchar(255);not null;index"`
-	GroupID        string    `gorm:"column:group_id;type:varchar(255);not null;default:'';index"`
-	ShardID        string    `gorm:"column:shard_id;type:varchar(64);not null;index"`
-	Status         string    `gorm:"column:status;type:varchar(32);not null;default:'active';index"`
-	ItemCount      int64     `gorm:"column:item_count;not null;default:0"`
-	CreateUserID   string    `gorm:"column:create_user_id;type:varchar(255);not null"`
-	CreateUserName string    `gorm:"column:create_user_name;type:varchar(255);not null;default:''"`
-	CreatedAt      time.Time `gorm:"column:created_at;not null"`
-	UpdatedAt      time.Time `gorm:"column:updated_at;not null"`
+	ID             string          `gorm:"column:id;type:varchar(64);primaryKey"`
+	Name           string          `gorm:"column:name;type:varchar(255);not null"`
+	Description    string          `gorm:"column:description;type:text;not null;default:''"`
+	DatasetIDs     json.RawMessage `gorm:"column:dataset_ids;type:jsonb;not null;default:'[]'"`
+	OwnerID        string          `gorm:"column:owner_id;type:varchar(255);not null;index"`
+	GroupID        string          `gorm:"column:group_id;type:varchar(255);not null;default:'';index"`
+	ShardID        string          `gorm:"column:shard_id;type:varchar(64);not null;index"`
+	Status         string          `gorm:"column:status;type:varchar(32);not null;default:'active';index"`
+	ItemCount      int64           `gorm:"column:item_count;not null;default:0"`
+	CreateUserID   string          `gorm:"column:create_user_id;type:varchar(255);not null"`
+	CreateUserName string          `gorm:"column:create_user_name;type:varchar(255);not null;default:''"`
+	CreatedAt      time.Time       `gorm:"column:created_at;not null"`
+	UpdatedAt      time.Time       `gorm:"column:updated_at;not null"`
 }
 
 func (EvalSet) TableName() string { return "eval_sets" }

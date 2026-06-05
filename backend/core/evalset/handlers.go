@@ -28,10 +28,17 @@ func ListEvalSets(w http.ResponseWriter, r *http.Request) {
 	page := parsePositiveInt(query.Get("page"), 1)
 	pageSize := parsePositiveInt(query.Get("page_size"), 10)
 	resp, err := svc.List(r.Context(), userID, acl.ResolveUserGroupIDs(userID), ListFilter{
+<<<<<<< HEAD
 		Keyword:   query.Get("keyword"),
 		DatasetID: query.Get("dataset_id"),
 		Page:      page,
 		PageSize:  pageSize,
+=======
+		Keyword:    query.Get("keyword"),
+		DatasetIDs: parseDatasetIDsQuery(query),
+		Page:       page,
+		PageSize:   pageSize,
+>>>>>>> main
 	})
 	if err != nil {
 		common.ReplyErr(w, "list failed", http.StatusInternalServerError)
@@ -184,6 +191,19 @@ func parsePositiveInt(raw string, fallback int) int {
 	return v
 }
 
+<<<<<<< HEAD
+=======
+func parseDatasetIDsQuery(query map[string][]string) []string {
+	values := make([]string, 0)
+	for _, key := range []string{"dataset_ids", "dataset_ids[]"} {
+		for _, raw := range query[key] {
+			values = append(values, strings.Split(raw, ",")...)
+		}
+	}
+	return normalizeDatasetIDs(values)
+}
+
+>>>>>>> main
 func replyServiceError(w http.ResponseWriter, err error, fallback string) {
 	switch {
 	case errors.Is(err, errForbidden):

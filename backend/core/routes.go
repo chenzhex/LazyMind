@@ -60,6 +60,7 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "PATCH", "/datasets/{dataset}/documents/{document}", []string{"document.write"}, doc.UpdateDocument)
 	handleAPI(r, "POST", "/datasets/{dataset}/documents:search", []string{"document.read"}, doc.SearchDocuments)
 	handleAPI(r, "POST", "/datasets/{dataset}/documents:batchUpdateTags", []string{"document.write"}, doc.BatchUpdateDocumentTags)
+	handleAPI(r, "POST", "/documents:listByDatasets", []string{"document.read"}, doc.ListDocumentsByDatasets)
 	handleAPI(r, "POST", "/documents:search", []string{"document.read"}, doc.SearchAllDocuments)
 	handleAPI(r, "POST", "/datasets/{dataset}:batchDelete", []string{"document.write"}, doc.BatchDeleteDocument)
 	handleAPI(r, "GET", "/document/creators", []string{"document.read"}, doc.AllDocumentCreators)
@@ -234,6 +235,8 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/model_providers/{model_provider_id}/groups/{group_id}/models", []string{}, modelprovider.ListGroupModels)
 	handleAPI(r, "POST", "/model_providers/{model_provider_id}/groups/{group_id}/models", []string{}, modelprovider.AddGroupModel)
 	handleAPI(r, "DELETE", "/model_providers/{model_provider_id}/groups/{group_id}/models/{model_id}", []string{}, modelprovider.DeleteGroupModel)
+	handleAPI(r, "POST", "/model_providers/{model_provider_id}/groups/{group_id}/keys", []string{}, modelprovider.AddKey)
+	handleAPI(r, "DELETE", "/model_providers/{model_provider_id}/groups/{group_id}/keys", []string{}, modelprovider.RemoveKey)
 
 	// ----- Prompttext -----
 	handleAPI(r, "POST", "/prompts", []string{"document.write"}, chat.CreatePrompt)

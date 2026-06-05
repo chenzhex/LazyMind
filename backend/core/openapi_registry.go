@@ -1373,6 +1373,14 @@ func registeredCoreOperations() []openAPIOperation {
 		},
 		{
 			Method:      "POST",
+			Path:        "/documents:listByDatasets",
+			Summary:     "List documents by datasets",
+			Tags:        []string{"documents"},
+			RequestBody: jsonBodyOf(doc.ListDatasetDocumentsRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Dataset document list", doc.ListDocumentsResponse{})},
+		},
+		{
+			Method:      "POST",
 			Path:        "/documents:search",
 			Summary:     "textSearch documents",
 			Tags:        []string{"documents"},
