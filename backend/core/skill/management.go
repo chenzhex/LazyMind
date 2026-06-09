@@ -18,6 +18,7 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
 	appLog "lazymind/core/log"
+	"lazymind/core/resourceupdate"
 	"lazymind/core/store"
 )
 
@@ -1128,6 +1129,7 @@ func deleteChildSkill(ctx context.Context, db *gorm.DB, row *orm.SkillResource) 
 
 func enableParentSkillAutoEvoWithDiscardedDraft(ctx context.Context, db *gorm.DB, row *orm.SkillResource) error {
 	now := time.Now()
+	wasAutoEvo := row.AutoEvo
 	update := map[string]any{
 		"auto_evo":              true,
 		"auto_evo_generation":   gorm.Expr("auto_evo_generation + 1"),
@@ -1155,6 +1157,19 @@ func enableParentSkillAutoEvoWithDiscardedDraft(ctx context.Context, db *gorm.DB
 	}
 	if err := ensureSkillAutoEvolutionScheduled(refreshed); err != nil {
 		appLog.Logger.Warn().Err(err).Str("skill_id", row.ID).Msg("auto_evo schedule on PATCH failed")
+	}
+	if !wasAutoEvo {
+		if err := resourceupdate.ScanPendingResultsForResource(ctx, db, orm.ResourceUpdateResourceTypeSkill, row.OwnerUserID, row.ID); err != nil {
+			appLog.Logger.Warn().Err(err).
+				Str("component", "resource_update").
+				Str("event", "resource_update.auto_evo_enabled.scan_failed").
+				Str("resource_type", orm.ResourceUpdateResourceTypeSkill).
+				Str("resource_id", row.ID).
+				Str("user_id", row.OwnerUserID).
+				Str("skill_id", row.ID).
+				Str("reason", "auto_evo_enabled_scan_failed").
+				Msg("resource update scan on PATCH failed")
+		}
 	}
 	return nil
 }
@@ -1303,6 +1318,7 @@ func updateParentSkill(ctx context.Context, db *gorm.DB, userID, userName string
 		}
 	}
 
+	enabledAutoEvo := req.AutoEvo != nil && *req.AutoEvo && !row.AutoEvo
 	if req.AutoEvo != nil {
 		var refreshed orm.SkillResource
 		if err := db.WithContext(ctx).Where("id = ?", row.ID).Take(&refreshed).Error; err != nil {
@@ -1312,6 +1328,19 @@ func updateParentSkill(ctx context.Context, db *gorm.DB, userID, userName string
 			if err := ensureSkillAutoEvolutionScheduled(refreshed); err != nil {
 				appLog.Logger.Warn().Err(err).Str("skill_id", row.ID).Msg("auto_evo schedule on PATCH failed")
 			}
+		}
+	}
+	if enabledAutoEvo {
+		if err := resourceupdate.ScanPendingResultsForResource(ctx, db, orm.ResourceUpdateResourceTypeSkill, userID, row.ID); err != nil {
+			appLog.Logger.Warn().Err(err).
+				Str("component", "resource_update").
+				Str("event", "resource_update.auto_evo_enabled.scan_failed").
+				Str("resource_type", orm.ResourceUpdateResourceTypeSkill).
+				Str("resource_id", row.ID).
+				Str("user_id", userID).
+				Str("skill_id", row.ID).
+				Str("reason", "auto_evo_enabled_scan_failed").
+				Msg("resource update scan on PATCH failed")
 		}
 	}
 
@@ -1438,6 +1467,7 @@ func updateChildSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.
 		return err
 	}
 
+	enabledAutoEvo := req.AutoEvo != nil && *req.AutoEvo && !row.AutoEvo
 	if req.AutoEvo != nil {
 		var refreshed orm.SkillResource
 		if err := db.WithContext(ctx).Where("id = ?", row.ID).Take(&refreshed).Error; err != nil {
@@ -1447,6 +1477,19 @@ func updateChildSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.
 			if err := ensureSkillAutoEvolutionScheduled(refreshed); err != nil {
 				appLog.Logger.Warn().Err(err).Str("skill_id", row.ID).Msg("auto_evo schedule on PATCH failed for child skill")
 			}
+		}
+	}
+	if enabledAutoEvo {
+		if err := resourceupdate.ScanPendingResultsForResource(ctx, db, orm.ResourceUpdateResourceTypeSkill, userID, row.ID); err != nil {
+			appLog.Logger.Warn().Err(err).
+				Str("component", "resource_update").
+				Str("event", "resource_update.auto_evo_enabled.scan_failed").
+				Str("resource_type", orm.ResourceUpdateResourceTypeSkill).
+				Str("resource_id", row.ID).
+				Str("user_id", userID).
+				Str("skill_id", row.ID).
+				Str("reason", "auto_evo_enabled_scan_failed").
+				Msg("resource update scan on PATCH failed for child skill")
 		}
 	}
 

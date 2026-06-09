@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -191,6 +192,81 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 	} {
 		if got, ok := historyParamNames[want.name]; !ok || got != want.inVal {
 			t.Fatalf("expected history parameter %q in %q, got %q (%v)", want.name, want.inVal, got, historyParamNames)
+		}
+	}
+}
+
+func TestOpenAPISpecCoversPlan2ResourceUpdateOperations(t *testing.T) {
+	r := mux.NewRouter()
+	registerAllRoutes(r)
+
+	specJSON, err := buildOpenAPISpecFromRouter(r)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	if strings.Contains(string(specJSON), "async_job_id") {
+		t.Fatalf("Plan2 OpenAPI spec must not contain async_job_id")
+	}
+
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	paths, ok := spec["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("paths missing in openapi spec")
+	}
+
+	cases := []struct {
+		method        string
+		path          string
+		expectParams  bool
+		expectRequest bool
+	}{
+		{"get", "/api/core/evolution/tasks", true, false},
+		{"get", "/api/core/evolution/tasks/{task_id}", true, false},
+		{"get", "/api/core/skill-review-results", true, false},
+		{"get", "/api/core/skill-review-results/{review_result_id}", true, false},
+		{"post", "/api/core/skill-review-results/{review_result_id}:accept", true, false},
+		{"post", "/api/core/skill-review-results/{review_result_id}:reject", true, false},
+		{"get", "/api/core/memory-review-results", true, false},
+		{"get", "/api/core/memory-review-results/{review_result_id}", true, false},
+		{"post", "/api/core/memory-review-results/{review_result_id}:accept", true, false},
+		{"post", "/api/core/memory-review-results/{review_result_id}:reject", true, false},
+	}
+	for _, tc := range cases {
+		pathItem, ok := paths[tc.path].(map[string]any)
+		if !ok {
+			t.Fatalf("path missing from openapi spec: %s", tc.path)
+		}
+		op, ok := pathItem[tc.method].(map[string]any)
+		if !ok {
+			t.Fatalf("operation missing from openapi spec: %s %s", tc.method, tc.path)
+		}
+		if tc.expectParams {
+			params, ok := op["parameters"].([]any)
+			if !ok || len(params) == 0 {
+				t.Fatalf("parameters missing for %s %s", tc.method, tc.path)
+			}
+		}
+		if tc.expectRequest {
+			if _, ok := op["requestBody"].(map[string]any); !ok {
+				t.Fatalf("requestBody missing for %s %s", tc.method, tc.path)
+			}
+		} else if _, ok := op["requestBody"]; ok {
+			t.Fatalf("Plan2 accept/reject/list/detail operation must not require requestBody: %s %s", tc.method, tc.path)
+		}
+		responses, ok := op["responses"].(map[string]any)
+		if !ok {
+			t.Fatalf("responses missing for %s %s", tc.method, tc.path)
+		}
+		resp200, ok := responses["200"].(map[string]any)
+		if !ok {
+			t.Fatalf("200 response missing for %s %s", tc.method, tc.path)
+		}
+		content, ok := resp200["content"].(map[string]any)
+		if !ok || len(content) == 0 {
+			t.Fatalf("response schema missing for %s %s", tc.method, tc.path)
 		}
 	}
 }

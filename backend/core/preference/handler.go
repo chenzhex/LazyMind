@@ -15,6 +15,7 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
 	appLog "lazymind/core/log"
+	"lazymind/core/resourceupdate"
 	"lazymind/core/store"
 )
 
@@ -267,6 +268,20 @@ func Upsert(w http.ResponseWriter, r *http.Request) {
 	if req.AutoEvo != nil && *req.AutoEvo {
 		if err := evolution.EnsureManagedPreferenceAutoEvolutionScheduled(*row); err != nil {
 			appLog.Logger.Warn().Err(err).Str("route", "/user-preference").Msg("auto_evo schedule on upsert failed")
+		}
+		if existing != nil && !existing.AutoEvo {
+			if err := resourceupdate.ScanPendingResultsForResource(r.Context(), db, orm.ResourceUpdateResourceTypeUserPreference, userID, row.ID); err != nil {
+				appLog.Logger.Warn().Err(err).
+					Str("component", "resource_update").
+					Str("event", "resource_update.auto_evo_enabled.scan_failed").
+					Str("resource_type", orm.ResourceUpdateResourceTypeUserPreference).
+					Str("resource_id", row.ID).
+					Str("route", "/user-preference").
+					Str("user_id", userID).
+					Str("preference_id", row.ID).
+					Str("reason", "auto_evo_enabled_scan_failed").
+					Msg("resource update scan on upsert failed")
+			}
 		}
 	}
 

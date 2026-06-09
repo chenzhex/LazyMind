@@ -32,3 +32,10 @@ func stripThinkTags(text string) string {
 func buildAssistantHistoryContent(history orm.ChatHistory) string {
 	return history.Result
 }
+
+func countToolCallTurns(text string) int {
+	if text == "" {
+		return 0
+	}
+	return len(toolCallTagPattern.FindAllString(text, -1))
+}

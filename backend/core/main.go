@@ -21,6 +21,7 @@ import (
 	"lazymind/core/log"
 	"lazymind/core/migrate"
 	"lazymind/core/modelprovider"
+	"lazymind/core/resourceupdate"
 	"lazymind/core/store"
 	"lazymind/core/wordgroup"
 )
@@ -143,6 +144,11 @@ func main() {
 	})
 	importConfig := evalset.LoadImportRuntimeConfigFromEnv()
 	evalset.StartImportPreviewCleanup(context.Background(), store.DB(), importConfig.CleanupInterval)
+	resourceUpdateEnabled := resourceupdate.EnabledFromEnv()
+	resourceupdate.LogStartup(resourceUpdateEnabled)
+	if resourceUpdateEnabled {
+		resourceupdate.Start(context.Background(), store.DB(), store.Redis(), resourceupdate.DefaultConfig())
+	}
 
 	r := mux.NewRouter()
 	r.UseEncodedPath()

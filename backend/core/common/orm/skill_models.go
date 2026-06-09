@@ -7,11 +7,11 @@ import (
 
 type SkillResource struct {
 	ID                 string          `gorm:"column:id;type:varchar(36);primaryKey"`
-	OwnerUserID        string          `gorm:"column:owner_user_id;type:varchar(255);not null;index:idx_skill_resources_owner_node_enabled,priority:1;uniqueIndex:uk_skill_resources_owner_relative_path,priority:1"`
+	OwnerUserID        string          `gorm:"column:owner_user_id;type:varchar(255);not null;index:idx_skill_resources_owner_node_enabled,priority:1;uniqueIndex:uk_skill_resources_owner_relative_path,priority:1;uniqueIndex:uniq_skill_resources_owner_parent_skill_name,priority:1,where:node_type = 'parent'"`
 	OwnerUserName      string          `gorm:"column:owner_user_name;type:varchar(255);not null;default:''"`
 	Category           string          `gorm:"column:category;type:varchar(128);not null;index:idx_skill_resources_owner_node_enabled,priority:4"`
 	ParentSkillName    string          `gorm:"column:parent_skill_name;type:varchar(255);not null;default:''"`
-	SkillName          string          `gorm:"column:skill_name;type:varchar(255);not null;default:''"`
+	SkillName          string          `gorm:"column:skill_name;type:varchar(255);not null;default:'';uniqueIndex:uniq_skill_resources_owner_parent_skill_name,priority:2,where:node_type = 'parent'"`
 	NodeType           string          `gorm:"column:node_type;type:varchar(32);not null;index:idx_skill_resources_owner_node_enabled,priority:2"`
 	Description        string          `gorm:"column:description;type:text"`
 	Tags               json.RawMessage `gorm:"column:tags;type:json"`

@@ -1105,6 +1105,7 @@ func SetChatHistory(w http.ResponseWriter, r *http.Request) {
 			RetrievalResult: selected.RetrievalResult,
 			Content:         selected.Content,
 			Result:          selected.Result,
+			ToolCallTurns:   countToolCallTurns(selected.Result),
 			FeedBack:        selected.FeedBack,
 			Reason:          selected.Reason,
 			Ext:             selected.Ext,
@@ -1115,6 +1116,7 @@ func SetChatHistory(w http.ResponseWriter, r *http.Request) {
 			common.ReplyErr(w, fmt.Sprintf("%s: %v", "set history failed", err), http.StatusInternalServerError)
 			return
 		}
+		recordConversationIdleAfterPersist(context.Background(), db, store.Redis(), selected.ConversationID, userID, selected.ID, now, selected.RawContent, stripToolTags(selected.Result))
 	}
 
 	_ = db.Where("id IN ?", []string{body.SetHistoryID, body.DeletedHistoryID}).Delete(&orm.MultiAnswersChatHistory{}).Error

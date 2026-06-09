@@ -120,6 +120,7 @@ type ChatHistory struct {
 	ExpectedAnswer  string          `gorm:"column:expected_answer;type:text"`
 	Ext             json.RawMessage `gorm:"column:ext;type:json"`
 	Version         string          `gorm:"column:version;type:varchar(128);default:2.3"`
+	ToolCallTurns   int             `gorm:"column:tool_call_turns;not null;default:0;check:chk_chat_histories_tool_call_turns_non_negative,tool_call_turns >= 0"`
 
 	TimeMixin
 }

@@ -17,6 +17,8 @@ import (
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
+	"lazymind/core/log"
+	"lazymind/core/resourceupdate"
 )
 
 const (
@@ -28,6 +30,27 @@ const (
 
 func shouldEmitStreamFrame(delta string, sources []any) bool {
 	return delta != "" || len(sources) > 0
+}
+
+func userIDFromChatRequestBody(reqBody map[string]any) string {
+	userID, _ := reqBody["user_id"].(string)
+	return strings.TrimSpace(userID)
+}
+
+func recordConversationIdleAfterPersist(ctx context.Context, db *gorm.DB, rdb *redis.Client, convID, userID, historyID string, at time.Time, query, answer string) {
+	if db == nil || rdb == nil {
+		return
+	}
+	if err := resourceupdate.RecordConversationIdleMessage(ctx, db, rdb, resourceupdate.ConversationIdleRecord{
+		SessionID:      convID,
+		UserID:         userID,
+		LastMessageID:  historyID,
+		LastActivityAt: at,
+		UserContent:    query,
+		AssistantText:  answer,
+	}); err != nil {
+		log.Logger.Warn().Err(err).Str("conversation_id", convID).Str("history_id", historyID).Msg("record conversation idle event failed")
+	}
 }
 
 func marshalRetrievalResult(sources []any) json.RawMessage {
@@ -551,6 +574,7 @@ func handleNonStreamChat(
 		RetrievalResult: retrievalResult,
 		Content:         query,
 		Result:          rawAnswer,
+		ToolCallTurns:   countToolCallTurns(rawAnswer),
 		FeedBack:        0,
 		Reason:          "",
 		ExpectedAnswer:  "",
@@ -564,6 +588,7 @@ func handleNonStreamChat(
 			"raw_content":      query,
 			"content":          query,
 			"result":           rawAnswer,
+			"tool_call_turns":  countToolCallTurns(rawAnswer),
 			"retrieval_result": retrievalResult,
 			"feed_back":        0,
 			"reason":           "",
@@ -586,6 +611,9 @@ func handleNonStreamChat(
 	db.Model(&orm.Conversation{}).Where("id = ?", convID).Update("updated_at", now)
 	if !target.IsRegeneration {
 		db.Model(&orm.Conversation{}).Where("id = ?", convID).UpdateColumn("chat_times", gorm.Expr("chat_times + ?", 1))
+	}
+	if !target.IsRegeneration {
+		recordConversationIdleAfterPersist(context.Background(), db, rdb, convID, userIDFromChatRequestBody(reqBody), historyID, now, query, answer)
 	}
 	common.ReplyOK(w, map[string]any{
 		"conversation_id": convID,
@@ -746,21 +774,27 @@ func streamSingleAnswer(
 	if pendingThink != "" {
 		fullResult += "<think>" + pendingThink + "</think>"
 	}
+	persisted := false
 	if target.IsRegeneration && target.Existing != nil {
-		_ = db.Model(&orm.ChatHistory{}).Where("id = ?", historyID).Updates(map[string]any{
+		if err := db.Model(&orm.ChatHistory{}).Where("id = ?", historyID).Updates(map[string]any{
 			"seq":              seq,
 			"raw_content":      query,
 			"content":          query,
 			"result":           fullResult,
+			"tool_call_turns":  countToolCallTurns(fullResult),
 			"retrieval_result": retrievalResult,
 			"feed_back":        0,
 			"reason":           "",
 			"expected_answer":  "",
 			"ext":              historyExt,
 			"update_time":      now,
-		}).Error
+		}).Error; err != nil {
+			log.Logger.Warn().Err(err).Str("conversation_id", convID).Str("history_id", historyID).Msg("failed to update stream chat history")
+		} else {
+			persisted = true
+		}
 	} else {
-		_ = db.Create(&orm.ChatHistory{
+		if err := db.Create(&orm.ChatHistory{
 			ID:              historyID,
 			Seq:             seq,
 			ConversationID:  convID,
@@ -768,16 +802,24 @@ func streamSingleAnswer(
 			RetrievalResult: retrievalResult,
 			Content:         query,
 			Result:          fullResult,
+			ToolCallTurns:   countToolCallTurns(fullResult),
 			Ext:             historyExt,
 			TimeMixin:       orm.TimeMixin{CreateTime: now, UpdateTime: now},
-		}).Error
+		}).Error; err != nil {
+			log.Logger.Warn().Err(err).Str("conversation_id", convID).Str("history_id", historyID).Msg("failed to save stream chat history")
+		} else {
+			persisted = true
+		}
 	}
 	if rdb != nil {
 		_ = setChatStatus(context.Background(), rdb, convID, historyID, "completed", stripToolTags(fullText))
 	}
-	db.Model(&orm.Conversation{}).Where("id = ?", convID).Update("updated_at", now)
-	if !target.IsRegeneration {
+	if persisted {
+		db.Model(&orm.Conversation{}).Where("id = ?", convID).Update("updated_at", now)
+	}
+	if persisted && !target.IsRegeneration {
 		db.Model(&orm.Conversation{}).Where("id = ?", convID).UpdateColumn("chat_times", gorm.Expr("chat_times + ?", 1))
+		recordConversationIdleAfterPersist(context.Background(), db, rdb, convID, userIDFromChatRequestBody(reqBody), historyID, now, query, stripToolTags(fullText))
 	}
 	if reqCtx.Err() == nil {
 		// text：message text，finish_reason text STOP
