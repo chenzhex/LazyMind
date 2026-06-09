@@ -215,10 +215,16 @@ func ChatConversations(w http.ResponseWriter, r *http.Request) {
 		reqBody["llm_config"] = llmConfig
 	}
 	var toolConfig map[string]any
-	if feishuToken, err := fetchFeishuToken(r.Context(), r, userID); err != nil {
-		fmt.Printf("[Core] [FEISHU_TOKEN] failed to fetch feishu token for user %s: %v\n", userID, err)
-	} else if feishuToken != "" {
-		toolConfig = mergeToolConfig(toolConfig, map[string]any{"feishu": feishuToken})
+	if feishuTokens, err := fetchFeishuTokens(r.Context(), userID); err != nil {
+		fmt.Printf("[Core] [FEISHU_TOKEN] failed to fetch feishu tokens for user %s: %v\n", userID, err)
+	} else if len(feishuTokens) > 0 {
+		var feishuValue any
+		if len(feishuTokens) == 1 {
+			feishuValue = feishuTokens[0]
+		} else {
+			feishuValue = feishuTokens
+		}
+		toolConfig = mergeToolConfig(toolConfig, map[string]any{"feishu": feishuValue})
 	}
 	if searchConfig, err := searchToolConfigEntry(r.Context(), db, userID); err != nil {
 		fmt.Printf("[Core] [SEARCH_TOOL_CONFIG] failed to load search tool config for user %s: %v\n", userID, err)

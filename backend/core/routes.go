@@ -166,6 +166,7 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "PUT", "/personalization-setting", []string{"qa.read"}, evolution.SetPersonalizationSetting)
 	handleAPI(r, "GET", "/skills", []string{"qa.read"}, skill.List)
 	handleAPI(r, "POST", "/skills", []string{"qa.read"}, skill.CreateManaged)
+	handleAPI(r, "POST", "/builtin-skills/{builtin_skill_uid}:enable", []string{"qa.read"}, skill.EnableBuiltinSkill)
 	handleAPI(r, "GET", "/skills/{skill_id}:shares", []string{"qa.read"}, skill.ListSkillShareTargets)
 	handleAPI(r, "GET", "/skill-shares/incoming", []string{"qa.read"}, skill.IncomingShares)
 	handleAPI(r, "GET", "/skill-shares/outgoing", []string{"qa.read"}, skill.OutgoingShares)
@@ -251,6 +252,7 @@ func registerAllRoutes(r *mux.Router) {
 
 	// ----- Prompttext -----
 	handleAPI(r, "POST", "/prompts", []string{"document.write"}, chat.CreatePrompt)
+	handleAPI(r, "POST", "/prompts:polish", []string{"qa.read"}, chat.PolishPrompt)
 	// :setDefault/:unsetDefault text {name} text，text :action text。
 	handleAPI(r, "POST", "/prompts/{name}:setDefault", []string{"document.write"}, chat.SetDefaultPrompt)
 	handleAPI(r, "POST", "/prompts/{name}:unsetDefault", []string{"document.write"}, chat.UnsetDefaultPrompt)

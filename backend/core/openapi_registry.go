@@ -767,8 +767,7 @@ type memoryReviewResultListOpenAPIResponse struct {
 }
 
 type skillGenerateOpenAPIRequest struct {
-	SuggestionIDs []string `json:"suggestion_ids"`
-	UserInstruct  string   `json:"user_instruct"`
+	UserInstruct string `json:"user_instruct"`
 }
 
 type skillGenerateOpenAPIResponse struct {
@@ -1144,10 +1143,9 @@ type personalizationSettingOpenAPIResponse struct {
 }
 
 type systemGenerateOpenAPIResponse struct {
-	DraftStatus        string   `json:"draft_status"`
-	DraftSourceVersion int64    `json:"draft_source_version"`
-	DraftContent       string   `json:"draft_content"`
-	SuggestionIDs      []string `json:"suggestion_ids"`
+	DraftStatus        string `json:"draft_status"`
+	DraftSourceVersion int64  `json:"draft_source_version"`
+	DraftContent       string `json:"draft_content"`
 }
 
 type systemDraftPreviewOpenAPIResponse struct {
