@@ -675,15 +675,18 @@ func TestSourceTreeAllCurrentLevelRejectsTooManyIndexedChildren(t *testing.T) {
 func TestSourceDocumentQueryReadsIndexedDocumentsOnly(t *testing.T) {
 	t.Parallel()
 
+	sourceModifiedAt := time.Date(2026, 5, 31, 15, 0, 0, 0, time.UTC)
+	parsedAt := time.Date(2026, 5, 31, 16, 0, 0, 0, time.UTC)
 	repo := newTreeReadRepo()
 	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
 	repo.bindings["source-1"] = []store.Binding{{BindingID: "binding-1", SourceID: "source-1"}}
 	object := indexedObject("source-1", "binding-1", "tree-root", "doc-1", "", "Welcome", true, false).Object
 	object.SizeBytes = 42
 	object.FileExtension = ".md"
+	object.ModifiedAt = &sourceModifiedAt
 	repo.documents = []DocumentWithState{{
 		Object: object,
-		State:  store.DocumentState{SourceID: "source-1", BindingID: "binding-1", ObjectKey: "doc-1", SourceState: "NEW", SyncState: "IDLE", Selectable: true, SourceVersion: "v1"},
+		State:  store.DocumentState{SourceID: "source-1", BindingID: "binding-1", ObjectKey: "doc-1", SourceState: "NEW", SyncState: "IDLE", Selectable: true, SourceVersion: "v1", LastSyncedAt: &parsedAt},
 		Document: &store.Document{
 			DocumentID:     "document-1",
 			SourceID:       "source-1",
@@ -710,6 +713,15 @@ func TestSourceDocumentQueryReadsIndexedDocumentsOnly(t *testing.T) {
 	}
 	if resp.Items[0].DisplayName != "Welcome" {
 		t.Fatalf("display_name should preserve source name: %+v", resp.Items[0])
+	}
+	if resp.Items[0].ModifiedAt != nil {
+		t.Fatalf("modified_at should not carry source edit time for datasource UI: %+v", resp.Items[0])
+	}
+	if resp.Items[0].LastSyncedAt == nil || !resp.Items[0].LastSyncedAt.Equal(parsedAt) {
+		t.Fatalf("last_synced_at should carry document parse time: %+v", resp.Items[0])
+	}
+	if resp.Items[0].SourceModifiedAt == nil || !resp.Items[0].SourceModifiedAt.Equal(sourceModifiedAt) {
+		t.Fatalf("source_modified_at should carry source document edit time: %+v", resp.Items[0])
 	}
 	if resp.Summary["storage_bytes"] != int64(42) {
 		t.Fatalf("document summary storage_bytes was not mapped: %+v", resp.Summary)
