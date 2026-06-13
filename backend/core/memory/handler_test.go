@@ -14,6 +14,7 @@ import (
 
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
+	"lazymind/core/resourcechange"
 	"lazymind/core/store"
 )
 
@@ -191,7 +192,55 @@ func TestUpsertPreservesMemoryAutoEvoWhenOmitted(t *testing.T) {
 	}
 }
 
-func TestUpsertPartiallyUpdatesMemoryMetadata(t *testing.T) {
+func TestUpsertMemoryAutoEvoOnlyDoesNotCreateResourceVersion(t *testing.T) {
+	db := newMemoryTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	createReq := httptest.NewRequest(http.MethodPut, "/api/core/memory", strings.NewReader(`{"content":"第一版记忆内容"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-User-Id", "u1")
+	createReq.Header.Set("X-User-Name", "User 1")
+	createRec := httptest.NewRecorder()
+
+	Upsert(createRec, createReq)
+
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", createRec.Code, createRec.Body.String())
+	}
+	var row orm.SystemMemory
+	if err := db.Where("user_id = ?", "u1").Take(&row).Error; err != nil {
+		t.Fatalf("query created memory: %v", err)
+	}
+	if got := countMemoryResourceVersions(t, db, row.ID); got != 1 {
+		t.Fatalf("expected create to write 1 resource version, got %d", got)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/core/memory", strings.NewReader(`{"auto_evo":false}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.Header.Set("X-User-Id", "u1")
+	updateReq.Header.Set("X-User-Name", "User 1")
+	updateRec := httptest.NewRecorder()
+
+	Upsert(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", updateRec.Code, updateRec.Body.String())
+	}
+	if got := countMemoryResourceVersions(t, db, row.ID); got != 1 {
+		t.Fatalf("expected auto_evo-only update to keep 1 resource version, got %d", got)
+	}
+
+	var version orm.ResourceVersion
+	if err := db.Where("resource_id = ?", row.ID).Take(&version).Error; err != nil {
+		t.Fatalf("query resource version: %v", err)
+	}
+	if version.ChangeSource != resourcechange.ChangeSourceDirectSave {
+		t.Fatalf("expected direct_save version source, got %q", version.ChangeSource)
+	}
+}
+
+func TestUpsertIgnoresMemoryMetadataFields(t *testing.T) {
 	db := newMemoryTestDB(t)
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
@@ -211,8 +260,11 @@ func TestUpsertPartiallyUpdatesMemoryMetadata(t *testing.T) {
 	if err := json.Unmarshal(createRec.Body.Bytes(), &createResp); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
-	if stringValue(createResp.Data.AgentPersona) != "严谨助手" || stringValue(createResp.Data.UserAddress) != "老师" || stringValue(createResp.Data.ResponseStyle) != "先结论后解释" {
-		t.Fatalf("unexpected metadata in create response: %#v", createResp.Data)
+	if createResp.Data.Content != "长期记忆" {
+		t.Fatalf("unexpected content in create response: %#v", createResp.Data)
+	}
+	if createResp.Data.AgentPersona != nil || createResp.Data.UserAddress != nil || createResp.Data.ResponseStyle != nil {
+		t.Fatalf("expected memory metadata fields to be omitted, got %#v", createResp.Data)
 	}
 
 	var created orm.SystemMemory
@@ -220,47 +272,11 @@ func TestUpsertPartiallyUpdatesMemoryMetadata(t *testing.T) {
 		t.Fatalf("query created memory: %v", err)
 	}
 	if created.ContentHash != evolution.HashSystemMemory(created) {
-		t.Fatalf("expected metadata-aware content hash, got %q", created.ContentHash)
-	}
-
-	updateReq := httptest.NewRequest(http.MethodPut, "/api/core/memory", strings.NewReader(`{"user_address":"同学"}`))
-	updateReq.Header.Set("Content-Type", "application/json")
-	updateReq.Header.Set("X-User-Id", "u1")
-	updateReq.Header.Set("X-User-Name", "User 1")
-	updateRec := httptest.NewRecorder()
-
-	Upsert(updateRec, updateReq)
-
-	if updateRec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d body=%s", updateRec.Code, updateRec.Body.String())
-	}
-	var updateResp upsertMemoryAPITestResponse
-	if err := json.Unmarshal(updateRec.Body.Bytes(), &updateResp); err != nil {
-		t.Fatalf("decode update response: %v", err)
-	}
-	if updateResp.Data.Content != "长期记忆" || stringValue(updateResp.Data.AgentPersona) != "严谨助手" || stringValue(updateResp.Data.UserAddress) != "同学" || stringValue(updateResp.Data.ResponseStyle) != "先结论后解释" {
-		t.Fatalf("unexpected metadata in update response: %#v", updateResp.Data)
-	}
-
-	var updated orm.SystemMemory
-	if err := db.Where("user_id = ?", "u1").Take(&updated).Error; err != nil {
-		t.Fatalf("query updated memory: %v", err)
-	}
-	if updated.Content != created.Content || updated.AgentPersona != created.AgentPersona || updated.ResponseStyle != created.ResponseStyle {
-		t.Fatalf("expected omitted fields preserved, got %#v", updated)
-	}
-	if updated.UserAddress != "同学" {
-		t.Fatalf("expected user_address update, got %q", updated.UserAddress)
-	}
-	if updated.Version != created.Version+1 {
-		t.Fatalf("expected metadata update to bump version, got %d from %d", updated.Version, created.Version)
-	}
-	if updated.ContentHash != evolution.HashSystemMemory(updated) || updated.ContentHash == created.ContentHash {
-		t.Fatalf("expected metadata-aware content hash to change, created=%q updated=%q", created.ContentHash, updated.ContentHash)
+		t.Fatalf("expected memory content hash, got %q", created.ContentHash)
 	}
 }
 
-func TestUpsertAllowsMetadataOnlyCreate(t *testing.T) {
+func TestUpsertRejectsMemoryMetadataOnlyCreate(t *testing.T) {
 	db := newMemoryTestDB(t)
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
@@ -272,15 +288,15 @@ func TestUpsertAllowsMetadataOnlyCreate(t *testing.T) {
 
 	Upsert(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	var created orm.SystemMemory
-	if err := db.Where("user_id = ?", "u1").Take(&created).Error; err != nil {
-		t.Fatalf("query created memory: %v", err)
+	var count int64
+	if err := db.Model(&orm.SystemMemory{}).Where("user_id = ?", "u1").Count(&count).Error; err != nil {
+		t.Fatalf("count memory rows: %v", err)
 	}
-	if created.Content != "" || created.AgentPersona != "严谨助手" {
-		t.Fatalf("unexpected metadata-only created memory: %#v", created)
+	if count != 0 {
+		t.Fatalf("expected metadata-only request not to create memory, got %d rows", count)
 	}
 }
 
@@ -736,4 +752,13 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func countMemoryResourceVersions(t *testing.T, db *orm.DB, resourceID string) int64 {
+	t.Helper()
+	var count int64
+	if err := db.Model(&orm.ResourceVersion{}).Where("resource_id = ?", resourceID).Count(&count).Error; err != nil {
+		t.Fatalf("count resource versions: %v", err)
+	}
+	return count
 }

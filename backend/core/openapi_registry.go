@@ -9,6 +9,7 @@ import (
 	"lazymind/core/chat"
 	"lazymind/core/doc"
 	"lazymind/core/evalset"
+	"lazymind/core/mcp"
 	"lazymind/core/modelprovider"
 	"lazymind/core/wordgroup"
 )
@@ -406,6 +407,14 @@ type toolPathParams struct {
 	ToolName string `path:"tool_name"`
 }
 
+type mcpServerPathParams struct {
+	ID string `path:"id"`
+}
+
+type mcpDeleteServerOpenAPIResponse struct {
+	ID string `json:"id"`
+}
+
 type toolMethodOpenAPIResponse struct {
 	Name    string `json:"name"`
 	Summary string `json:"summary,omitempty"`
@@ -704,6 +713,10 @@ type reviewResultPathParams struct {
 	ReviewResultID string `path:"review_result_id"`
 }
 
+type resourceVersionPathParams struct {
+	VersionID string `path:"version_id"`
+}
+
 type resourceUpdateTaskListQueryParams struct {
 	Page         int32  `query:"page"`
 	PageSize     int32  `query:"page_size"`
@@ -724,6 +737,13 @@ type memoryReviewResultListQueryParams struct {
 	PageSize     int32  `query:"page_size"`
 	ReviewStatus string `query:"review_status"`
 	Target       string `query:"target"`
+}
+
+type resourceVersionListQueryParams struct {
+	Page         int32  `query:"page"`
+	PageSize     int32  `query:"page_size"`
+	ResourceType string `query:"resource_type"`
+	ResourceID   string `query:"resource_id"`
 }
 
 type resourceUpdateTaskOpenAPIResponse struct {
@@ -792,6 +812,36 @@ type memoryReviewResultListOpenAPIResponse struct {
 	Page     int32                               `json:"page"`
 	PageSize int32                               `json:"page_size"`
 	Total    int64                               `json:"total"`
+}
+
+type resourceVersionOpenAPIResponse struct {
+	ID            string `json:"id"`
+	ResourceType  string `json:"resource_type"`
+	ResourceID    string `json:"resource_id"`
+	UserID        string `json:"user_id"`
+	ChangeSource  string `json:"change_source"`
+	FromVersion   int64  `json:"from_version"`
+	ToVersion     int64  `json:"to_version"`
+	SourceRefType string `json:"source_ref_type"`
+	SourceRefID   string `json:"source_ref_id"`
+	BeforeContent string `json:"before_content"`
+	AfterContent  string `json:"after_content"`
+	Diff          string `json:"diff"`
+	CreatedAt     string `json:"created_at"`
+}
+
+type resourceVersionListOpenAPIResponse struct {
+	Items    []resourceVersionOpenAPIResponse `json:"items"`
+	Page     int32                            `json:"page"`
+	PageSize int32                            `json:"page_size"`
+	Total    int64                            `json:"total"`
+}
+
+type latestVersionChangeOpenAPIResponse struct {
+	ChangeSource  string `json:"change_source"`
+	SourceRefType string `json:"source_ref_type"`
+	SourceRefID   string `json:"source_ref_id"`
+	ChangedAt     string `json:"changed_at"`
 }
 
 type skillGenerateOpenAPIRequest struct {
@@ -940,40 +990,44 @@ type skillUpdateManagedOpenAPIRequest struct {
 }
 
 type skillListChildOpenAPIResponse struct {
-	SkillID                     string `json:"skill_id"`
-	Name                        string `json:"name"`
-	Description                 string `json:"description"`
-	FileExt                     string `json:"file_ext"`
-	AutoEvo                     bool   `json:"auto_evo"`
-	AutoEvoApplyStatus          string `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64  `json:"auto_evo_generation"`
-	AutoEvoError                string `json:"auto_evo_error"`
-	IsEnabled                   bool   `json:"is_enabled"`
-	UpdateStatus                string `json:"update_status"`
-	HasPendingReviewSuggestions bool   `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string `json:"suggestion_status"`
-	NodeType                    string `json:"node_type"`
-	ParentID                    string `json:"parent_id"`
-	ParentSkillID               string `json:"parent_skill_id"`
-	ParentSkillName             string `json:"parent_skill_name"`
+	SkillID                     string                              `json:"skill_id"`
+	Name                        string                              `json:"name"`
+	Description                 string                              `json:"description"`
+	FileExt                     string                              `json:"file_ext"`
+	AutoEvo                     bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
+	AutoEvoError                string                              `json:"auto_evo_error"`
+	IsEnabled                   bool                                `json:"is_enabled"`
+	UpdateStatus                string                              `json:"update_status"`
+	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
+	SuggestionStatus            string                              `json:"suggestion_status"`
+	NodeType                    string                              `json:"node_type"`
+	ParentID                    string                              `json:"parent_id"`
+	ParentSkillID               string                              `json:"parent_skill_id"`
+	ParentSkillName             string                              `json:"parent_skill_name"`
+	Version                     int64                               `json:"version"`
+	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
 }
 
 type skillListItemOpenAPIResponse struct {
-	SkillID                     string                          `json:"skill_id"`
-	Name                        string                          `json:"name"`
-	Description                 string                          `json:"description"`
-	Category                    string                          `json:"category"`
-	Tags                        []string                        `json:"tags"`
-	AutoEvo                     bool                            `json:"auto_evo"`
-	AutoEvoApplyStatus          string                          `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64                           `json:"auto_evo_generation"`
-	AutoEvoError                string                          `json:"auto_evo_error"`
-	IsEnabled                   bool                            `json:"is_enabled"`
-	UpdateStatus                string                          `json:"update_status"`
-	HasPendingReviewSuggestions bool                            `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string                          `json:"suggestion_status"`
-	NodeType                    string                          `json:"node_type"`
-	Children                    []skillListChildOpenAPIResponse `json:"children"`
+	SkillID                     string                              `json:"skill_id"`
+	Name                        string                              `json:"name"`
+	Description                 string                              `json:"description"`
+	Category                    string                              `json:"category"`
+	Tags                        []string                            `json:"tags"`
+	AutoEvo                     bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
+	AutoEvoError                string                              `json:"auto_evo_error"`
+	IsEnabled                   bool                                `json:"is_enabled"`
+	UpdateStatus                string                              `json:"update_status"`
+	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
+	SuggestionStatus            string                              `json:"suggestion_status"`
+	NodeType                    string                              `json:"node_type"`
+	Version                     int64                               `json:"version"`
+	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
+	Children                    []skillListChildOpenAPIResponse     `json:"children"`
 }
 
 type skillListOpenAPIResponse struct {
@@ -984,46 +1038,50 @@ type skillListOpenAPIResponse struct {
 }
 
 type skillDetailChildOpenAPIResponse struct {
-	SkillID                     string `json:"skill_id"`
-	Name                        string `json:"name"`
-	Description                 string `json:"description"`
-	FileExt                     string `json:"file_ext"`
-	AutoEvo                     bool   `json:"auto_evo"`
-	AutoEvoApplyStatus          string `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64  `json:"auto_evo_generation"`
-	AutoEvoError                string `json:"auto_evo_error"`
-	IsEnabled                   bool   `json:"is_enabled"`
-	UpdateStatus                string `json:"update_status"`
-	HasPendingReviewSuggestions bool   `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string `json:"suggestion_status"`
-	NodeType                    string `json:"node_type"`
-	ParentID                    string `json:"parent_id"`
-	ParentSkillID               string `json:"parent_skill_id"`
-	ParentSkillName             string `json:"parent_skill_name"`
-	Content                     string `json:"content"`
+	SkillID                     string                              `json:"skill_id"`
+	Name                        string                              `json:"name"`
+	Description                 string                              `json:"description"`
+	FileExt                     string                              `json:"file_ext"`
+	AutoEvo                     bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
+	AutoEvoError                string                              `json:"auto_evo_error"`
+	IsEnabled                   bool                                `json:"is_enabled"`
+	UpdateStatus                string                              `json:"update_status"`
+	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
+	SuggestionStatus            string                              `json:"suggestion_status"`
+	NodeType                    string                              `json:"node_type"`
+	ParentID                    string                              `json:"parent_id"`
+	ParentSkillID               string                              `json:"parent_skill_id"`
+	ParentSkillName             string                              `json:"parent_skill_name"`
+	Content                     string                              `json:"content"`
+	Version                     int64                               `json:"version"`
+	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
 }
 
 type skillDetailOpenAPIResponse struct {
-	SkillID                     string                            `json:"skill_id"`
-	Name                        string                            `json:"name"`
-	Description                 string                            `json:"description"`
-	Category                    string                            `json:"category"`
-	Tags                        []string                          `json:"tags"`
-	AutoEvo                     bool                              `json:"auto_evo"`
-	AutoEvoApplyStatus          string                            `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64                             `json:"auto_evo_generation"`
-	AutoEvoError                string                            `json:"auto_evo_error"`
-	IsEnabled                   bool                              `json:"is_enabled"`
-	UpdateStatus                string                            `json:"update_status"`
-	HasPendingReviewSuggestions bool                              `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string                            `json:"suggestion_status"`
-	NodeType                    string                            `json:"node_type"`
-	ParentID                    string                            `json:"parent_id"`
-	ParentSkillID               string                            `json:"parent_skill_id"`
-	ParentSkillName             string                            `json:"parent_skill_name"`
-	Content                     string                            `json:"content"`
-	FileExt                     string                            `json:"file_ext"`
-	Children                    []skillDetailChildOpenAPIResponse `json:"children"`
+	SkillID                     string                              `json:"skill_id"`
+	Name                        string                              `json:"name"`
+	Description                 string                              `json:"description"`
+	Category                    string                              `json:"category"`
+	Tags                        []string                            `json:"tags"`
+	AutoEvo                     bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
+	AutoEvoError                string                              `json:"auto_evo_error"`
+	IsEnabled                   bool                                `json:"is_enabled"`
+	UpdateStatus                string                              `json:"update_status"`
+	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
+	SuggestionStatus            string                              `json:"suggestion_status"`
+	NodeType                    string                              `json:"node_type"`
+	ParentID                    string                              `json:"parent_id"`
+	ParentSkillID               string                              `json:"parent_skill_id"`
+	ParentSkillName             string                              `json:"parent_skill_name"`
+	Content                     string                              `json:"content"`
+	Version                     int64                               `json:"version"`
+	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
+	FileExt                     string                              `json:"file_ext"`
+	Children                    []skillDetailChildOpenAPIResponse   `json:"children"`
 }
 
 type skillDeleteOpenAPIResponse struct {
@@ -1140,6 +1198,11 @@ type systemSuggestionOpenAPIRequest struct {
 }
 
 type memoryUpsertOpenAPIRequest struct {
+	Content string `json:"content,omitempty"`
+	AutoEvo *bool  `json:"auto_evo,omitempty"`
+}
+
+type managedStateUpsertOpenAPIRequest struct {
 	Content       string `json:"content,omitempty"`
 	AgentPersona  string `json:"agent_persona,omitempty"`
 	UserAddress   string `json:"user_address,omitempty"`
@@ -1147,26 +1210,23 @@ type memoryUpsertOpenAPIRequest struct {
 	AutoEvo       *bool  `json:"auto_evo,omitempty"`
 }
 
-type managedStateUpsertOpenAPIRequest struct {
-	Content string `json:"content"`
-	AutoEvo *bool  `json:"auto_evo,omitempty"`
-}
-
 type managedStateOpenAPIResponse struct {
-	ResourceID                  string  `json:"resource_id"`
-	ResourceType                string  `json:"resource_type"`
-	Title                       string  `json:"title"`
-	Content                     string  `json:"content"`
-	AgentPersona                *string `json:"agent_persona,omitempty"`
-	UserAddress                 *string `json:"user_address,omitempty"`
-	ResponseStyle               *string `json:"response_style,omitempty"`
-	ContentSummary              string  `json:"content_summary"`
-	HasPendingReviewSuggestions bool    `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string  `json:"suggestion_status"`
-	AutoEvo                     bool    `json:"auto_evo"`
-	AutoEvoApplyStatus          string  `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64   `json:"auto_evo_generation"`
-	AutoEvoError                string  `json:"auto_evo_error"`
+	ResourceID                  string                              `json:"resource_id"`
+	ResourceType                string                              `json:"resource_type"`
+	Title                       string                              `json:"title"`
+	Content                     string                              `json:"content"`
+	AgentPersona                *string                             `json:"agent_persona,omitempty"`
+	UserAddress                 *string                             `json:"user_address,omitempty"`
+	ResponseStyle               *string                             `json:"response_style,omitempty"`
+	ContentSummary              string                              `json:"content_summary"`
+	Version                     int64                               `json:"version"`
+	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
+	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
+	SuggestionStatus            string                              `json:"suggestion_status"`
+	AutoEvo                     bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
+	AutoEvoError                string                              `json:"auto_evo_error"`
 }
 
 type managedStateListOpenAPIResponse struct {
@@ -1823,6 +1883,24 @@ func registeredCoreOperations() []openAPIOperation {
 		},
 		{
 			Method:      "GET",
+			Path:        "/resource-versions",
+			Summary:     "List resource versions",
+			Description: "Lists content version history for skills, memory, and user preferences for the current user.",
+			Tags:        []string{"resource-versions"},
+			QueryParams: resourceVersionListQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Resource version list", resourceVersionListOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/resource-versions/{version_id}",
+			Summary:     "Get resource version",
+			Description: "Gets one content version history entry for the current user.",
+			Tags:        []string{"resource-versions"},
+			PathParams:  resourceVersionPathParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Resource version", resourceVersionOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
 			Path:        "/skills",
 			Summary:     "List skills",
 			Tags:        []string{"skills"},
@@ -2237,6 +2315,71 @@ func registeredCoreOperations() []openAPIOperation {
 			Tags:       []string{"tools"},
 			PathParams: toolPathParams{},
 			Responses:  map[int]openAPIResponse{200: resp("Tool enabled", toolStateOpenAPIResponse{})},
+		},
+		{
+			Method:    "GET",
+			Path:      "/mcp_servers",
+			Summary:   "List MCP servers",
+			Tags:      []string{"mcp_servers"},
+			Responses: map[int]openAPIResponse{200: resp("MCP server list", mcp.ListServersResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/mcp_servers",
+			Summary:     "Create MCP server",
+			Tags:        []string{"mcp_servers"},
+			RequestBody: jsonBodyOf(mcp.CreateServerRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Created MCP server", mcp.ServerResponse{})},
+		},
+		{
+			Method:     "GET",
+			Path:       "/mcp_servers/{id}",
+			Summary:    "Get MCP server",
+			Tags:       []string{"mcp_servers"},
+			PathParams: mcpServerPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("MCP server", mcp.ServerResponse{})},
+		},
+		{
+			Method:      "PATCH",
+			Path:        "/mcp_servers/{id}",
+			Summary:     "Update MCP server",
+			Tags:        []string{"mcp_servers"},
+			PathParams:  mcpServerPathParams{},
+			RequestBody: jsonBodyOf(mcp.UpdateServerRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Updated MCP server", mcp.ServerResponse{})},
+		},
+		{
+			Method:     "DELETE",
+			Path:       "/mcp_servers/{id}",
+			Summary:    "Delete MCP server",
+			Tags:       []string{"mcp_servers"},
+			PathParams: mcpServerPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Deleted MCP server", mcpDeleteServerOpenAPIResponse{})},
+		},
+		{
+			Method:     "POST",
+			Path:       "/mcp_servers/{id}:check",
+			Summary:    "Check MCP server",
+			Tags:       []string{"mcp_servers"},
+			PathParams: mcpServerPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("MCP server check result", mcp.CheckResponse{})},
+		},
+		{
+			Method:     "POST",
+			Path:       "/mcp_servers/{id}:discover",
+			Summary:    "Discover MCP server tools",
+			Tags:       []string{"mcp_servers"},
+			PathParams: mcpServerPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Discovered MCP tools", mcp.DiscoverResponse{})},
+		},
+		{
+			Method:      "PUT",
+			Path:        "/mcp_servers/{id}/tools",
+			Summary:     "Update MCP server tools",
+			Tags:        []string{"mcp_servers"},
+			PathParams:  mcpServerPathParams{},
+			RequestBody: jsonBodyOf(mcp.UpdateToolsRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Updated MCP server tools", mcp.ServerResponse{})},
 		},
 		{
 			Method:      "POST",

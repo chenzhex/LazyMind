@@ -14,6 +14,7 @@ import (
 
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
+	"lazymind/core/resourcechange"
 	"lazymind/core/store"
 )
 
@@ -21,11 +22,14 @@ type upsertPreferenceAPITestResponse struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    struct {
-		ResourceID     string `json:"resource_id"`
-		ResourceType   string `json:"resource_type"`
-		Title          string `json:"title"`
-		Content        string `json:"content"`
-		ContentSummary string `json:"content_summary"`
+		ResourceID     string  `json:"resource_id"`
+		ResourceType   string  `json:"resource_type"`
+		Title          string  `json:"title"`
+		Content        string  `json:"content"`
+		AgentPersona   *string `json:"agent_persona"`
+		UserAddress    *string `json:"user_address"`
+		ResponseStyle  *string `json:"response_style"`
+		ContentSummary string  `json:"content_summary"`
 	} `json:"data"`
 }
 
@@ -182,6 +186,88 @@ func TestUpsertPreservesPreferenceAutoEvoWhenOmitted(t *testing.T) {
 	}
 	if updated.Content != "第二版偏好内容" {
 		t.Fatalf("unexpected updated content: %q", updated.Content)
+	}
+}
+
+func TestUpsertPartiallyUpdatesPreferenceMetadata(t *testing.T) {
+	db := newPreferenceTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	createReq := httptest.NewRequest(http.MethodPut, "/api/core/user-preference", strings.NewReader(`{"content":"用户偏好","agent_persona":"严谨助手","user_address":"老师","response_style":"先结论后解释"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-User-Id", "u1")
+	createReq.Header.Set("X-User-Name", "User 1")
+	createRec := httptest.NewRecorder()
+
+	Upsert(createRec, createReq)
+
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", createRec.Code, createRec.Body.String())
+	}
+	var createResp upsertPreferenceAPITestResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &createResp); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if stringValue(createResp.Data.AgentPersona) != "严谨助手" || stringValue(createResp.Data.UserAddress) != "老师" || stringValue(createResp.Data.ResponseStyle) != "先结论后解释" {
+		t.Fatalf("unexpected metadata in create response: %#v", createResp.Data)
+	}
+
+	var created orm.SystemUserPreference
+	if err := db.Where("user_id = ?", "u1").Take(&created).Error; err != nil {
+		t.Fatalf("query created preference: %v", err)
+	}
+	if created.ContentHash != evolution.HashSystemUserPreference(created) {
+		t.Fatalf("expected user_preference content hash, got %q", created.ContentHash)
+	}
+	if got := countPreferenceResourceVersions(t, db, created.ID); got != 1 {
+		t.Fatalf("expected create to write 1 resource version, got %d", got)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/core/user-preference", strings.NewReader(`{"user_address":"同学"}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.Header.Set("X-User-Id", "u1")
+	updateReq.Header.Set("X-User-Name", "User 1")
+	updateRec := httptest.NewRecorder()
+
+	Upsert(updateRec, updateReq)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", updateRec.Code, updateRec.Body.String())
+	}
+	var updateResp upsertPreferenceAPITestResponse
+	if err := json.Unmarshal(updateRec.Body.Bytes(), &updateResp); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updateResp.Data.Content != "用户偏好" || stringValue(updateResp.Data.AgentPersona) != "严谨助手" || stringValue(updateResp.Data.UserAddress) != "同学" || stringValue(updateResp.Data.ResponseStyle) != "先结论后解释" {
+		t.Fatalf("unexpected metadata in update response: %#v", updateResp.Data)
+	}
+
+	var updated orm.SystemUserPreference
+	if err := db.Where("user_id = ?", "u1").Take(&updated).Error; err != nil {
+		t.Fatalf("query updated preference: %v", err)
+	}
+	if updated.Content != created.Content || updated.AgentPersona != created.AgentPersona || updated.ResponseStyle != created.ResponseStyle {
+		t.Fatalf("expected omitted fields preserved, got %#v", updated)
+	}
+	if updated.UserAddress != "同学" {
+		t.Fatalf("expected user_address update, got %q", updated.UserAddress)
+	}
+	if updated.Version != created.Version+1 {
+		t.Fatalf("expected metadata update to bump version, got %d from %d", updated.Version, created.Version)
+	}
+	if updated.ContentHash != evolution.HashSystemUserPreference(updated) || updated.ContentHash == created.ContentHash {
+		t.Fatalf("expected user_preference content hash to change, created=%q updated=%q", created.ContentHash, updated.ContentHash)
+	}
+	if got := countPreferenceResourceVersions(t, db, created.ID); got != 1 {
+		t.Fatalf("expected metadata-only update to keep 1 resource version, got %d", got)
+	}
+	var version orm.ResourceVersion
+	if err := db.Where("resource_id = ?", created.ID).Take(&version).Error; err != nil {
+		t.Fatalf("query resource version: %v", err)
+	}
+	if version.ChangeSource != resourcechange.ChangeSourceDirectSave {
+		t.Fatalf("expected direct_save version source, got %q", version.ChangeSource)
 	}
 }
 
@@ -706,4 +792,20 @@ func TestDiscardKeepsAcceptedSuggestionVisibleForRegeneration(t *testing.T) {
 	if updated.Status != evolution.SuggestionStatusAccepted {
 		t.Fatalf("expected suggestion to remain accepted after discard, got %q", updated.Status)
 	}
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func countPreferenceResourceVersions(t *testing.T, db *orm.DB, resourceID string) int64 {
+	t.Helper()
+	var count int64
+	if err := db.Model(&orm.ResourceVersion{}).Where("resource_id = ?", resourceID).Count(&count).Error; err != nil {
+		t.Fatalf("count resource versions: %v", err)
+	}
+	return count
 }

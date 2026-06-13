@@ -11,6 +11,7 @@ import (
 
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
+	"lazymind/core/resourcechange"
 )
 
 func (w *Worker) handleAutoApplyReview(ctx context.Context, task orm.ResourceUpdateTask) taskOutcome {
@@ -80,7 +81,12 @@ func autoApplySkillReviewResult(ctx context.Context, tx *gorm.DB, task orm.Resou
 	if !resource.AutoEvo {
 		return fmt.Errorf("%w: skill auto_evo disabled", errReviewConflict)
 	}
-	return applySkillPatchResult(ctx, tx, result, resource, now)
+	return applySkillPatchResult(ctx, tx, result, resource, now, resourcechange.Source{
+		ChangeSource:  resourcechange.ChangeSourceAutoApply,
+		SourceRefType: resourcechange.SourceRefTypeSkillReviewResult,
+		SourceRefID:   result.ID,
+		ChangedAt:     now,
+	})
 }
 
 func autoApplyMemoryReviewResult(ctx context.Context, tx *gorm.DB, task orm.ResourceUpdateTask, now time.Time) error {
@@ -109,7 +115,12 @@ func autoApplyMemoryReviewResult(ctx context.Context, tx *gorm.DB, task orm.Reso
 	if !resource.AutoEvo {
 		return fmt.Errorf("%w: memory auto_evo disabled", errReviewConflict)
 	}
-	return applyMemoryReviewResult(ctx, tx, result, resource, now, true)
+	return applyMemoryReviewResult(ctx, tx, result, resource, now, true, resourcechange.Source{
+		ChangeSource:  resourcechange.ChangeSourceAutoApply,
+		SourceRefType: resourcechange.SourceRefTypeMemoryReview,
+		SourceRefID:   result.ID,
+		ChangedAt:     now,
+	})
 }
 
 func autoApplyPreferenceReviewResult(ctx context.Context, tx *gorm.DB, task orm.ResourceUpdateTask, now time.Time) error {
@@ -138,7 +149,12 @@ func autoApplyPreferenceReviewResult(ctx context.Context, tx *gorm.DB, task orm.
 	if !resource.AutoEvo {
 		return fmt.Errorf("%w: user_preference auto_evo disabled", errReviewConflict)
 	}
-	return applyPreferenceReviewResult(ctx, tx, result, resource, now, true)
+	return applyPreferenceReviewResult(ctx, tx, result, resource, now, true, resourcechange.Source{
+		ChangeSource:  resourcechange.ChangeSourceAutoApply,
+		SourceRefType: resourcechange.SourceRefTypeMemoryReview,
+		SourceRefID:   result.ID,
+		ChangedAt:     now,
+	})
 }
 
 func lockSkillReviewResult(ctx context.Context, tx *gorm.DB, id string) (SkillReviewResult, error) {
@@ -167,7 +183,7 @@ func lockMemoryReviewResult(ctx context.Context, tx *gorm.DB, id string) (Memory
 	return result, err
 }
 
-func applySkillPatchResult(ctx context.Context, tx *gorm.DB, result SkillReviewResult, resource orm.SkillResource, now time.Time) error {
+func applySkillPatchResult(ctx context.Context, tx *gorm.DB, result SkillReviewResult, resource orm.SkillResource, now time.Time, source resourcechange.Source) error {
 	content := result.SkillContent
 	meta, err := validateSkillReviewContent(result.SkillName, content)
 	if err != nil {
@@ -190,13 +206,22 @@ func applySkillPatchResult(ctx context.Context, tx *gorm.DB, result SkillReviewR
 		"updated_at":            now,
 		"ext":                   clearLegacyDraftSuggestionRefs(resource.Ext),
 	}
-	resultDB := tx.WithContext(ctx).Model(&orm.SkillResource{}).
-		Where("id = ? AND version = ?", resource.ID, resource.Version).
-		Updates(update)
-	if resultDB.Error != nil {
-		return resultDB.Error
+	affected, err := resourcechange.UpdateModel(ctx, tx, &orm.SkillResource{}, func(query *gorm.DB) *gorm.DB {
+		return query.Where("id = ? AND version = ?", resource.ID, resource.Version)
+	}, update, resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+		ResourceID:    resource.ID,
+		UserID:        resource.OwnerUserID,
+		FromVersion:   resource.Version,
+		ToVersion:     resource.Version + 1,
+		BeforeContent: resource.Content,
+		AfterContent:  content,
+		Source:        source,
+	})
+	if err != nil {
+		return err
 	}
-	if resultDB.RowsAffected == 0 {
+	if affected == 0 {
 		return fmt.Errorf("%w: skill version changed", errReviewConflict)
 	}
 	if childErr := tx.WithContext(ctx).Model(&orm.SkillResource{}).
@@ -208,7 +233,7 @@ func applySkillPatchResult(ctx context.Context, tx *gorm.DB, result SkillReviewR
 	return updateSkillReviewStatus(ctx, tx, result.ID, reviewStatusAccepted)
 }
 
-func createSkillFromNewResult(ctx context.Context, tx *gorm.DB, result SkillReviewResult, userName string, now time.Time) (orm.SkillResource, error) {
+func createSkillFromNewResult(ctx context.Context, tx *gorm.DB, result SkillReviewResult, userName string, now time.Time, source resourcechange.Source) (orm.SkillResource, error) {
 	content := result.SkillContent
 	meta, err := validateSkillReviewContent(result.SkillName, content)
 	if err != nil {
@@ -265,13 +290,22 @@ func createSkillFromNewResult(ctx context.Context, tx *gorm.DB, result SkillRevi
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if err := tx.WithContext(ctx).Create(&row).Error; err != nil {
+	if err := resourcechange.CreateModel(ctx, tx, &row, resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+		ResourceID:    row.ID,
+		UserID:        row.OwnerUserID,
+		FromVersion:   0,
+		ToVersion:     row.Version,
+		BeforeContent: "",
+		AfterContent:  row.Content,
+		Source:        source,
+	}); err != nil {
 		return orm.SkillResource{}, err
 	}
 	return row, nil
 }
 
-func applyMemoryReviewResult(ctx context.Context, tx *gorm.DB, result MemoryReviewResult, resource orm.SystemMemory, now time.Time, requireAutoEvo bool) error {
+func applyMemoryReviewResult(ctx context.Context, tx *gorm.DB, result MemoryReviewResult, resource orm.SystemMemory, now time.Time, requireAutoEvo bool, source resourcechange.Source) error {
 	content := result.Content
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("%w: memory content required", errReviewInvalid)
@@ -281,7 +315,7 @@ func applyMemoryReviewResult(ctx context.Context, tx *gorm.DB, result MemoryRevi
 	}
 	update := map[string]any{
 		"content":               content,
-		"content_hash":          evolution.HashContent(content),
+		"content_hash":          evolution.HashSystemMemory(orm.SystemMemory{Content: content}),
 		"version":               resource.Version + 1,
 		"draft_content":         "",
 		"draft_source_version":  0,
@@ -293,19 +327,28 @@ func applyMemoryReviewResult(ctx context.Context, tx *gorm.DB, result MemoryRevi
 		"updated_at":            now,
 		"ext":                   clearLegacyDraftSuggestionRefs(resource.Ext),
 	}
-	resultDB := tx.WithContext(ctx).Model(&orm.SystemMemory{}).
-		Where("id = ? AND version = ?", resource.ID, resource.Version).
-		Updates(update)
-	if resultDB.Error != nil {
-		return resultDB.Error
+	affected, err := resourcechange.UpdateModel(ctx, tx, &orm.SystemMemory{}, func(query *gorm.DB) *gorm.DB {
+		return query.Where("id = ? AND version = ?", resource.ID, resource.Version)
+	}, update, resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeMemory,
+		ResourceID:    resource.ID,
+		UserID:        resource.UserID,
+		FromVersion:   resource.Version,
+		ToVersion:     resource.Version + 1,
+		BeforeContent: resource.Content,
+		AfterContent:  content,
+		Source:        source,
+	})
+	if err != nil {
+		return err
 	}
-	if resultDB.RowsAffected == 0 {
+	if affected == 0 {
 		return fmt.Errorf("%w: memory version changed", errReviewConflict)
 	}
 	return updateMemoryReviewStatus(ctx, tx, result.ID, reviewStatusAccepted)
 }
 
-func applyPreferenceReviewResult(ctx context.Context, tx *gorm.DB, result MemoryReviewResult, resource orm.SystemUserPreference, now time.Time, requireAutoEvo bool) error {
+func applyPreferenceReviewResult(ctx context.Context, tx *gorm.DB, result MemoryReviewResult, resource orm.SystemUserPreference, now time.Time, requireAutoEvo bool, source resourcechange.Source) error {
 	content := result.Content
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("%w: user_preference content required", errReviewInvalid)
@@ -313,9 +356,11 @@ func applyPreferenceReviewResult(ctx context.Context, tx *gorm.DB, result Memory
 	if requireAutoEvo && !resource.AutoEvo {
 		return fmt.Errorf("%w: user_preference auto_evo disabled", errReviewConflict)
 	}
+	hashRow := resource
+	hashRow.Content = content
 	update := map[string]any{
 		"content":               content,
-		"content_hash":          evolution.HashContent(content),
+		"content_hash":          evolution.HashSystemUserPreference(hashRow),
 		"version":               resource.Version + 1,
 		"draft_content":         "",
 		"draft_source_version":  0,
@@ -327,13 +372,22 @@ func applyPreferenceReviewResult(ctx context.Context, tx *gorm.DB, result Memory
 		"updated_at":            now,
 		"ext":                   clearLegacyDraftSuggestionRefs(resource.Ext),
 	}
-	resultDB := tx.WithContext(ctx).Model(&orm.SystemUserPreference{}).
-		Where("id = ? AND version = ?", resource.ID, resource.Version).
-		Updates(update)
-	if resultDB.Error != nil {
-		return resultDB.Error
+	affected, err := resourcechange.UpdateModel(ctx, tx, &orm.SystemUserPreference{}, func(query *gorm.DB) *gorm.DB {
+		return query.Where("id = ? AND version = ?", resource.ID, resource.Version)
+	}, update, resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeUserPreference,
+		ResourceID:    resource.ID,
+		UserID:        resource.UserID,
+		FromVersion:   resource.Version,
+		ToVersion:     resource.Version + 1,
+		BeforeContent: resource.Content,
+		AfterContent:  content,
+		Source:        source,
+	})
+	if err != nil {
+		return err
 	}
-	if resultDB.RowsAffected == 0 {
+	if affected == 0 {
 		return fmt.Errorf("%w: user_preference version changed", errReviewConflict)
 	}
 	return updateMemoryReviewStatus(ctx, tx, result.ID, reviewStatusAccepted)

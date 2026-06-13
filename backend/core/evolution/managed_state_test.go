@@ -40,9 +40,6 @@ func TestListManagedStatesReturnsDefaultsAndUserScopedRows(t *testing.T) {
 		ID:            "memory-1",
 		UserID:        "u1",
 		Content:       "倾向于先结论后论证，遇到风险点时优先列出明确建议。",
-		AgentPersona:  "严谨助手",
-		UserAddress:   "老师",
-		ResponseStyle: "先结论后论证",
 		Version:       1,
 		UpdatedBy:     "u1",
 		UpdatedByName: "User 1",
@@ -52,6 +49,23 @@ func TestListManagedStatesReturnsDefaultsAndUserScopedRows(t *testing.T) {
 	memory.ContentHash = HashSystemMemory(memory)
 	if err := db.Create(&memory).Error; err != nil {
 		t.Fatalf("create memory: %v", err)
+	}
+	preference := orm.SystemUserPreference{
+		ID:            "preference-1",
+		UserID:        "u1",
+		Content:       "用户偏好简洁回答。",
+		AgentPersona:  "严谨助手",
+		UserAddress:   "老师",
+		ResponseStyle: "先结论后论证",
+		Version:       1,
+		UpdatedBy:     "u1",
+		UpdatedByName: "User 1",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	preference.ContentHash = HashSystemUserPreference(preference)
+	if err := db.Create(&preference).Error; err != nil {
+		t.Fatalf("create preference: %v", err)
 	}
 	suggestions := []orm.ResourceSuggestion{
 		{
@@ -116,8 +130,8 @@ func TestListManagedStatesReturnsDefaultsAndUserScopedRows(t *testing.T) {
 	if memoryItem.ContentSummary == "" {
 		t.Fatalf("expected memory content summary")
 	}
-	if stringValue(memoryItem.AgentPersona) != "严谨助手" || stringValue(memoryItem.UserAddress) != "老师" || stringValue(memoryItem.ResponseStyle) != "先结论后论证" {
-		t.Fatalf("unexpected memory metadata: %#v", memoryItem)
+	if memoryItem.AgentPersona != nil || memoryItem.UserAddress != nil || memoryItem.ResponseStyle != nil {
+		t.Fatalf("expected memory metadata fields to be omitted, got %#v", memoryItem)
 	}
 	if !memoryItem.HasPendingReviewSuggestions {
 		t.Fatalf("expected memory item to show pending review suggestions")
@@ -133,8 +147,11 @@ func TestListManagedStatesReturnsDefaultsAndUserScopedRows(t *testing.T) {
 	if preferenceItem.Title != ManagedPreferenceTitle {
 		t.Fatalf("expected preference title %q, got %q", ManagedPreferenceTitle, preferenceItem.Title)
 	}
-	if preferenceItem.ResourceID != "" || preferenceItem.Content != "" || preferenceItem.ContentSummary != "" {
-		t.Fatalf("expected empty default preference item, got %#v", preferenceItem)
+	if preferenceItem.ResourceID != "preference-1" || preferenceItem.Content != "用户偏好简洁回答。" || preferenceItem.ContentSummary == "" {
+		t.Fatalf("unexpected preference item, got %#v", preferenceItem)
+	}
+	if stringValue(preferenceItem.AgentPersona) != "严谨助手" || stringValue(preferenceItem.UserAddress) != "老师" || stringValue(preferenceItem.ResponseStyle) != "先结论后论证" {
+		t.Fatalf("unexpected preference metadata: %#v", preferenceItem)
 	}
 	if !preferenceItem.HasPendingReviewSuggestions {
 		t.Fatalf("expected preference item to show pending review suggestions")
@@ -147,8 +164,8 @@ func TestListManagedStatesReturnsDefaultsAndUserScopedRows(t *testing.T) {
 	if err := db.Model(&orm.SystemUserPreference{}).Count(&preferenceCount).Error; err != nil {
 		t.Fatalf("count preferences: %v", err)
 	}
-	if preferenceCount != 0 {
-		t.Fatalf("expected list endpoint to not create missing preference row, got %d", preferenceCount)
+	if preferenceCount != 1 {
+		t.Fatalf("expected list endpoint to preserve existing preference row, got %d", preferenceCount)
 	}
 }
 

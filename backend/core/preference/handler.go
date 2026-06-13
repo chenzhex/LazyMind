@@ -15,8 +15,9 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
 	appLog "lazymind/core/log"
-	"lazymind/core/resourceupdate"
 	"lazymind/core/modelconfig"
+	"lazymind/core/resourcechange"
+	"lazymind/core/resourceupdate"
 	"lazymind/core/store"
 )
 
@@ -30,8 +31,11 @@ type generateRequest struct {
 }
 
 type upsertRequest struct {
-	Content *string `json:"content"`
-	AutoEvo *bool   `json:"auto_evo"`
+	Content       *string `json:"content"`
+	AgentPersona  *string `json:"agent_persona"`
+	UserAddress   *string `json:"user_address"`
+	ResponseStyle *string `json:"response_style"`
+	AutoEvo       *bool   `json:"auto_evo"`
 }
 
 const errAutoEvoTaskRunning = "auto_evo task is running"
@@ -65,7 +69,7 @@ func validateManagedContentLength(content string) error {
 	return nil
 }
 
-func upsertManagedPreferenceContent(r *http.Request, db *gorm.DB, userID, userName, content string, autoEvo *bool, clearDraft bool) (*orm.SystemUserPreference, error) {
+func upsertManagedPreferenceContent(r *http.Request, db *gorm.DB, userID, userName string, req upsertRequest, clearDraft bool) (*orm.SystemUserPreference, error) {
 	existing, err := evolution.LoadSystemUserPreference(r.Context(), db, userID)
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return nil, err
@@ -73,8 +77,8 @@ func upsertManagedPreferenceContent(r *http.Request, db *gorm.DB, userID, userNa
 
 	now := time.Now()
 	resolvedAutoEvo := true
-	if autoEvo != nil {
-		resolvedAutoEvo = *autoEvo
+	if req.AutoEvo != nil {
+		resolvedAutoEvo = *req.AutoEvo
 	} else if existing != nil {
 		resolvedAutoEvo = existing.AutoEvo
 	}
@@ -82,8 +86,10 @@ func upsertManagedPreferenceContent(r *http.Request, db *gorm.DB, userID, userNa
 		row := orm.SystemUserPreference{
 			ID:                 evolution.NewID(),
 			UserID:             userID,
-			Content:            content,
-			ContentHash:        evolution.HashContent(content),
+			Content:            stringFromPtr(req.Content),
+			AgentPersona:       stringFromPtr(req.AgentPersona),
+			UserAddress:        stringFromPtr(req.UserAddress),
+			ResponseStyle:      stringFromPtr(req.ResponseStyle),
 			Version:            1,
 			AutoEvo:            resolvedAutoEvo,
 			AutoEvoApplyStatus: evolution.AutoEvoApplyStatusIdle,
@@ -93,10 +99,14 @@ func upsertManagedPreferenceContent(r *http.Request, db *gorm.DB, userID, userNa
 			CreatedAt:          now,
 			UpdatedAt:          now,
 		}
-		if err := db.WithContext(r.Context()).Model(&orm.SystemUserPreference{}).Create(map[string]any{
+		row.ContentHash = evolution.HashSystemUserPreference(row)
+		createValues := map[string]any{
 			"id":                    row.ID,
 			"user_id":               row.UserID,
 			"content":               row.Content,
+			"agent_persona":         row.AgentPersona,
+			"user_address":          row.UserAddress,
+			"response_style":        row.ResponseStyle,
 			"content_hash":          row.ContentHash,
 			"version":               row.Version,
 			"auto_evo":              row.AutoEvo,
@@ -106,21 +116,61 @@ func upsertManagedPreferenceContent(r *http.Request, db *gorm.DB, userID, userNa
 			"updated_by_name":       row.UpdatedByName,
 			"created_at":            row.CreatedAt,
 			"updated_at":            row.UpdatedAt,
-		}).Error; err != nil {
+		}
+		change := resourcechange.ContentChange{
+			ResourceType:  orm.ResourceUpdateResourceTypeUserPreference,
+			ResourceID:    row.ID,
+			UserID:        userID,
+			FromVersion:   0,
+			ToVersion:     row.Version,
+			BeforeContent: "",
+			AfterContent:  row.Content,
+			Source: resourcechange.Source{
+				ChangeSource: resourcechange.ChangeSourceDirectSave,
+				ChangedAt:    now,
+			},
+		}
+		if err := db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+			return resourcechange.CreateIntoModel(r.Context(), tx, &orm.SystemUserPreference{}, createValues, change)
+		}); err != nil {
 			return nil, err
 		}
 		return &row, nil
 	}
 
+	newContent := existing.Content
+	newAgentPersona := existing.AgentPersona
+	newUserAddress := existing.UserAddress
+	newResponseStyle := existing.ResponseStyle
+	if req.Content != nil {
+		newContent = *req.Content
+	}
+	if req.AgentPersona != nil {
+		newAgentPersona = *req.AgentPersona
+	}
+	if req.UserAddress != nil {
+		newUserAddress = *req.UserAddress
+	}
+	if req.ResponseStyle != nil {
+		newResponseStyle = *req.ResponseStyle
+	}
+	hashRow := *existing
+	hashRow.Content = newContent
+	hashRow.AgentPersona = newAgentPersona
+	hashRow.UserAddress = newUserAddress
+	hashRow.ResponseStyle = newResponseStyle
 	update := map[string]any{
-		"content":         content,
-		"content_hash":    evolution.HashContent(content),
+		"content":         newContent,
+		"agent_persona":   newAgentPersona,
+		"user_address":    newUserAddress,
+		"response_style":  newResponseStyle,
+		"content_hash":    evolution.HashSystemUserPreference(hashRow),
 		"version":         existing.Version + 1,
 		"updated_by":      userID,
 		"updated_by_name": userName,
 		"updated_at":      now,
 	}
-	if autoEvo != nil {
+	if req.AutoEvo != nil {
 		update["auto_evo"] = resolvedAutoEvo
 		update["auto_evo_generation"] = gorm.Expr("auto_evo_generation + 1")
 		update["auto_evo_apply_status"] = evolution.AutoEvoApplyStatusIdle
@@ -139,16 +189,34 @@ func upsertManagedPreferenceContent(r *http.Request, db *gorm.DB, userID, userNa
 		update["draft_updated_at"] = nil
 		update["ext"] = evolution.WithDraftSuggestionIDs(existing.Ext, nil)
 	}
-	if err := db.WithContext(r.Context()).
-		Model(&orm.SystemUserPreference{}).
-		Where("id = ? AND version = ?", existing.ID, existing.Version).
-		Updates(update).Error; err != nil {
+	change := resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeUserPreference,
+		ResourceID:    existing.ID,
+		UserID:        userID,
+		FromVersion:   existing.Version,
+		ToVersion:     existing.Version + 1,
+		BeforeContent: existing.Content,
+		AfterContent:  newContent,
+		Source: resourcechange.Source{
+			ChangeSource: resourcechange.ChangeSourceDirectSave,
+			ChangedAt:    now,
+		},
+	}
+	if err := db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		_, err := resourcechange.UpdateModel(r.Context(), tx, &orm.SystemUserPreference{}, func(query *gorm.DB) *gorm.DB {
+			return query.Where("id = ? AND version = ?", existing.ID, existing.Version)
+		}, update, change)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	existing.Content = content
-	existing.ContentHash = evolution.HashContent(content)
+	existing.Content = newContent
+	existing.AgentPersona = newAgentPersona
+	existing.UserAddress = newUserAddress
+	existing.ResponseStyle = newResponseStyle
+	existing.ContentHash = evolution.HashSystemUserPreference(*existing)
 	existing.Version++
-	if autoEvo != nil {
+	if req.AutoEvo != nil {
 		existing.AutoEvo = resolvedAutoEvo
 		existing.AutoEvoGeneration++
 		existing.AutoEvoApplyStatus = evolution.AutoEvoApplyStatusIdle
@@ -225,14 +293,33 @@ func Upsert(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if req.Content == nil {
-		common.ReplyErr(w, "content required", http.StatusBadRequest)
+	if !hasPreferenceUpsertField(req) {
+		common.ReplyErr(w, "content, user_preference metadata, or auto_evo required", http.StatusBadRequest)
 		return
 	}
-	content := *req.Content
-	if err := validateManagedContentLength(content); err != nil {
-		common.ReplyErr(w, err.Error(), http.StatusBadRequest)
-		return
+	if req.Content != nil {
+		if err := validateManagedContentLength(*req.Content); err != nil {
+			common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.AgentPersona != nil {
+		if err := validateManagedContentLength(*req.AgentPersona); err != nil {
+			common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.UserAddress != nil {
+		if err := validateManagedContentLength(*req.UserAddress); err != nil {
+			common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.ResponseStyle != nil {
+		if err := validateManagedContentLength(*req.ResponseStyle); err != nil {
+			common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	existing, err := evolution.LoadSystemUserPreference(r.Context(), db, userID)
@@ -258,7 +345,7 @@ func Upsert(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		row, err = upsertManagedPreferenceContent(r, db, userID, userName, content, req.AutoEvo, false)
+		row, err = upsertManagedPreferenceContent(r, db, userID, userName, req, false)
 		if err != nil {
 			common.ReplyErr(w, "update user_preference failed", http.StatusInternalServerError)
 			return
@@ -290,7 +377,11 @@ func Upsert(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "query user_preference failed", http.StatusInternalServerError)
 		return
 	}
-	common.ReplyOK(w, evolution.NewManagedStateItem(evolution.ResourceTypeUserPreference, row, suggestionStatus))
+	item := evolution.NewManagedStateItem(evolution.ResourceTypeUserPreference, row, suggestionStatus)
+	if summary, err := resourcechange.LatestSummaryForResource(r.Context(), db, userID, orm.ResourceUpdateResourceTypeUserPreference, row.ID); err == nil {
+		item.LatestVersionChange = summary
+	}
+	common.ReplyOK(w, item)
 }
 
 func DraftPreview(w http.ResponseWriter, r *http.Request) {
@@ -392,7 +483,7 @@ func Suggestion(w http.ResponseWriter, r *http.Request) {
 
 	status := evolution.SuggestionStatusPendingReview
 	invalidReason := ""
-	currentHash := firstNonEmpty(strings.TrimSpace(resource.ContentHash), evolution.HashContent(resource.Content))
+	currentHash := firstNonEmpty(strings.TrimSpace(resource.ContentHash), evolution.HashSystemUserPreference(*resource))
 	if currentHash != snapshot.SnapshotHash {
 		status = evolution.SuggestionStatusInvalid
 		invalidReason = "snapshot hash mismatch"
@@ -559,9 +650,11 @@ func Confirm(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	newContent := row.DraftContent
+	hashRow := *row
+	hashRow.Content = newContent
 	update := map[string]any{
 		"content":              newContent,
-		"content_hash":         evolution.HashContent(newContent),
+		"content_hash":         evolution.HashSystemUserPreference(hashRow),
 		"version":              row.Version + 1,
 		"draft_content":        "",
 		"draft_source_version": 0,
@@ -572,7 +665,31 @@ func Confirm(w http.ResponseWriter, r *http.Request) {
 		"updated_at":           now,
 		"ext":                  evolution.WithDraftSuggestionIDs(row.Ext, nil),
 	}
-	if err := db.WithContext(r.Context()).Model(&orm.SystemUserPreference{}).Where("id = ? AND version = ?", row.ID, row.Version).Updates(update).Error; err != nil {
+	change := resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeUserPreference,
+		ResourceID:    row.ID,
+		UserID:        userID,
+		FromVersion:   row.Version,
+		ToVersion:     row.Version + 1,
+		BeforeContent: row.Content,
+		AfterContent:  newContent,
+		Source: resourcechange.Source{
+			ChangeSource: resourcechange.ChangeSourceDraftConfirm,
+			ChangedAt:    now,
+		},
+	}
+	if err := db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		affected, err := resourcechange.UpdateModel(r.Context(), tx, &orm.SystemUserPreference{}, func(query *gorm.DB) *gorm.DB {
+			return query.Where("id = ? AND version = ?", row.ID, row.Version)
+		}, update, change)
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	}); err != nil {
 		common.ReplyErr(w, "confirm user_preference draft failed", http.StatusInternalServerError)
 		return
 	}
@@ -630,4 +747,19 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func hasPreferenceUpsertField(req upsertRequest) bool {
+	return req.Content != nil ||
+		req.AgentPersona != nil ||
+		req.UserAddress != nil ||
+		req.ResponseStyle != nil ||
+		req.AutoEvo != nil
+}
+
+func stringFromPtr(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

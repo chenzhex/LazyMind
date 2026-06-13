@@ -18,8 +18,9 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
 	appLog "lazymind/core/log"
-	"lazymind/core/resourceupdate"
 	"lazymind/core/modelconfig"
+	"lazymind/core/resourcechange"
+	"lazymind/core/resourceupdate"
 	"lazymind/core/store"
 )
 
@@ -71,6 +72,11 @@ func List(w http.ResponseWriter, r *http.Request) {
 	suggestionRows = append(suggestionRows, parents...)
 	suggestionRows = append(suggestionRows, children...)
 	suggestionStatesByKey, err := loadSuggestionStatesByKey(r.Context(), db, userID, suggestionRows)
+	if err != nil {
+		common.ReplyErr(w, "query skills failed", http.StatusInternalServerError)
+		return
+	}
+	latestVersionChanges, err := resourcechange.LatestSummariesForResources(r.Context(), db, userID, orm.ResourceUpdateResourceTypeSkill, skillResourceIDs(suggestionRows))
 	if err != nil {
 		common.ReplyErr(w, "query skills failed", http.StatusInternalServerError)
 		return
@@ -130,7 +136,7 @@ func List(w http.ResponseWriter, r *http.Request) {
 			items = append(items, builtinListResponse(*item.builtin))
 			continue
 		}
-		items = append(items, parentListResponse(item.parent, item.children, suggestionStatesByKey))
+		items = append(items, parentListResponse(item.parent, item.children, suggestionStatesByKey, latestVersionChanges))
 	}
 
 	common.ReplyOK(w, map[string]any{
@@ -556,7 +562,31 @@ func Confirm(w http.ResponseWriter, r *http.Request) {
 		"updated_at":           now,
 		"ext":                  evolution.WithDraftSuggestionIDs(row.Ext, nil),
 	}
-	if err := db.WithContext(r.Context()).Model(&orm.SkillResource{}).Where("id = ? AND version = ?", row.ID, row.Version).Updates(update).Error; err != nil {
+	change := resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+		ResourceID:    row.ID,
+		UserID:        userID,
+		FromVersion:   row.Version,
+		ToVersion:     row.Version + 1,
+		BeforeContent: row.Content,
+		AfterContent:  content,
+		Source: resourcechange.Source{
+			ChangeSource: resourcechange.ChangeSourceDraftConfirm,
+			ChangedAt:    now,
+		},
+	}
+	if err := db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		affected, err := resourcechange.UpdateModel(r.Context(), tx, &orm.SkillResource{}, func(query *gorm.DB) *gorm.DB {
+			return query.Where("id = ? AND version = ?", row.ID, row.Version)
+		}, update, change)
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	}); err != nil {
 		common.ReplyErr(w, "confirm skill draft failed", http.StatusInternalServerError)
 		return
 	}
@@ -717,17 +747,21 @@ func getSkillDetail(ctx context.Context, db *gorm.DB, userID, skillID string) (m
 		return nil, err
 	}
 	suggestionRows := []orm.SkillResource{row}
+	var detailChildren []orm.SkillResource
 	if row.NodeType == evolution.SkillNodeTypeParent {
-		var children []orm.SkillResource
 		if err := db.WithContext(ctx).
 			Where("owner_user_id = ? AND node_type = ? AND category = ? AND parent_skill_name = ?", userID, evolution.SkillNodeTypeChild, row.Category, row.SkillName).
 			Order("created_at ASC").
-			Find(&children).Error; err != nil {
+			Find(&detailChildren).Error; err != nil {
 			return nil, err
 		}
-		suggestionRows = append(suggestionRows, children...)
+		suggestionRows = append(suggestionRows, detailChildren...)
 	}
 	suggestionStatesByKey, err := loadSuggestionStatesByKey(ctx, db, userID, suggestionRows)
+	if err != nil {
+		return nil, err
+	}
+	latestVersionChanges, err := resourcechange.LatestSummariesForResources(ctx, db, userID, orm.ResourceUpdateResourceTypeSkill, skillResourceIDs(suggestionRows))
 	if err != nil {
 		return nil, err
 	}
@@ -761,6 +795,8 @@ func getSkillDetail(ctx context.Context, db *gorm.DB, userID, skillID string) (m
 		"parent_skill_id":                "",
 		"parent_skill_name":              row.ParentSkillName,
 		"content":                        content,
+		"version":                        row.Version,
+		"latest_version_change":          latestVersionChange(row.ID, latestVersionChanges),
 		"file_ext":                       row.FileExt,
 	}
 	if row.NodeType == evolution.SkillNodeTypeChild {
@@ -770,15 +806,8 @@ func getSkillDetail(ctx context.Context, db *gorm.DB, userID, skillID string) (m
 		}
 	}
 	if row.NodeType == evolution.SkillNodeTypeParent {
-		var children []orm.SkillResource
-		if err := db.WithContext(ctx).
-			Where("owner_user_id = ? AND node_type = ? AND category = ? AND parent_skill_name = ?", userID, evolution.SkillNodeTypeChild, row.Category, row.SkillName).
-			Order("created_at ASC").
-			Find(&children).Error; err != nil {
-			return nil, err
-		}
-		childItems := make([]map[string]any, 0, len(children))
-		for _, child := range children {
+		childItems := make([]map[string]any, 0, len(detailChildren))
+		for _, child := range detailChildren {
 			childSuggestionState := canonicalSkillSuggestionState(suggestionStatesByKey[skillSuggestionResourceKey(child)])
 			childContent, _ := storedSkillContent(child)
 			childItems = append(childItems, map[string]any{
@@ -806,6 +835,8 @@ func getSkillDetail(ctx context.Context, db *gorm.DB, userID, skillID string) (m
 				"parent_skill_id":                row.ID,
 				"parent_skill_name":              child.ParentSkillName,
 				"content":                        childContent,
+				"version":                        child.Version,
+				"latest_version_change":          latestVersionChange(child.ID, latestVersionChanges),
 			})
 		}
 		item["children"] = childItems
@@ -858,10 +889,12 @@ func createParentSkill(ctx context.Context, db *gorm.DB, userID, userName string
 	if err != nil {
 		return err
 	}
-	return createParentSkillWithContent(ctx, db, userID, userName, req, fullContent, description)
+	return createParentSkillWithContent(ctx, db, userID, userName, req, fullContent, description, resourcechange.Source{
+		ChangeSource: resourcechange.ChangeSourceDirectSave,
+	})
 }
 
-func createParentSkillWithContent(ctx context.Context, db *gorm.DB, userID, userName string, req createSkillRequest, fullContent, description string) error {
+func createParentSkillWithContent(ctx context.Context, db *gorm.DB, userID, userName string, req createSkillRequest, fullContent, description string, source resourcechange.Source) error {
 	relPath := parentRelativePath(req.Category, req.Name)
 	var count int64
 	if err := db.WithContext(ctx).
@@ -886,6 +919,9 @@ func createParentSkillWithContent(ctx context.Context, db *gorm.DB, userID, user
 	}
 
 	now := time.Now()
+	if source.ChangedAt.IsZero() {
+		source.ChangedAt = now
+	}
 	enabled := true
 	if req.IsEnabled != nil {
 		enabled = *req.IsEnabled
@@ -946,11 +982,30 @@ func createParentSkillWithContent(ctx context.Context, db *gorm.DB, userID, user
 		})
 	}
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&parent).Error; err != nil {
+		if err := resourcechange.CreateModel(ctx, tx, &parent, resourcechange.ContentChange{
+			ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+			ResourceID:    parent.ID,
+			UserID:        userID,
+			FromVersion:   0,
+			ToVersion:     parent.Version,
+			BeforeContent: "",
+			AfterContent:  parent.Content,
+			Source:        source,
+		}); err != nil {
 			return err
 		}
-		if len(children) > 0 {
-			if err := tx.Create(&children).Error; err != nil {
+		for i := range children {
+			child := &children[i]
+			if err := resourcechange.CreateModel(ctx, tx, child, resourcechange.ContentChange{
+				ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+				ResourceID:    child.ID,
+				UserID:        userID,
+				FromVersion:   0,
+				ToVersion:     child.Version,
+				BeforeContent: "",
+				AfterContent:  child.Content,
+				Source:        source,
+			}); err != nil {
 				return err
 			}
 		}
@@ -1024,7 +1079,17 @@ func createChildSkill(ctx context.Context, db *gorm.DB, userID, userName string,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	if err := db.WithContext(ctx).Create(&row).Error; err != nil {
+	nowSource := resourcechange.Source{ChangeSource: resourcechange.ChangeSourceDirectSave, ChangedAt: now}
+	if err := resourcechange.CreateModel(ctx, db, &row, resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+		ResourceID:    row.ID,
+		UserID:        userID,
+		FromVersion:   0,
+		ToVersion:     row.Version,
+		BeforeContent: "",
+		AfterContent:  row.Content,
+		Source:        nowSource,
+	}); err != nil {
 		return orm.SkillResource{}, err
 	}
 	return row, nil
@@ -1045,18 +1110,27 @@ func updateSkill(ctx context.Context, db *gorm.DB, userID, userName, skillID str
 }
 
 func DeleteSkill(ctx context.Context, db *gorm.DB, userID, skillID string) error {
+	return DeleteSkillWithSource(ctx, db, userID, skillID, resourcechange.Source{
+		ChangeSource: resourcechange.ChangeSourceDirectSave,
+	})
+}
+
+func DeleteSkillWithSource(ctx context.Context, db *gorm.DB, userID, skillID string, source resourcechange.Source) error {
 	var row orm.SkillResource
 	if err := db.WithContext(ctx).Where("id = ? AND owner_user_id = ?", skillID, userID).Take(&row).Error; err != nil {
 		return err
 	}
 	if row.NodeType == evolution.SkillNodeTypeParent {
-		return deleteParentSkill(ctx, db, userID, &row)
+		return deleteParentSkill(ctx, db, userID, &row, source)
 	}
-	return deleteChildSkill(ctx, db, &row)
+	return deleteChildSkill(ctx, db, &row, source)
 }
 
-func deleteParentSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.SkillResource) error {
+func deleteParentSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.SkillResource, source resourcechange.Source) error {
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if source.ChangedAt.IsZero() {
+			source.ChangedAt = time.Now()
+		}
 		var children []orm.SkillResource
 		if err := tx.Where("owner_user_id = ? AND node_type = ? AND category = ? AND parent_skill_name = ?", userID, evolution.SkillNodeTypeChild, row.Category, row.SkillName).Find(&children).Error; err != nil {
 			return err
@@ -1068,24 +1142,64 @@ func deleteParentSkill(ctx context.Context, db *gorm.DB, userID string, row *orm
 				return err
 			}
 		}
-		if err := tx.Where("owner_user_id = ? AND node_type = ? AND category = ? AND parent_skill_name = ?", userID, evolution.SkillNodeTypeChild, row.Category, row.SkillName).Delete(&orm.SkillResource{}).Error; err != nil {
-			return err
+		for _, child := range children {
+			if _, err := resourcechange.DeleteModel(ctx, tx, &orm.SkillResource{}, func(query *gorm.DB) *gorm.DB {
+				return query.Where("id = ? AND owner_user_id = ?", child.ID, child.OwnerUserID)
+			}, resourcechange.ContentChange{
+				ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+				ResourceID:    child.ID,
+				UserID:        child.OwnerUserID,
+				FromVersion:   child.Version,
+				ToVersion:     child.Version,
+				BeforeContent: child.Content,
+				AfterContent:  "",
+				Source:        source,
+			}); err != nil {
+				return err
+			}
 		}
-		return tx.Where("id = ? AND owner_user_id = ?", row.ID, userID).Delete(&orm.SkillResource{}).Error
+		_, err := resourcechange.DeleteModel(ctx, tx, &orm.SkillResource{}, func(query *gorm.DB) *gorm.DB {
+			return query.Where("id = ? AND owner_user_id = ?", row.ID, userID)
+		}, resourcechange.ContentChange{
+			ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+			ResourceID:    row.ID,
+			UserID:        userID,
+			FromVersion:   row.Version,
+			ToVersion:     row.Version,
+			BeforeContent: row.Content,
+			AfterContent:  "",
+			Source:        source,
+		})
+		return err
 	}); err != nil {
 		return err
 	}
 	return nil
 }
 
-func deleteChildSkill(ctx context.Context, db *gorm.DB, row *orm.SkillResource) error {
+func deleteChildSkill(ctx context.Context, db *gorm.DB, row *orm.SkillResource, source resourcechange.Source) error {
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if source.ChangedAt.IsZero() {
+			source.ChangedAt = time.Now()
+		}
 		if resourceKey := skillSuggestionResourceKey(*row); resourceKey != "" {
 			if err := tx.Where("user_id = ? AND resource_type = ? AND resource_key = ?", row.OwnerUserID, evolution.ResourceTypeSkill, resourceKey).Delete(&orm.ResourceSuggestion{}).Error; err != nil {
 				return err
 			}
 		}
-		return tx.Where("id = ? AND owner_user_id = ?", row.ID, row.OwnerUserID).Delete(&orm.SkillResource{}).Error
+		_, err := resourcechange.DeleteModel(ctx, tx, &orm.SkillResource{}, func(query *gorm.DB) *gorm.DB {
+			return query.Where("id = ? AND owner_user_id = ?", row.ID, row.OwnerUserID)
+		}, resourcechange.ContentChange{
+			ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+			ResourceID:    row.ID,
+			UserID:        row.OwnerUserID,
+			FromVersion:   row.Version,
+			ToVersion:     row.Version,
+			BeforeContent: row.Content,
+			AfterContent:  "",
+			Source:        source,
+		})
+		return err
 	})
 }
 
@@ -1195,6 +1309,7 @@ func updateParentSkill(ctx context.Context, db *gorm.DB, userID, userName string
 		return err
 	}
 	newDescription = resolvedDescription
+	shouldRecordContentChange := req.Content != nil && currentContent != newContent
 	if oldCategory != newCategory || oldName != newName {
 		var count int64
 		if oldName != newName {
@@ -1234,6 +1349,13 @@ func updateParentSkill(ctx context.Context, db *gorm.DB, userID, userName string
 		"content_hash":  evolution.HashContent(newContent),
 		"updated_at":    now,
 	}
+	changeToVersion := row.Version
+	afterVersionContent := currentContent
+	if shouldRecordContentChange {
+		changeToVersion = row.Version + 1
+		afterVersionContent = newContent
+		update["version"] = changeToVersion
+	}
 	if req.Tags != nil {
 		update["tags"] = tagsJSON(*req.Tags)
 	}
@@ -1254,7 +1376,21 @@ func updateParentSkill(ctx context.Context, db *gorm.DB, userID, userName string
 	if req.IsEnabled != nil {
 		update["is_enabled"] = *req.IsEnabled
 	}
-	if err := db.WithContext(ctx).Model(&orm.SkillResource{}).Where("id = ?", row.ID).Updates(update).Error; err != nil {
+	if _, err := resourcechange.UpdateModel(ctx, db, &orm.SkillResource{}, func(query *gorm.DB) *gorm.DB {
+		return query.Where("id = ?", row.ID)
+	}, update, resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+		ResourceID:    row.ID,
+		UserID:        userID,
+		FromVersion:   row.Version,
+		ToVersion:     changeToVersion,
+		BeforeContent: currentContent,
+		AfterContent:  afterVersionContent,
+		Source: resourcechange.Source{
+			ChangeSource: resourcechange.ChangeSourceDirectSave,
+			ChangedAt:    now,
+		},
+	}); err != nil {
 		return err
 	}
 
@@ -1336,6 +1472,7 @@ func updateChildSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.
 	if req.Content != nil {
 		newContent = *req.Content
 	}
+	shouldRecordContentChange := req.Content != nil && currentContent != newContent
 	newDescription := row.Description
 	if req.Description != nil {
 		newDescription = strings.TrimSpace(*req.Description)
@@ -1407,6 +1544,13 @@ func updateChildSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.
 		"content_hash":      evolution.HashContent(newContent),
 		"updated_at":        time.Now(),
 	}
+	changeToVersion := row.Version
+	afterVersionContent := currentContent
+	if shouldRecordContentChange {
+		changeToVersion = row.Version + 1
+		afterVersionContent = newContent
+		update["version"] = changeToVersion
+	}
 	if newParent != nil {
 		update["is_enabled"] = newParent.IsEnabled
 		update["update_status"] = normalizedSkillUpdateStatus(newParent.UpdateStatus)
@@ -1425,7 +1569,23 @@ func updateChildSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.
 			update["auto_evo_finished_at"] = time.Now()
 		}
 	}
-	if err := db.WithContext(ctx).Model(&orm.SkillResource{}).Where("id = ?", row.ID).Updates(update).Error; err != nil {
+	changedAt := time.Now()
+	update["updated_at"] = changedAt
+	if _, err := resourcechange.UpdateModel(ctx, db, &orm.SkillResource{}, func(query *gorm.DB) *gorm.DB {
+		return query.Where("id = ?", row.ID)
+	}, update, resourcechange.ContentChange{
+		ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+		ResourceID:    row.ID,
+		UserID:        userID,
+		FromVersion:   row.Version,
+		ToVersion:     changeToVersion,
+		BeforeContent: currentContent,
+		AfterContent:  afterVersionContent,
+		Source: resourcechange.Source{
+			ChangeSource: resourcechange.ChangeSourceDirectSave,
+			ChangedAt:    changedAt,
+		},
+	}); err != nil {
 		return err
 	}
 
@@ -1458,12 +1618,12 @@ func updateChildSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.
 	return nil
 }
 
-func parentListResponse(parent orm.SkillResource, children []orm.SkillResource, suggestionStatesByKey map[string]skillSuggestionState) map[string]any {
+func parentListResponse(parent orm.SkillResource, children []orm.SkillResource, suggestionStatesByKey map[string]skillSuggestionState, latestVersionChanges map[string]resourcechange.VersionChangeSummary) map[string]any {
 	parentSuggestionState := canonicalSkillSuggestionState(suggestionStatesByKey[skillSuggestionResourceKey(parent)])
 	childItems := make([]map[string]any, 0, len(children))
 	sort.Slice(children, func(i, j int) bool { return children[i].CreatedAt.Before(children[j].CreatedAt) })
 	for _, child := range children {
-		childItems = append(childItems, childListResponse(parent, child, suggestionStatesByKey))
+		childItems = append(childItems, childListResponse(parent, child, suggestionStatesByKey, latestVersionChanges))
 	}
 	return map[string]any{
 		"skill_id":                       parent.ID,
@@ -1486,11 +1646,13 @@ func parentListResponse(parent orm.SkillResource, children []orm.SkillResource, 
 		"is_builtin_template":            false,
 		"activation_status":              builtinActivationStatus(parent.OriginBuiltinSkillUID),
 		"readonly":                       false,
+		"version":                        parent.Version,
+		"latest_version_change":          latestVersionChange(parent.ID, latestVersionChanges),
 		"children":                       childItems,
 	}
 }
 
-func childListResponse(parent, child orm.SkillResource, suggestionStatesByKey map[string]skillSuggestionState) map[string]any {
+func childListResponse(parent, child orm.SkillResource, suggestionStatesByKey map[string]skillSuggestionState, latestVersionChanges map[string]resourcechange.VersionChangeSummary) map[string]any {
 	childSuggestionState := canonicalSkillSuggestionState(suggestionStatesByKey[skillSuggestionResourceKey(child)])
 	return map[string]any{
 		"skill_id":                       child.ID,
@@ -1517,6 +1679,8 @@ func childListResponse(parent, child orm.SkillResource, suggestionStatesByKey ma
 		"is_builtin_template":            false,
 		"activation_status":              builtinActivationStatus(child.OriginBuiltinSkillUID),
 		"readonly":                       false,
+		"version":                        child.Version,
+		"latest_version_change":          latestVersionChange(child.ID, latestVersionChanges),
 	}
 }
 
@@ -1616,6 +1780,28 @@ func skillSuggestionResourceKeys(rows []orm.SkillResource) []string {
 		keys = append(keys, key)
 	}
 	return compactStrings(keys)
+}
+
+func skillResourceIDs(rows []orm.SkillResource) []string {
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if strings.TrimSpace(row.ID) == "" {
+			continue
+		}
+		ids = append(ids, row.ID)
+	}
+	return compactStrings(ids)
+}
+
+func latestVersionChange(resourceID string, summaries map[string]resourcechange.VersionChangeSummary) any {
+	if summaries == nil {
+		return nil
+	}
+	summary, ok := summaries[strings.TrimSpace(resourceID)]
+	if !ok {
+		return nil
+	}
+	return summary
 }
 
 func skillSuggestionResourceKey(row orm.SkillResource) string {

@@ -777,7 +777,54 @@ func TestAddBindingRecordsSyncJobErrorOnBindingAndCheckpoint(t *testing.T) {
 	}
 }
 
-func TestCreateSourceDoesNotTriggerInitialSync(t *testing.T) {
+func TestCreateSourceTriggersInitialSyncForCreatedBindings(t *testing.T) {
+	t.Parallel()
+
+	now := fixedSourceTestTime()
+	repo := newSourceEngineRepoStub()
+	scheduler := &sourceScheduleSpy{}
+	engine := newTestSourceEngineWithSchedule(t, repo, &sourceCoreSpy{}, &sourceSpyConnector{}, scheduler, now)
+
+	resp, err := engine.CreateSource(context.Background(), CreateSourceRequest{
+		CallerID:  "user-1",
+		TenantID:  "tenant-1",
+		RequestID: "request-1",
+		Name:      "Docs",
+		Bindings: []BindingInput{
+			{
+				ConnectorType: spyConnectorType,
+				TargetType:    spyTargetType,
+				TargetRef:     "target-1",
+				SyncMode:      SyncModeManual,
+			},
+			{
+				ConnectorType:  spyConnectorType,
+				TargetType:     spyTargetType,
+				TargetRef:      "target-2",
+				SyncMode:       SyncModeScheduled,
+				SchedulePolicy: sourceTestSchedulePolicy("UTC", sourceTestScheduleRule([]string{"everyday"}, "02:00:00")),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	if !reflect.DeepEqual(resp.JobIDs, []string{"job-1", "job-2"}) || len(resp.JobErrors) != 0 {
+		t.Fatalf("create source should return initial sync jobs: %+v", resp)
+	}
+	op := repo.operations["user-1\x00request-1"]
+	if op.Status != OperationStatusSucceeded {
+		t.Fatalf("operation should succeed after initial sync enqueue, got %+v", op)
+	}
+	if len(scheduler.triggered) != 2 {
+		t.Fatalf("create source should trigger initial sync for both bindings: %+v", scheduler.triggered)
+	}
+	if len(repo.recordedJobErrors) != 0 {
+		t.Fatalf("successful initial sync enqueue should not record job errors: %+v", repo.recordedJobErrors)
+	}
+}
+
+func TestCreateSourceRecordsInitialSyncWarning(t *testing.T) {
 	t.Parallel()
 
 	now := fixedSourceTestTime()
@@ -800,18 +847,28 @@ func TestCreateSourceDoesNotTriggerInitialSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create source: %v", err)
 	}
-	if len(resp.JobIDs) != 0 || len(resp.JobErrors) != 0 {
-		t.Fatalf("create source should not enqueue sync jobs: %+v", resp)
+	if len(resp.JobIDs) != 0 || len(resp.JobErrors) != 1 {
+		t.Fatalf("expected initial sync warning, got %+v", resp)
+	}
+	if resp.JobErrors[0].Message != "queue is down" {
+		t.Fatalf("unexpected initial sync warning: %+v", resp.JobErrors[0])
 	}
 	op := repo.operations["user-1\x00request-1"]
-	if op.Status != OperationStatusSucceeded {
-		t.Fatalf("operation should succeed without sync warning, got %+v", op)
+	if op.Status != OperationStatusSucceededWithWarning {
+		t.Fatalf("operation should keep source creation with sync warning, got %+v", op)
 	}
-	if len(scheduler.triggered) != 0 {
-		t.Fatalf("create source should not trigger initial sync: %+v", scheduler.triggered)
+	if _, ok := op.Warning["job_errors"]; !ok {
+		t.Fatalf("operation should persist sync warning details: %+v", op.Warning)
 	}
-	if len(repo.recordedJobErrors) != 0 {
-		t.Fatalf("create source should not record sync job errors: %+v", repo.recordedJobErrors)
+	if len(scheduler.triggered) != 1 {
+		t.Fatalf("create source should attempt initial sync: %+v", scheduler.triggered)
+	}
+	if len(repo.recordedJobErrors) != 1 {
+		t.Fatalf("expected recorded sync job error, got %+v", repo.recordedJobErrors)
+	}
+	recorded := repo.recordedJobErrors[0]
+	if recorded.bindingID != resp.Bindings[0].BindingID || recorded.generation != int64(1) || recorded.lastError["message"] != "queue is down" {
+		t.Fatalf("unexpected recorded job error: %+v", recorded)
 	}
 }
 

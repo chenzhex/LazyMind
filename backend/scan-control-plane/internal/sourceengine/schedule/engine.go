@@ -151,7 +151,7 @@ func (e *CheckpointScheduleEngine) BuildCheckpoint(_ context.Context, binding st
 }
 
 func (e *CheckpointScheduleEngine) TriggerInitialSync(ctx context.Context, binding store.Binding) ([]string, error) {
-	if binding.SyncMode == SyncModeScheduled || binding.SyncMode == SyncModeWatch {
+	if binding.SyncMode == SyncModeWatch {
 		return nil, nil
 	}
 	intent, err := e.enqueueBindingRun(ctx, binding, TriggerTypeManual, connector.ScopeTypeFull, nil, "", e.clock().UTC(), nil)
@@ -172,6 +172,44 @@ type ManualSyncRequest struct {
 type SyncRunIntent struct {
 	Run     store.SyncRun
 	Created bool
+}
+
+type WatchEventSyncRequest struct {
+	Binding    store.Binding
+	ObjectKey  string
+	Path       string
+	EventType  string
+	OccurredAt time.Time
+	IsDir      bool
+}
+
+func (e *CheckpointScheduleEngine) EnqueueWatchEventSync(ctx context.Context, req WatchEventSyncRequest) (SyncRunIntent, error) {
+	if req.Binding.SyncMode != SyncModeWatch {
+		return SyncRunIntent{}, fmt.Errorf("binding %s is not watch mode", req.Binding.BindingID)
+	}
+	occurredAt := req.OccurredAt.UTC()
+	now := e.clock().UTC()
+	if occurredAt.IsZero() {
+		occurredAt = now
+	}
+	runAt := occurredAt
+	if runAt.After(now) {
+		runAt = now
+	}
+	scopeRef := connector.ScopeRef{
+		"event_type":  req.EventType,
+		"occurred_at": occurredAt.Format(time.RFC3339Nano),
+	}
+	if req.ObjectKey != "" {
+		scopeRef["object_key"] = req.ObjectKey
+	}
+	if req.Path != "" {
+		scopeRef["path"] = req.Path
+	}
+	if req.IsDir {
+		scopeRef["is_dir"] = "true"
+	}
+	return e.enqueueBindingRun(ctx, req.Binding, TriggerTypeWatch, connector.ScopeTypeWatchEvent, scopeRef, "", runAt, &occurredAt)
 }
 
 func (e *CheckpointScheduleEngine) EnqueueManualSync(ctx context.Context, req ManualSyncRequest) (SyncRunIntent, error) {

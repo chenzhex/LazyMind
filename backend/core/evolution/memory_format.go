@@ -7,6 +7,14 @@ import (
 )
 
 func FormatSystemMemoryForChat(row orm.SystemMemory) string {
+	return row.Content
+}
+
+func HashSystemMemory(row orm.SystemMemory) string {
+	return HashContent(row.Content)
+}
+
+func FormatSystemUserPreferenceForChat(row orm.SystemUserPreference) string {
 	var b strings.Builder
 	b.WriteString("---\n")
 	writeYAMLFrontMatterBlock(&b, "agent_persona", row.AgentPersona)
@@ -17,8 +25,8 @@ func FormatSystemMemoryForChat(row orm.SystemMemory) string {
 	return b.String()
 }
 
-func HashSystemMemory(row orm.SystemMemory) string {
-	return HashContent(FormatSystemMemoryForChat(row))
+func HashSystemUserPreference(row orm.SystemUserPreference) string {
+	return HashContent(FormatSystemUserPreferenceForChat(row))
 }
 
 func writeYAMLFrontMatterBlock(b *strings.Builder, key, value string) {

@@ -19,6 +19,7 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
 	appLog "lazymind/core/log"
+	"lazymind/core/resourcechange"
 	"lazymind/core/store"
 )
 
@@ -456,11 +457,34 @@ func createBuiltinSkillCopy(ctx context.Context, db *gorm.DB, userID, userName s
 	}
 
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&parent).Error; err != nil {
+		source := resourcechange.Source{
+			ChangeSource: resourcechange.ChangeSourceDirectSave,
+			ChangedAt:    now,
+		}
+		if err := resourcechange.CreateModel(ctx, tx, &parent, resourcechange.ContentChange{
+			ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+			ResourceID:    parent.ID,
+			UserID:        userID,
+			FromVersion:   0,
+			ToVersion:     parent.Version,
+			BeforeContent: "",
+			AfterContent:  parent.Content,
+			Source:        source,
+		}); err != nil {
 			return err
 		}
-		if len(children) > 0 {
-			if err := tx.Create(&children).Error; err != nil {
+		for i := range children {
+			child := &children[i]
+			if err := resourcechange.CreateModel(ctx, tx, child, resourcechange.ContentChange{
+				ResourceType:  orm.ResourceUpdateResourceTypeSkill,
+				ResourceID:    child.ID,
+				UserID:        userID,
+				FromVersion:   0,
+				ToVersion:     child.Version,
+				BeforeContent: "",
+				AfterContent:  child.Content,
+				Source:        source,
+			}); err != nil {
 				return err
 			}
 		}

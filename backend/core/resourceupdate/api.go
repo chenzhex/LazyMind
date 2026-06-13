@@ -12,6 +12,7 @@ import (
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
+	"lazymind/core/resourcechange"
 	"lazymind/core/store"
 )
 
@@ -333,11 +334,21 @@ func acceptSkillReviewResult(ctx context.Context, db *gorm.DB, userID, userName,
 				}
 				return err
 			}
-			if err := applySkillPatchResult(ctx, tx, row, resource, now); err != nil {
+			if err := applySkillPatchResult(ctx, tx, row, resource, now, resourcechange.Source{
+				ChangeSource:  resourcechange.ChangeSourceReviewAccept,
+				SourceRefType: resourcechange.SourceRefTypeSkillReviewResult,
+				SourceRefID:   row.ID,
+				ChangedAt:     now,
+			}); err != nil {
 				return err
 			}
 		case skillReviewTypeNew:
-			if _, err := createSkillFromNewResult(ctx, tx, row, userName, now); err != nil {
+			if _, err := createSkillFromNewResult(ctx, tx, row, userName, now, resourcechange.Source{
+				ChangeSource:  resourcechange.ChangeSourceReviewAccept,
+				SourceRefType: resourcechange.SourceRefTypeSkillReviewResult,
+				SourceRefID:   row.ID,
+				ChangedAt:     now,
+			}); err != nil {
 				return err
 			}
 			if err := updateSkillReviewStatus(ctx, tx, row.ID, reviewStatusAccepted); err != nil {
@@ -396,7 +407,12 @@ func acceptMemoryReviewResult(ctx context.Context, db *gorm.DB, userID, resultID
 				}
 				return err
 			}
-			if err := applyMemoryReviewResult(ctx, tx, row, resource, now, false); err != nil {
+			if err := applyMemoryReviewResult(ctx, tx, row, resource, now, false, resourcechange.Source{
+				ChangeSource:  resourcechange.ChangeSourceReviewAccept,
+				SourceRefType: resourcechange.SourceRefTypeMemoryReview,
+				SourceRefID:   row.ID,
+				ChangedAt:     now,
+			}); err != nil {
 				return err
 			}
 		case orm.ResourceUpdateResourceTypeUserPreference:
@@ -407,7 +423,12 @@ func acceptMemoryReviewResult(ctx context.Context, db *gorm.DB, userID, resultID
 				}
 				return err
 			}
-			if err := applyPreferenceReviewResult(ctx, tx, row, resource, now, false); err != nil {
+			if err := applyPreferenceReviewResult(ctx, tx, row, resource, now, false, resourcechange.Source{
+				ChangeSource:  resourcechange.ChangeSourceReviewAccept,
+				SourceRefType: resourcechange.SourceRefTypeMemoryReview,
+				SourceRefID:   row.ID,
+				ChangedAt:     now,
+			}); err != nil {
 				return err
 			}
 		default:

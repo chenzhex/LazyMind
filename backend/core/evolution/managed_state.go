@@ -11,6 +11,7 @@ import (
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
+	"lazymind/core/resourcechange"
 	"lazymind/core/store"
 )
 
@@ -20,20 +21,22 @@ const (
 )
 
 type ManagedStateItem struct {
-	ResourceID                  string  `json:"resource_id"`
-	ResourceType                string  `json:"resource_type"`
-	Title                       string  `json:"title"`
-	Content                     string  `json:"content"`
-	AgentPersona                *string `json:"agent_persona,omitempty"`
-	UserAddress                 *string `json:"user_address,omitempty"`
-	ResponseStyle               *string `json:"response_style,omitempty"`
-	ContentSummary              string  `json:"content_summary"`
-	HasPendingReviewSuggestions bool    `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string  `json:"suggestion_status"`
-	AutoEvo                     bool    `json:"auto_evo"`
-	AutoEvoApplyStatus          string  `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64   `json:"auto_evo_generation"`
-	AutoEvoError                string  `json:"auto_evo_error"`
+	ResourceID                  string                               `json:"resource_id"`
+	ResourceType                string                               `json:"resource_type"`
+	Title                       string                               `json:"title"`
+	Content                     string                               `json:"content"`
+	AgentPersona                *string                              `json:"agent_persona,omitempty"`
+	UserAddress                 *string                              `json:"user_address,omitempty"`
+	ResponseStyle               *string                              `json:"response_style,omitempty"`
+	ContentSummary              string                               `json:"content_summary"`
+	Version                     int64                                `json:"version"`
+	LatestVersionChange         *resourcechange.VersionChangeSummary `json:"latest_version_change"`
+	HasPendingReviewSuggestions bool                                 `json:"has_pending_review_suggestions"`
+	SuggestionStatus            string                               `json:"suggestion_status"`
+	AutoEvo                     bool                                 `json:"auto_evo"`
+	AutoEvoApplyStatus          string                               `json:"auto_evo_apply_status"`
+	AutoEvoGeneration           int64                                `json:"auto_evo_generation"`
+	AutoEvoError                string                               `json:"auto_evo_error"`
 }
 
 func ListManagedStates(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +71,22 @@ func ListManagedStates(w http.ResponseWriter, r *http.Request) {
 	items := []ManagedStateItem{
 		NewManagedStateItem(ResourceTypeMemory, memoryRow, suggestionStatuses[ResourceTypeMemory]),
 		NewManagedStateItem(ResourceTypeUserPreference, preferenceRow, suggestionStatuses[ResourceTypeUserPreference]),
+	}
+	if memoryRow != nil {
+		summary, err := resourcechange.LatestSummaryForResource(r.Context(), db, userID, orm.ResourceUpdateResourceTypeMemory, memoryRow.ID)
+		if err != nil {
+			common.ReplyErr(w, "query managed states failed", http.StatusInternalServerError)
+			return
+		}
+		items[0].LatestVersionChange = summary
+	}
+	if preferenceRow != nil {
+		summary, err := resourcechange.LatestSummaryForResource(r.Context(), db, userID, orm.ResourceUpdateResourceTypeUserPreference, preferenceRow.ID)
+		if err != nil {
+			common.ReplyErr(w, "query managed states failed", http.StatusInternalServerError)
+			return
+		}
+		items[1].LatestVersionChange = summary
 	}
 
 	common.ReplyOK(w, map[string]any{"items": items})
@@ -108,10 +127,8 @@ func NewManagedStateItem(resourceType string, row any, suggestionStatus string) 
 		if typed != nil {
 			item.ResourceID = strings.TrimSpace(typed.ID)
 			item.Content = typed.Content
-			item.AgentPersona = stringPtr(typed.AgentPersona)
-			item.UserAddress = stringPtr(typed.UserAddress)
-			item.ResponseStyle = stringPtr(typed.ResponseStyle)
 			item.ContentSummary = ManagedStateSummary(typed.Content)
+			item.Version = typed.Version
 			item.AutoEvo = typed.AutoEvo
 			item.AutoEvoApplyStatus = NormalizeAutoEvoApplyStatus(typed.AutoEvoApplyStatus)
 			item.AutoEvoGeneration = typed.AutoEvoGeneration
@@ -121,7 +138,11 @@ func NewManagedStateItem(resourceType string, row any, suggestionStatus string) 
 		if typed != nil {
 			item.ResourceID = strings.TrimSpace(typed.ID)
 			item.Content = typed.Content
+			item.AgentPersona = stringPtr(typed.AgentPersona)
+			item.UserAddress = stringPtr(typed.UserAddress)
+			item.ResponseStyle = stringPtr(typed.ResponseStyle)
 			item.ContentSummary = ManagedStateSummary(typed.Content)
+			item.Version = typed.Version
 			item.AutoEvo = typed.AutoEvo
 			item.AutoEvoApplyStatus = NormalizeAutoEvoApplyStatus(typed.AutoEvoApplyStatus)
 			item.AutoEvoGeneration = typed.AutoEvoGeneration

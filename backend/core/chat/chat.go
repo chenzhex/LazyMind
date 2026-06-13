@@ -55,6 +55,7 @@ type LazyChatRequest struct {
 	EnvironmentContext map[string]any  `json:"environment_context,omitempty"`
 	LLMConfig          map[string]any  `json:"llm_config,omitempty"`
 	ToolConfig         map[string]any  `json:"tool_config,omitempty"`
+	MCPConfig          []any           `json:"mcp_config,omitempty"`
 }
 
 // LazyChatData text data text。
@@ -300,6 +301,14 @@ func buildLazyChatRequest(body map[string]any) *LazyChatRequest {
 		}
 		if len(tc) > 0 {
 			req.ToolConfig = tc
+		}
+	}
+	if mcpConfig, ok := body["mcp_config"].([]any); ok {
+		req.MCPConfig = mcpConfig
+	} else if mcpConfigAny, ok := body["mcp_config"].([]map[string]any); ok {
+		req.MCPConfig = make([]any, 0, len(mcpConfigAny))
+		for _, item := range mcpConfigAny {
+			req.MCPConfig = append(req.MCPConfig, item)
 		}
 	}
 	return req

@@ -47,8 +47,8 @@ func DefaultConfig() Config {
 		SchedulerRetryDelay:   5 * time.Minute,
 		SchedulerBatchSize:    100,
 
-		MinUserTurns:          2,
-		MinToolTurns:          5,
+		MinUserTurns:          3,
+		MinToolTurns:          8,
 		QuantityCheckInterval: 5 * time.Minute,
 		MinInterval:           time.Hour,
 		MaxWindow:             7 * 24 * time.Hour,

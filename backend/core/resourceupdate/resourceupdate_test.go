@@ -1026,6 +1026,7 @@ func newResourceUpdateTestDB(t *testing.T) *gorm.DB {
 		&orm.SkillResource{},
 		&orm.SystemMemory{},
 		&orm.SystemUserPreference{},
+		&orm.ResourceVersion{},
 	); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}

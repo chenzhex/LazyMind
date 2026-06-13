@@ -13,6 +13,7 @@ import (
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
+	"lazymind/core/resourcechange"
 )
 
 type Scanner struct {
@@ -280,7 +281,12 @@ func scanSkillReviewResultRows(ctx context.Context, tx *gorm.DB, rows []SkillRev
 }
 
 func applyNewSkillReviewResult(ctx context.Context, tx *gorm.DB, row SkillReviewResult, now time.Time) error {
-	if _, err := createSkillFromNewResult(ctx, tx, row, "", now); err != nil {
+	if _, err := createSkillFromNewResult(ctx, tx, row, "", now, resourcechange.Source{
+		ChangeSource:  resourcechange.ChangeSourceAutoApply,
+		SourceRefType: resourcechange.SourceRefTypeSkillReviewResult,
+		SourceRefID:   row.ID,
+		ChangedAt:     now,
+	}); err != nil {
 		return err
 	}
 	return updateSkillReviewStatus(ctx, tx, row.ID, reviewStatusAccepted)

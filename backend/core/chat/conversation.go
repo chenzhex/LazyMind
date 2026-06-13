@@ -218,6 +218,7 @@ func ChatConversations(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "load chat runtime config failed", err), http.StatusInternalServerError)
 		return
 	}
+	applyMCPRuntimeConfig(r.Context(), db, userID, reqBody)
 	baseURL := chatServiceURL()
 	reqCtx := r.Context()
 	rdb := store.Redis()

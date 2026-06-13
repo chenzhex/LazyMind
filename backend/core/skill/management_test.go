@@ -18,6 +18,7 @@ import (
 
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
+	"lazymind/core/resourcechange"
 	"lazymind/core/store"
 )
 
@@ -2427,6 +2428,54 @@ func TestUpdateParentSkillRebuildsContentFromBodyOnlyPayload(t *testing.T) {
 	}
 }
 
+func TestUpdateParentSkillMetadataOnlyDoesNotCreateResourceVersion(t *testing.T) {
+	db := newSkillTestDB(t)
+
+	createReq := createSkillRequest{
+		Name:        "git-workflow",
+		Description: "Git workflow for postman test",
+		Category:    "coding",
+		Content:     "# Git Workflow\n\nKeep commit history clean and easy to review.",
+	}
+	if err := createParentSkill(context.Background(), db.DB, "u1", "User 1", createReq); err != nil {
+		t.Fatalf("create parent skill: %v", err)
+	}
+
+	var row orm.SkillResource
+	if err := db.Where("owner_user_id = ? AND node_type = ?", "u1", evolution.SkillNodeTypeParent).Take(&row).Error; err != nil {
+		t.Fatalf("query parent skill: %v", err)
+	}
+	if got := countSkillResourceVersions(t, db, row.ID); got != 1 {
+		t.Fatalf("expected create to write 1 resource version, got %d", got)
+	}
+
+	description := "Updated git workflow"
+	if err := updateSkill(context.Background(), db.DB, "u1", "User 1", row.ID, updateSkillRequest{Description: &description}); err != nil {
+		t.Fatalf("update parent skill description: %v", err)
+	}
+	if got := countSkillResourceVersions(t, db, row.ID); got != 1 {
+		t.Fatalf("expected metadata-only update to keep 1 resource version, got %d", got)
+	}
+
+	content := "# Git Workflow\n\nUse small, reviewable commits."
+	if err := updateSkill(context.Background(), db.DB, "u1", "User 1", row.ID, updateSkillRequest{Content: &content}); err != nil {
+		t.Fatalf("update parent skill content: %v", err)
+	}
+	if got := countSkillResourceVersions(t, db, row.ID); got != 2 {
+		t.Fatalf("expected content update to write second resource version, got %d", got)
+	}
+	var latest orm.ResourceVersion
+	if err := db.Where("resource_id = ?", row.ID).Order("created_at DESC, id DESC").Take(&latest).Error; err != nil {
+		t.Fatalf("query latest resource version: %v", err)
+	}
+	if latest.ChangeSource != resourcechange.ChangeSourceDirectSave {
+		t.Fatalf("expected direct_save version source, got %q", latest.ChangeSource)
+	}
+	if !strings.Contains(latest.Diff, "+Use small, reviewable commits.") {
+		t.Fatalf("expected latest diff to include content body update, got %q", latest.Diff)
+	}
+}
+
 func TestUpdateParentSkillRejectsDuplicateParentNameAcrossCategories(t *testing.T) {
 	db := newSkillTestDB(t)
 
@@ -3285,4 +3334,13 @@ func TestDeleteParentSkillRemovesRelatedSuggestions(t *testing.T) {
 
 func stringPtr(value string) *string {
 	return &value
+}
+
+func countSkillResourceVersions(t *testing.T, db *orm.DB, resourceID string) int64 {
+	t.Helper()
+	var count int64
+	if err := db.Model(&orm.ResourceVersion{}).Where("resource_id = ?", resourceID).Count(&count).Error; err != nil {
+		t.Fatalf("count resource versions: %v", err)
+	}
+	return count
 }
