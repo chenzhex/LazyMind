@@ -93,7 +93,8 @@ async def chat(
         Body(
             description=(
                 'Per-request MCP server configuration. Each item: '
-                '{id, name, transport, url, headers, allowed_tools, timeout}.'
+                '{id, name, transport, url, headers, allowed_tools, timeout}. '
+                'headers contains decrypted real credentials and is discarded after the request.'
             )
         ),
     ] = None,

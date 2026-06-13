@@ -17,7 +17,7 @@ from lazymind.chat.engine.prompts import build_system_prompt
 from lazymind.chat.service.component import (
     AgentEventFrameTranslator,
     DEFAULT_TOOLS,
-    filter_tools,
+    build_agent_tools,
     normalize_history_for_agent,
 )
 from lazymind.chat.service.utils import (
@@ -32,6 +32,7 @@ from lazyllm.tools.fs.client import FS
 from lazymind.model_config import inject_model_config, summarize_model_config_for_log
 from lazyllm.tools.tool_config_inject import inject_tool_config
 from lazyllm import AutoModel
+from lazyllm.tools.mcp.client import MCPClient
 from lazymind.config import config as _cfg
 
 rag_sem = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -56,37 +57,32 @@ def check_sensitive_content(
     return sensitive_word if has_sensitive else None
 
 
-async def load_mcp_tools(mcp_config: Optional[List[Dict[str, Any]]]) -> List[Any]:
-    if not mcp_config:
-        return []
-    tools: List[Any] = []
-    for item in mcp_config:
-        if not isinstance(item, dict):
-            continue
-        url = str(item.get('url') or '').strip()
+def _build_mcp_tools(mcp_config: List[Dict[str, Any]]) -> list:
+    """Build MCP tool list from mcp_config. Skip individual servers on failure with a warning."""
+    tools = []
+    for server in mcp_config:
+        url = server.get('url')
         if not url:
+            LOG.warning(
+                f"[MCP] skipped server {server.get('name')}: missing 'url' field"
+            )
             continue
-        headers = item.get('headers') if isinstance(item.get('headers'), dict) else None
-        timeout = item.get('timeout') if isinstance(item.get('timeout'), (int, float)) else 5
-        transport = str(item.get('transport') or 'sse').strip().lower()
-        allowed_tools = item.get('allowed_tools')
-        if not isinstance(allowed_tools, list) or not allowed_tools:
-            allowed_tools = None
-        else:
-            allowed_tools = [name.strip() for name in allowed_tools if isinstance(name, str) and name.strip()]
-            allowed_tools = allowed_tools or None
-        client = lazyllm.tools.MCPClient(
-            url,
-            headers=headers,
-            timeout=timeout,
-            transport=transport,
-        )
         try:
-            tools.extend(await client.aget_tools(allowed_tools=allowed_tools))
-        except Exception as exc:
-            LOG.exception(
-                f'[ChatServer] [MCP_CONFIG] failed to load tools '
-                f'[id={item.get("id") or ""}] [name={item.get("name") or ""}]: {exc}'
+            client = MCPClient(
+                command_or_url=url,
+                headers=server.get('headers'),
+                timeout=server.get('timeout', 5),
+                transport=server.get('transport', 'auto'),
+            )
+            allowed = server.get('allowed_tools') or None
+            mcp_tools = client.get_tools(allowed_tools=allowed)
+            tools.extend(mcp_tools)
+            LOG.info(
+                f"[MCP] loaded {len(mcp_tools)} tools from {server.get('name')}"
+            )
+        except Exception as e:
+            LOG.warning(
+                f"[MCP] failed to connect {server.get('name')}: {e}"
             )
     return tools
 
@@ -152,8 +148,11 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
     inject_model_config(model_config)
     inject_tool_config(tool_config)
     lazyllm.globals['agentic_config'] = agentic_config
-    active_configs = filter_tools(DEFAULT_TOOLS, disabled_tools)
-    mcp_tools = await load_mcp_tools(mcp_config)
+    disabled = set(disabled_tools or [])
+    active_configs = [cfg for cfg in DEFAULT_TOOLS if cfg.name not in disabled]
+    agent_tools = build_agent_tools(active_configs)
+    mcp_tools = _build_mcp_tools(mcp_config) if mcp_config else []
+    all_tools = agent_tools + mcp_tools
     set_trace_context({
         'enabled': bool(trace),
         'trace_id': session_id if trace else None,
@@ -175,7 +174,7 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
 
     react_agent = lazyllm.tools.agent.ReactAgent(
         llm=llm,
-        tools=[cfg.instance for cfg in active_configs] + mcp_tools,
+        tools=all_tools,
         max_retries=_cfg['max_retries'],
         stream=True,
         prompt=runtime_prompt,
