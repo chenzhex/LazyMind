@@ -68,15 +68,15 @@ func List(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "query skills failed", http.StatusInternalServerError)
 		return
 	}
-	suggestionRows := make([]orm.SkillResource, 0, len(parents)+len(children))
-	suggestionRows = append(suggestionRows, parents...)
-	suggestionRows = append(suggestionRows, children...)
-	suggestionStatesByKey, err := loadSuggestionStatesByKey(r.Context(), db, userID, suggestionRows)
+	reviewRows := make([]orm.SkillResource, 0, len(parents)+len(children))
+	reviewRows = append(reviewRows, parents...)
+	reviewRows = append(reviewRows, children...)
+	reviewStatesByKey, err := loadReviewStatesByKey(r.Context(), db, userID, reviewRows)
 	if err != nil {
 		common.ReplyErr(w, "query skills failed", http.StatusInternalServerError)
 		return
 	}
-	latestVersionChanges, err := resourcechange.LatestSummariesForResources(r.Context(), db, userID, orm.ResourceUpdateResourceTypeSkill, skillResourceIDs(suggestionRows))
+	latestVersionChanges, err := resourcechange.LatestSummariesForResources(r.Context(), db, userID, orm.ResourceUpdateResourceTypeSkill, skillResourceIDs(reviewRows))
 	if err != nil {
 		common.ReplyErr(w, "query skills failed", http.StatusInternalServerError)
 		return
@@ -136,7 +136,7 @@ func List(w http.ResponseWriter, r *http.Request) {
 			items = append(items, builtinListResponse(*item.builtin))
 			continue
 		}
-		items = append(items, parentListResponse(item.parent, item.children, suggestionStatesByKey, latestVersionChanges))
+		items = append(items, parentListResponse(item.parent, item.children, reviewStatesByKey, latestVersionChanges))
 	}
 
 	common.ReplyOK(w, map[string]any{
@@ -527,72 +527,15 @@ func Confirm(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "only parent skill supports confirm", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(row.DraftStatus) != "pending_confirm" {
-		common.ReplyErr(w, "skill draft not found", http.StatusNotFound)
-		return
-	}
-	if row.Version != row.DraftSourceVersion {
-		common.ReplyErr(w, "skill draft version conflict", http.StatusConflict)
-		return
-	}
-	content := row.DraftContent
-	if strings.TrimSpace(content) == "" {
-		common.ReplyErr(w, "read skill draft failed", http.StatusInternalServerError)
-		return
-	}
-	description, err := validateParentSkillContent(row.SkillName, "", content)
+	result, err := resourceupdate.LatestPendingSkillPatchReviewResult(r.Context(), db, userID, row.SkillName)
 	if err != nil {
-		common.ReplyErr(w, "skill draft content invalid: "+err.Error(), http.StatusBadRequest)
+		resourceupdate.ReplyReviewError(w, err, "skill draft")
 		return
 	}
-	hash := evolution.HashContent(content)
-	now := time.Now()
-	update := map[string]any{
-		"description":          description,
-		"content_hash":         hash,
-		"content":              content,
-		"content_size":         skillContentSize(content),
-		"mime_type":            mimeTypeForExt(row.FileExt),
-		"version":              row.Version + 1,
-		"draft_content":        "",
-		"draft_source_version": 0,
-		"draft_status":         "",
-		"draft_updated_at":     nil,
-		"update_status":        evolution.UpdateStatusUpToDate,
-		"updated_at":           now,
-		"ext":                  evolution.WithDraftSuggestionIDs(row.Ext, nil),
-	}
-	change := resourcechange.ContentChange{
-		ResourceType:  orm.ResourceUpdateResourceTypeSkill,
-		ResourceID:    row.ID,
-		UserID:        userID,
-		FromVersion:   row.Version,
-		ToVersion:     row.Version + 1,
-		BeforeContent: row.Content,
-		AfterContent:  content,
-		Source: resourcechange.Source{
-			ChangeSource: resourcechange.ChangeSourceDraftConfirm,
-			ChangedAt:    now,
-		},
-	}
-	if err := db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-		affected, err := resourcechange.UpdateModel(r.Context(), tx, &orm.SkillResource{}, func(query *gorm.DB) *gorm.DB {
-			return query.Where("id = ? AND version = ?", row.ID, row.Version)
-		}, update, change)
-		if err != nil {
-			return err
-		}
-		if affected == 0 {
-			return gorm.ErrRecordNotFound
-		}
-		return nil
-	}); err != nil {
-		common.ReplyErr(w, "confirm skill draft failed", http.StatusInternalServerError)
+	if _, err := resourceupdate.AcceptSkillReviewResultByID(r.Context(), db, userID, strings.TrimSpace(store.UserName(r)), result.ID); err != nil {
+		resourceupdate.ReplyReviewError(w, err, "confirm skill draft")
 		return
 	}
-	_ = db.WithContext(r.Context()).Model(&orm.SkillResource{}).
-		Where("owner_user_id = ? AND node_type = ? AND category = ? AND parent_skill_name = ?", userID, evolution.SkillNodeTypeChild, row.Category, row.SkillName).
-		Updates(map[string]any{"update_status": evolution.UpdateStatusUpToDate, "updated_at": now}).Error
 	item, err := getSkillDetail(r.Context(), db, userID, row.ID)
 	if err != nil {
 		common.ReplyErr(w, "query skill failed", http.StatusInternalServerError)
@@ -626,27 +569,15 @@ func Discard(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "only parent skill supports discard", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(row.DraftStatus) != "pending_confirm" {
-		common.ReplyErr(w, "skill draft not found", http.StatusNotFound)
+	result, err := resourceupdate.LatestPendingSkillPatchReviewResult(r.Context(), db, userID, row.SkillName)
+	if err != nil {
+		resourceupdate.ReplyReviewError(w, err, "skill draft")
 		return
 	}
-	now := time.Now()
-	update := map[string]any{
-		"draft_source_version": 0,
-		"draft_content":        "",
-		"draft_status":         "",
-		"draft_updated_at":     nil,
-		"update_status":        evolution.UpdateStatusUpToDate,
-		"updated_at":           now,
-		"ext":                  evolution.WithDraftSuggestionIDs(row.Ext, nil),
-	}
-	if err := db.WithContext(r.Context()).Model(&orm.SkillResource{}).Where("id = ?", row.ID).Updates(update).Error; err != nil {
-		common.ReplyErr(w, "discard skill draft failed", http.StatusInternalServerError)
+	if _, err := resourceupdate.RejectSkillReviewResultByID(r.Context(), db, userID, result.ID); err != nil {
+		resourceupdate.ReplyReviewError(w, err, "discard skill draft")
 		return
 	}
-	_ = db.WithContext(r.Context()).Model(&orm.SkillResource{}).
-		Where("owner_user_id = ? AND node_type = ? AND category = ? AND parent_skill_name = ?", userID, evolution.SkillNodeTypeChild, row.Category, row.SkillName).
-		Updates(map[string]any{"update_status": evolution.UpdateStatusUpToDate, "updated_at": now}).Error
 	common.ReplyOK(w, map[string]any{"discarded": true})
 }
 
@@ -746,7 +677,7 @@ func getSkillDetail(ctx context.Context, db *gorm.DB, userID, skillID string) (m
 	if err := db.WithContext(ctx).Where("id = ? AND owner_user_id = ?", skillID, userID).Take(&row).Error; err != nil {
 		return nil, err
 	}
-	suggestionRows := []orm.SkillResource{row}
+	reviewRows := []orm.SkillResource{row}
 	var detailChildren []orm.SkillResource
 	if row.NodeType == evolution.SkillNodeTypeParent {
 		if err := db.WithContext(ctx).
@@ -755,49 +686,48 @@ func getSkillDetail(ctx context.Context, db *gorm.DB, userID, skillID string) (m
 			Find(&detailChildren).Error; err != nil {
 			return nil, err
 		}
-		suggestionRows = append(suggestionRows, detailChildren...)
+		reviewRows = append(reviewRows, detailChildren...)
 	}
-	suggestionStatesByKey, err := loadSuggestionStatesByKey(ctx, db, userID, suggestionRows)
+	reviewStatesByKey, err := loadReviewStatesByKey(ctx, db, userID, reviewRows)
 	if err != nil {
 		return nil, err
 	}
-	latestVersionChanges, err := resourcechange.LatestSummariesForResources(ctx, db, userID, orm.ResourceUpdateResourceTypeSkill, skillResourceIDs(suggestionRows))
+	latestVersionChanges, err := resourcechange.LatestSummariesForResources(ctx, db, userID, orm.ResourceUpdateResourceTypeSkill, skillResourceIDs(reviewRows))
 	if err != nil {
 		return nil, err
 	}
-	suggestionState := canonicalSkillSuggestionState(suggestionStatesByKey[skillSuggestionResourceKey(row)])
+	reviewState := canonicalSkillReviewState(reviewStatesByKey[skillSuggestionResourceKey(row)])
 	content, err := storedSkillContent(row)
 	if err != nil {
 		return nil, err
 	}
 	item := map[string]any{
-		"skill_id":                       row.ID,
-		"name":                           row.SkillName,
-		"description":                    row.Description,
-		"category":                       row.Category,
-		"tags":                           parseTags(row.Tags),
-		"auto_evo":                       row.AutoEvo,
-		"auto_evo_apply_status":          evolution.NormalizeAutoEvoApplyStatus(row.AutoEvoApplyStatus),
-		"auto_evo_generation":            row.AutoEvoGeneration,
-		"auto_evo_error":                 row.AutoEvoError,
-		"is_enabled":                     row.IsEnabled,
-		"update_status":                  normalizedSkillUpdateStatus(row.UpdateStatus),
-		"has_pending_review_suggestions": suggestionState.Status == evolution.SuggestionStatusPendingReview,
-		"has_pending_remove_suggestion":  suggestionState.HasPendingRemove,
-		"suggestion_status":              suggestionState.Status,
-		"node_type":                      row.NodeType,
-		"builtin_skill_uid":              "",
-		"origin_builtin_skill_uid":       row.OriginBuiltinSkillUID,
-		"is_builtin_template":            false,
-		"activation_status":              builtinActivationStatus(row.OriginBuiltinSkillUID),
-		"readonly":                       false,
-		"parent_id":                      "",
-		"parent_skill_id":                "",
-		"parent_skill_name":              row.ParentSkillName,
-		"content":                        content,
-		"version":                        row.Version,
-		"latest_version_change":          latestVersionChange(row.ID, latestVersionChanges),
-		"file_ext":                       row.FileExt,
+		"skill_id":                  row.ID,
+		"name":                      row.SkillName,
+		"description":               row.Description,
+		"category":                  row.Category,
+		"tags":                      parseTags(row.Tags),
+		"auto_evo":                  row.AutoEvo,
+		"auto_evo_apply_status":     evolution.NormalizeAutoEvoApplyStatus(row.AutoEvoApplyStatus),
+		"auto_evo_generation":       row.AutoEvoGeneration,
+		"auto_evo_error":            row.AutoEvoError,
+		"is_enabled":                row.IsEnabled,
+		"update_status":             normalizedSkillUpdateStatus(row.UpdateStatus),
+		"has_pending_review_result": reviewState.Status == reviewStatusPending,
+		"review_status":             reviewState.Status,
+		"node_type":                 row.NodeType,
+		"builtin_skill_uid":         "",
+		"origin_builtin_skill_uid":  row.OriginBuiltinSkillUID,
+		"is_builtin_template":       false,
+		"activation_status":         builtinActivationStatus(row.OriginBuiltinSkillUID),
+		"readonly":                  false,
+		"parent_id":                 "",
+		"parent_skill_id":           "",
+		"parent_skill_name":         row.ParentSkillName,
+		"content":                   content,
+		"version":                   row.Version,
+		"latest_version_change":     latestVersionChange(row.ID, latestVersionChanges),
+		"file_ext":                  row.FileExt,
 	}
 	if row.NodeType == evolution.SkillNodeTypeChild {
 		if parent, err := parentForChild(ctx, db, row); err == nil {
@@ -808,35 +738,34 @@ func getSkillDetail(ctx context.Context, db *gorm.DB, userID, skillID string) (m
 	if row.NodeType == evolution.SkillNodeTypeParent {
 		childItems := make([]map[string]any, 0, len(detailChildren))
 		for _, child := range detailChildren {
-			childSuggestionState := canonicalSkillSuggestionState(suggestionStatesByKey[skillSuggestionResourceKey(child)])
+			childReviewState := canonicalSkillReviewState(reviewStatesByKey[skillSuggestionResourceKey(child)])
 			childContent, _ := storedSkillContent(child)
 			childItems = append(childItems, map[string]any{
-				"skill_id":                       child.ID,
-				"name":                           child.SkillName,
-				"description":                    child.Description,
-				"tags":                           parseTags(child.Tags),
-				"file_ext":                       child.FileExt,
-				"auto_evo":                       child.AutoEvo,
-				"auto_evo_apply_status":          evolution.NormalizeAutoEvoApplyStatus(child.AutoEvoApplyStatus),
-				"auto_evo_generation":            child.AutoEvoGeneration,
-				"auto_evo_error":                 child.AutoEvoError,
-				"is_enabled":                     child.IsEnabled,
-				"update_status":                  normalizedSkillUpdateStatus(child.UpdateStatus),
-				"has_pending_review_suggestions": childSuggestionState.Status == evolution.SuggestionStatusPendingReview,
-				"has_pending_remove_suggestion":  childSuggestionState.HasPendingRemove,
-				"suggestion_status":              childSuggestionState.Status,
-				"node_type":                      child.NodeType,
-				"builtin_skill_uid":              "",
-				"origin_builtin_skill_uid":       child.OriginBuiltinSkillUID,
-				"is_builtin_template":            false,
-				"activation_status":              builtinActivationStatus(child.OriginBuiltinSkillUID),
-				"readonly":                       false,
-				"parent_id":                      row.ID,
-				"parent_skill_id":                row.ID,
-				"parent_skill_name":              child.ParentSkillName,
-				"content":                        childContent,
-				"version":                        child.Version,
-				"latest_version_change":          latestVersionChange(child.ID, latestVersionChanges),
+				"skill_id":                  child.ID,
+				"name":                      child.SkillName,
+				"description":               child.Description,
+				"tags":                      parseTags(child.Tags),
+				"file_ext":                  child.FileExt,
+				"auto_evo":                  child.AutoEvo,
+				"auto_evo_apply_status":     evolution.NormalizeAutoEvoApplyStatus(child.AutoEvoApplyStatus),
+				"auto_evo_generation":       child.AutoEvoGeneration,
+				"auto_evo_error":            child.AutoEvoError,
+				"is_enabled":                child.IsEnabled,
+				"update_status":             normalizedSkillUpdateStatus(child.UpdateStatus),
+				"has_pending_review_result": childReviewState.Status == reviewStatusPending,
+				"review_status":             childReviewState.Status,
+				"node_type":                 child.NodeType,
+				"builtin_skill_uid":         "",
+				"origin_builtin_skill_uid":  child.OriginBuiltinSkillUID,
+				"is_builtin_template":       false,
+				"activation_status":         builtinActivationStatus(child.OriginBuiltinSkillUID),
+				"readonly":                  false,
+				"parent_id":                 row.ID,
+				"parent_skill_id":           row.ID,
+				"parent_skill_name":         child.ParentSkillName,
+				"content":                   childContent,
+				"version":                   child.Version,
+				"latest_version_change":     latestVersionChange(child.ID, latestVersionChanges),
 			})
 		}
 		item["children"] = childItems
@@ -854,16 +783,18 @@ func buildDraftPreviewResponse(ctx context.Context, db *gorm.DB, userID, skillID
 	if row.NodeType != evolution.SkillNodeTypeParent {
 		return draftPreviewResponse{}, errDraftPreviewParentOnly
 	}
-	if strings.TrimSpace(row.DraftStatus) != "pending_confirm" {
-		return draftPreviewResponse{}, errDraftPreviewNotFound
-	}
-
 	currentContent, err := storedSkillContent(row)
 	if err != nil {
 		return draftPreviewResponse{}, err
 	}
-
-	draftContent := row.DraftContent
+	result, err := resourceupdate.LatestPendingSkillPatchReviewResult(ctx, db, userID, row.SkillName)
+	if err != nil {
+		if resourceupdate.IsReviewNotFound(err) {
+			return draftPreviewResponse{}, errDraftPreviewNotFound
+		}
+		return draftPreviewResponse{}, err
+	}
+	draftContent := result.SkillContent
 	if strings.TrimSpace(draftContent) == "" {
 		return draftPreviewResponse{}, errors.New("read skill draft failed")
 	}
@@ -875,8 +806,10 @@ func buildDraftPreviewResponse(ctx context.Context, db *gorm.DB, userID, skillID
 
 	return draftPreviewResponse{
 		SkillID:            row.ID,
-		DraftStatus:        row.DraftStatus,
-		DraftSourceVersion: row.DraftSourceVersion,
+		ReviewResultID:     result.ID,
+		ReviewStatus:       result.ReviewStatus,
+		DraftStatus:        result.ReviewStatus,
+		DraftSourceVersion: row.Version,
 		CurrentContent:     currentContent,
 		DraftContent:       draftContent,
 		Diff:               diff,
@@ -1618,69 +1551,67 @@ func updateChildSkill(ctx context.Context, db *gorm.DB, userID string, row *orm.
 	return nil
 }
 
-func parentListResponse(parent orm.SkillResource, children []orm.SkillResource, suggestionStatesByKey map[string]skillSuggestionState, latestVersionChanges map[string]resourcechange.VersionChangeSummary) map[string]any {
-	parentSuggestionState := canonicalSkillSuggestionState(suggestionStatesByKey[skillSuggestionResourceKey(parent)])
+func parentListResponse(parent orm.SkillResource, children []orm.SkillResource, reviewStatesByKey map[string]skillReviewState, latestVersionChanges map[string]resourcechange.VersionChangeSummary) map[string]any {
+	parentReviewState := canonicalSkillReviewState(reviewStatesByKey[skillSuggestionResourceKey(parent)])
 	childItems := make([]map[string]any, 0, len(children))
 	sort.Slice(children, func(i, j int) bool { return children[i].CreatedAt.Before(children[j].CreatedAt) })
 	for _, child := range children {
-		childItems = append(childItems, childListResponse(parent, child, suggestionStatesByKey, latestVersionChanges))
+		childItems = append(childItems, childListResponse(parent, child, reviewStatesByKey, latestVersionChanges))
 	}
 	return map[string]any{
-		"skill_id":                       parent.ID,
-		"name":                           parent.SkillName,
-		"description":                    parent.Description,
-		"category":                       parent.Category,
-		"tags":                           parseTags(parent.Tags),
-		"auto_evo":                       parent.AutoEvo,
-		"auto_evo_apply_status":          evolution.NormalizeAutoEvoApplyStatus(parent.AutoEvoApplyStatus),
-		"auto_evo_generation":            parent.AutoEvoGeneration,
-		"auto_evo_error":                 parent.AutoEvoError,
-		"is_enabled":                     parent.IsEnabled,
-		"update_status":                  normalizedSkillUpdateStatus(parent.UpdateStatus),
-		"has_pending_review_suggestions": parentSuggestionState.Status == evolution.SuggestionStatusPendingReview,
-		"has_pending_remove_suggestion":  parentSuggestionState.HasPendingRemove,
-		"suggestion_status":              parentSuggestionState.Status,
-		"node_type":                      parent.NodeType,
-		"builtin_skill_uid":              "",
-		"origin_builtin_skill_uid":       parent.OriginBuiltinSkillUID,
-		"is_builtin_template":            false,
-		"activation_status":              builtinActivationStatus(parent.OriginBuiltinSkillUID),
-		"readonly":                       false,
-		"version":                        parent.Version,
-		"latest_version_change":          latestVersionChange(parent.ID, latestVersionChanges),
-		"children":                       childItems,
+		"skill_id":                  parent.ID,
+		"name":                      parent.SkillName,
+		"description":               parent.Description,
+		"category":                  parent.Category,
+		"tags":                      parseTags(parent.Tags),
+		"auto_evo":                  parent.AutoEvo,
+		"auto_evo_apply_status":     evolution.NormalizeAutoEvoApplyStatus(parent.AutoEvoApplyStatus),
+		"auto_evo_generation":       parent.AutoEvoGeneration,
+		"auto_evo_error":            parent.AutoEvoError,
+		"is_enabled":                parent.IsEnabled,
+		"update_status":             normalizedSkillUpdateStatus(parent.UpdateStatus),
+		"has_pending_review_result": parentReviewState.Status == reviewStatusPending,
+		"review_status":             parentReviewState.Status,
+		"node_type":                 parent.NodeType,
+		"builtin_skill_uid":         "",
+		"origin_builtin_skill_uid":  parent.OriginBuiltinSkillUID,
+		"is_builtin_template":       false,
+		"activation_status":         builtinActivationStatus(parent.OriginBuiltinSkillUID),
+		"readonly":                  false,
+		"version":                   parent.Version,
+		"latest_version_change":     latestVersionChange(parent.ID, latestVersionChanges),
+		"children":                  childItems,
 	}
 }
 
-func childListResponse(parent, child orm.SkillResource, suggestionStatesByKey map[string]skillSuggestionState, latestVersionChanges map[string]resourcechange.VersionChangeSummary) map[string]any {
-	childSuggestionState := canonicalSkillSuggestionState(suggestionStatesByKey[skillSuggestionResourceKey(child)])
+func childListResponse(parent, child orm.SkillResource, reviewStatesByKey map[string]skillReviewState, latestVersionChanges map[string]resourcechange.VersionChangeSummary) map[string]any {
+	childReviewState := canonicalSkillReviewState(reviewStatesByKey[skillSuggestionResourceKey(child)])
 	return map[string]any{
-		"skill_id":                       child.ID,
-		"name":                           child.SkillName,
-		"description":                    child.Description,
-		"category":                       parent.Category,
-		"tags":                           parseTags(child.Tags),
-		"parent_id":                      parent.ID,
-		"parent_skill_id":                parent.ID,
-		"parent_skill_name":              parent.SkillName,
-		"file_ext":                       child.FileExt,
-		"auto_evo":                       child.AutoEvo,
-		"auto_evo_apply_status":          evolution.NormalizeAutoEvoApplyStatus(child.AutoEvoApplyStatus),
-		"auto_evo_generation":            child.AutoEvoGeneration,
-		"auto_evo_error":                 child.AutoEvoError,
-		"is_enabled":                     parent.IsEnabled,
-		"update_status":                  normalizedSkillUpdateStatus(parent.UpdateStatus),
-		"has_pending_review_suggestions": childSuggestionState.Status == evolution.SuggestionStatusPendingReview,
-		"has_pending_remove_suggestion":  childSuggestionState.HasPendingRemove,
-		"suggestion_status":              childSuggestionState.Status,
-		"node_type":                      child.NodeType,
-		"builtin_skill_uid":              "",
-		"origin_builtin_skill_uid":       child.OriginBuiltinSkillUID,
-		"is_builtin_template":            false,
-		"activation_status":              builtinActivationStatus(child.OriginBuiltinSkillUID),
-		"readonly":                       false,
-		"version":                        child.Version,
-		"latest_version_change":          latestVersionChange(child.ID, latestVersionChanges),
+		"skill_id":                  child.ID,
+		"name":                      child.SkillName,
+		"description":               child.Description,
+		"category":                  parent.Category,
+		"tags":                      parseTags(child.Tags),
+		"parent_id":                 parent.ID,
+		"parent_skill_id":           parent.ID,
+		"parent_skill_name":         parent.SkillName,
+		"file_ext":                  child.FileExt,
+		"auto_evo":                  child.AutoEvo,
+		"auto_evo_apply_status":     evolution.NormalizeAutoEvoApplyStatus(child.AutoEvoApplyStatus),
+		"auto_evo_generation":       child.AutoEvoGeneration,
+		"auto_evo_error":            child.AutoEvoError,
+		"is_enabled":                parent.IsEnabled,
+		"update_status":             normalizedSkillUpdateStatus(parent.UpdateStatus),
+		"has_pending_review_result": childReviewState.Status == reviewStatusPending,
+		"review_status":             childReviewState.Status,
+		"node_type":                 child.NodeType,
+		"builtin_skill_uid":         "",
+		"origin_builtin_skill_uid":  child.OriginBuiltinSkillUID,
+		"is_builtin_template":       false,
+		"activation_status":         builtinActivationStatus(child.OriginBuiltinSkillUID),
+		"readonly":                  false,
+		"version":                   child.Version,
+		"latest_version_change":     latestVersionChange(child.ID, latestVersionChanges),
 	}
 }
 
@@ -1704,68 +1635,68 @@ func paginateSkillListParents(entries []skillListParentEntry, page, pageSize int
 	return entries[start:end]
 }
 
-type skillSuggestionState struct {
-	Status           string
-	HasPendingRemove bool
+const (
+	reviewStatusPending = "pending"
+	reviewStatusNone    = "none"
+)
+
+type skillReviewState struct {
+	Status string
 }
 
-func canonicalSkillSuggestionState(state skillSuggestionState) skillSuggestionState {
-	state.Status = evolution.CanonicalSuggestionStatus(state.Status)
+func canonicalSkillReviewState(state skillReviewState) skillReviewState {
+	if strings.TrimSpace(state.Status) != reviewStatusPending {
+		state.Status = reviewStatusNone
+	}
 	return state
 }
 
-func mergeSkillSuggestionState(current skillSuggestionState, status, action string) skillSuggestionState {
-	current.Status = evolution.MergeSuggestionStatus(current.Status, status)
-	if strings.TrimSpace(action) == evolution.SuggestionActionRemove && strings.TrimSpace(status) == evolution.SuggestionStatusPendingReview {
-		current.HasPendingRemove = true
-	}
-	return current
-}
-
-func loadSuggestionStatesByKey(ctx context.Context, db *gorm.DB, userID string, skillRows []orm.SkillResource) (map[string]skillSuggestionState, error) {
-	targetKeys := make(map[string]struct{}, len(skillRows))
-	keys := make([]string, 0, len(skillRows))
+func loadReviewStatesByKey(ctx context.Context, db *gorm.DB, userID string, skillRows []orm.SkillResource) (map[string]skillReviewState, error) {
+	skillNames := make([]string, 0, len(skillRows))
+	skillNameToKey := make(map[string]string, len(skillRows))
 	for _, row := range skillRows {
+		if strings.TrimSpace(row.NodeType) != evolution.SkillNodeTypeParent {
+			continue
+		}
 		key := skillSuggestionResourceKey(row)
 		if key == "" {
 			continue
 		}
-		targetKeys[key] = struct{}{}
-		keys = append(keys, key)
+		skillName := strings.TrimSpace(row.SkillName)
+		if skillName == "" {
+			continue
+		}
+		skillNames = append(skillNames, skillName)
+		skillNameToKey[skillName] = key
 	}
-	keys = compactStrings(keys)
-	if len(keys) == 0 {
-		return map[string]skillSuggestionState{}, nil
+	skillNames = compactStrings(skillNames)
+	if len(skillNames) == 0 {
+		return map[string]skillReviewState{}, nil
 	}
 
 	var rows []struct {
-		ResourceKey     string `gorm:"column:resource_key"`
-		RelativePath    string `gorm:"column:relative_path"`
-		Category        string `gorm:"column:category"`
-		ParentSkillName string `gorm:"column:parent_skill_name"`
-		SkillName       string `gorm:"column:skill_name"`
-		Status          string `gorm:"column:status"`
-		Action          string `gorm:"column:action"`
+		SkillName string `gorm:"column:skill_name"`
 	}
-	query := db.WithContext(ctx).
-		Model(&orm.ResourceSuggestion{}).
-		Select("resource_key", "relative_path", "category", "parent_skill_name", "skill_name", "status", "action").
-		Where("user_id = ? AND resource_type = ? AND status IN ?",
+	if err := db.WithContext(ctx).
+		Model(&orm.SkillReviewResult{}).
+		Select("skill_name").
+		Where("userid = ? AND type = ? AND review_status = ? AND skill_name IN ?",
 			strings.TrimSpace(userID),
-			evolution.ResourceTypeSkill,
-			evolution.VisibleSuggestionStatuses(),
-		)
-	query = query.Where("resource_key IN ?", keys)
-	if err := query.Find(&rows).Error; err != nil {
+			"patch",
+			reviewStatusPending,
+			skillNames,
+		).
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
 
-	result := make(map[string]skillSuggestionState, len(rows))
+	result := make(map[string]skillReviewState, len(rows))
 	for _, row := range rows {
-		key := strings.TrimSpace(row.ResourceKey)
-		if _, ok := targetKeys[key]; ok {
-			result[key] = mergeSkillSuggestionState(result[key], row.Status, row.Action)
+		key := skillNameToKey[strings.TrimSpace(row.SkillName)]
+		if key == "" {
+			continue
 		}
+		result[key] = skillReviewState{Status: reviewStatusPending}
 	}
 	return result, nil
 }

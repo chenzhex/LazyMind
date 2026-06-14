@@ -783,6 +783,7 @@ type skillReviewResultOpenAPIResponse struct {
 	RequestID      string `json:"requestid"`
 	SkillContent   string `json:"skill_content,omitempty"`
 	CurrentContent string `json:"current_content,omitempty"`
+	Diff           string `json:"diff,omitempty"`
 	Summary        string `json:"summary"`
 	Time           string `json:"time"`
 }
@@ -795,16 +796,18 @@ type skillReviewResultListOpenAPIResponse struct {
 }
 
 type memoryReviewResultOpenAPIResponse struct {
-	ID            string         `json:"id"`
-	UserID        string         `json:"user_id"`
-	Target        string         `json:"target"`
-	SessionID     string         `json:"session_id"`
-	SourceContent string         `json:"source_content"`
-	Content       string         `json:"content"`
-	Operations    map[string]any `json:"operations,omitempty"`
-	State         string         `json:"state"`
-	ReviewStatus  string         `json:"review_status"`
-	Time          string         `json:"time"`
+	ID             string         `json:"id"`
+	UserID         string         `json:"user_id"`
+	Target         string         `json:"target"`
+	SessionID      string         `json:"session_id"`
+	SourceContent  string         `json:"source_content"`
+	Content        string         `json:"content"`
+	CurrentContent string         `json:"current_content,omitempty"`
+	Diff           string         `json:"diff,omitempty"`
+	Operations     map[string]any `json:"operations,omitempty"`
+	State          string         `json:"state"`
+	ReviewStatus   string         `json:"review_status"`
+	Time           string         `json:"time"`
 }
 
 type memoryReviewResultListOpenAPIResponse struct {
@@ -857,6 +860,8 @@ type skillGenerateOpenAPIResponse struct {
 
 type skillDraftPreviewOpenAPIResponse struct {
 	SkillID            string `json:"skill_id"`
+	ReviewResultID     string `json:"review_result_id"`
+	ReviewStatus       string `json:"review_status"`
 	DraftStatus        string `json:"draft_status"`
 	DraftSourceVersion int64  `json:"draft_source_version"`
 	CurrentContent     string `json:"current_content"`
@@ -990,44 +995,44 @@ type skillUpdateManagedOpenAPIRequest struct {
 }
 
 type skillListChildOpenAPIResponse struct {
-	SkillID                     string                              `json:"skill_id"`
-	Name                        string                              `json:"name"`
-	Description                 string                              `json:"description"`
-	FileExt                     string                              `json:"file_ext"`
-	AutoEvo                     bool                                `json:"auto_evo"`
-	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
-	AutoEvoError                string                              `json:"auto_evo_error"`
-	IsEnabled                   bool                                `json:"is_enabled"`
-	UpdateStatus                string                              `json:"update_status"`
-	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string                              `json:"suggestion_status"`
-	NodeType                    string                              `json:"node_type"`
-	ParentID                    string                              `json:"parent_id"`
-	ParentSkillID               string                              `json:"parent_skill_id"`
-	ParentSkillName             string                              `json:"parent_skill_name"`
-	Version                     int64                               `json:"version"`
-	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
+	SkillID                string                              `json:"skill_id"`
+	Name                   string                              `json:"name"`
+	Description            string                              `json:"description"`
+	FileExt                string                              `json:"file_ext"`
+	AutoEvo                bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus     string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration      int64                               `json:"auto_evo_generation"`
+	AutoEvoError           string                              `json:"auto_evo_error"`
+	IsEnabled              bool                                `json:"is_enabled"`
+	UpdateStatus           string                              `json:"update_status"`
+	HasPendingReviewResult bool                                `json:"has_pending_review_result"`
+	ReviewStatus           string                              `json:"review_status"`
+	NodeType               string                              `json:"node_type"`
+	ParentID               string                              `json:"parent_id"`
+	ParentSkillID          string                              `json:"parent_skill_id"`
+	ParentSkillName        string                              `json:"parent_skill_name"`
+	Version                int64                               `json:"version"`
+	LatestVersionChange    *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
 }
 
 type skillListItemOpenAPIResponse struct {
-	SkillID                     string                              `json:"skill_id"`
-	Name                        string                              `json:"name"`
-	Description                 string                              `json:"description"`
-	Category                    string                              `json:"category"`
-	Tags                        []string                            `json:"tags"`
-	AutoEvo                     bool                                `json:"auto_evo"`
-	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
-	AutoEvoError                string                              `json:"auto_evo_error"`
-	IsEnabled                   bool                                `json:"is_enabled"`
-	UpdateStatus                string                              `json:"update_status"`
-	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string                              `json:"suggestion_status"`
-	NodeType                    string                              `json:"node_type"`
-	Version                     int64                               `json:"version"`
-	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
-	Children                    []skillListChildOpenAPIResponse     `json:"children"`
+	SkillID                string                              `json:"skill_id"`
+	Name                   string                              `json:"name"`
+	Description            string                              `json:"description"`
+	Category               string                              `json:"category"`
+	Tags                   []string                            `json:"tags"`
+	AutoEvo                bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus     string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration      int64                               `json:"auto_evo_generation"`
+	AutoEvoError           string                              `json:"auto_evo_error"`
+	IsEnabled              bool                                `json:"is_enabled"`
+	UpdateStatus           string                              `json:"update_status"`
+	HasPendingReviewResult bool                                `json:"has_pending_review_result"`
+	ReviewStatus           string                              `json:"review_status"`
+	NodeType               string                              `json:"node_type"`
+	Version                int64                               `json:"version"`
+	LatestVersionChange    *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
+	Children               []skillListChildOpenAPIResponse     `json:"children"`
 }
 
 type skillListOpenAPIResponse struct {
@@ -1038,50 +1043,50 @@ type skillListOpenAPIResponse struct {
 }
 
 type skillDetailChildOpenAPIResponse struct {
-	SkillID                     string                              `json:"skill_id"`
-	Name                        string                              `json:"name"`
-	Description                 string                              `json:"description"`
-	FileExt                     string                              `json:"file_ext"`
-	AutoEvo                     bool                                `json:"auto_evo"`
-	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
-	AutoEvoError                string                              `json:"auto_evo_error"`
-	IsEnabled                   bool                                `json:"is_enabled"`
-	UpdateStatus                string                              `json:"update_status"`
-	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string                              `json:"suggestion_status"`
-	NodeType                    string                              `json:"node_type"`
-	ParentID                    string                              `json:"parent_id"`
-	ParentSkillID               string                              `json:"parent_skill_id"`
-	ParentSkillName             string                              `json:"parent_skill_name"`
-	Content                     string                              `json:"content"`
-	Version                     int64                               `json:"version"`
-	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
+	SkillID                string                              `json:"skill_id"`
+	Name                   string                              `json:"name"`
+	Description            string                              `json:"description"`
+	FileExt                string                              `json:"file_ext"`
+	AutoEvo                bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus     string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration      int64                               `json:"auto_evo_generation"`
+	AutoEvoError           string                              `json:"auto_evo_error"`
+	IsEnabled              bool                                `json:"is_enabled"`
+	UpdateStatus           string                              `json:"update_status"`
+	HasPendingReviewResult bool                                `json:"has_pending_review_result"`
+	ReviewStatus           string                              `json:"review_status"`
+	NodeType               string                              `json:"node_type"`
+	ParentID               string                              `json:"parent_id"`
+	ParentSkillID          string                              `json:"parent_skill_id"`
+	ParentSkillName        string                              `json:"parent_skill_name"`
+	Content                string                              `json:"content"`
+	Version                int64                               `json:"version"`
+	LatestVersionChange    *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
 }
 
 type skillDetailOpenAPIResponse struct {
-	SkillID                     string                              `json:"skill_id"`
-	Name                        string                              `json:"name"`
-	Description                 string                              `json:"description"`
-	Category                    string                              `json:"category"`
-	Tags                        []string                            `json:"tags"`
-	AutoEvo                     bool                                `json:"auto_evo"`
-	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
-	AutoEvoError                string                              `json:"auto_evo_error"`
-	IsEnabled                   bool                                `json:"is_enabled"`
-	UpdateStatus                string                              `json:"update_status"`
-	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string                              `json:"suggestion_status"`
-	NodeType                    string                              `json:"node_type"`
-	ParentID                    string                              `json:"parent_id"`
-	ParentSkillID               string                              `json:"parent_skill_id"`
-	ParentSkillName             string                              `json:"parent_skill_name"`
-	Content                     string                              `json:"content"`
-	Version                     int64                               `json:"version"`
-	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
-	FileExt                     string                              `json:"file_ext"`
-	Children                    []skillDetailChildOpenAPIResponse   `json:"children"`
+	SkillID                string                              `json:"skill_id"`
+	Name                   string                              `json:"name"`
+	Description            string                              `json:"description"`
+	Category               string                              `json:"category"`
+	Tags                   []string                            `json:"tags"`
+	AutoEvo                bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus     string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration      int64                               `json:"auto_evo_generation"`
+	AutoEvoError           string                              `json:"auto_evo_error"`
+	IsEnabled              bool                                `json:"is_enabled"`
+	UpdateStatus           string                              `json:"update_status"`
+	HasPendingReviewResult bool                                `json:"has_pending_review_result"`
+	ReviewStatus           string                              `json:"review_status"`
+	NodeType               string                              `json:"node_type"`
+	ParentID               string                              `json:"parent_id"`
+	ParentSkillID          string                              `json:"parent_skill_id"`
+	ParentSkillName        string                              `json:"parent_skill_name"`
+	Content                string                              `json:"content"`
+	Version                int64                               `json:"version"`
+	LatestVersionChange    *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
+	FileExt                string                              `json:"file_ext"`
+	Children               []skillDetailChildOpenAPIResponse   `json:"children"`
 }
 
 type skillDeleteOpenAPIResponse struct {
@@ -1211,22 +1216,22 @@ type managedStateUpsertOpenAPIRequest struct {
 }
 
 type managedStateOpenAPIResponse struct {
-	ResourceID                  string                              `json:"resource_id"`
-	ResourceType                string                              `json:"resource_type"`
-	Title                       string                              `json:"title"`
-	Content                     string                              `json:"content"`
-	AgentPersona                *string                             `json:"agent_persona,omitempty"`
-	UserAddress                 *string                             `json:"user_address,omitempty"`
-	ResponseStyle               *string                             `json:"response_style,omitempty"`
-	ContentSummary              string                              `json:"content_summary"`
-	Version                     int64                               `json:"version"`
-	LatestVersionChange         *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
-	HasPendingReviewSuggestions bool                                `json:"has_pending_review_suggestions"`
-	SuggestionStatus            string                              `json:"suggestion_status"`
-	AutoEvo                     bool                                `json:"auto_evo"`
-	AutoEvoApplyStatus          string                              `json:"auto_evo_apply_status"`
-	AutoEvoGeneration           int64                               `json:"auto_evo_generation"`
-	AutoEvoError                string                              `json:"auto_evo_error"`
+	ResourceID             string                              `json:"resource_id"`
+	ResourceType           string                              `json:"resource_type"`
+	Title                  string                              `json:"title"`
+	Content                string                              `json:"content"`
+	AgentPersona           *string                             `json:"agent_persona,omitempty"`
+	UserAddress            *string                             `json:"user_address,omitempty"`
+	ResponseStyle          *string                             `json:"response_style,omitempty"`
+	ContentSummary         string                              `json:"content_summary"`
+	Version                int64                               `json:"version"`
+	LatestVersionChange    *latestVersionChangeOpenAPIResponse `json:"latest_version_change"`
+	HasPendingReviewResult bool                                `json:"has_pending_review_result"`
+	ReviewStatus           string                              `json:"review_status"`
+	AutoEvo                bool                                `json:"auto_evo"`
+	AutoEvoApplyStatus     string                              `json:"auto_evo_apply_status"`
+	AutoEvoGeneration      int64                               `json:"auto_evo_generation"`
+	AutoEvoError           string                              `json:"auto_evo_error"`
 }
 
 type managedStateListOpenAPIResponse struct {
@@ -1248,6 +1253,8 @@ type systemGenerateOpenAPIResponse struct {
 }
 
 type systemDraftPreviewOpenAPIResponse struct {
+	ReviewResultID     string `json:"review_result_id"`
+	ReviewStatus       string `json:"review_status"`
 	DraftStatus        string `json:"draft_status"`
 	DraftSourceVersion int64  `json:"draft_source_version"`
 	CurrentContent     string `json:"current_content"`

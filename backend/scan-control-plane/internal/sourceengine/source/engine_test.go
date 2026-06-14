@@ -432,6 +432,48 @@ func TestTriggerSourceSyncSplitsGenerateScopes(t *testing.T) {
 	}
 }
 
+func TestTriggerSourceSyncConvertsIndexedContainerObjectKeyToSubtree(t *testing.T) {
+	t.Parallel()
+
+	now := fixedSourceTestTime()
+	repo := newSourceEngineRepoStub()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1", Status: SourceStatusActive, CreatedAt: now, UpdatedAt: now}
+	repo.bindings["source-1"] = []store.Binding{{
+		SourceID:          "source-1",
+		BindingID:         "binding-1",
+		BindingGeneration: 1,
+		Status:            BindingStatusActive,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}}
+	repo.objects["source-1\x00binding-1\x00folder-1"] = store.SourceObject{
+		SourceID:    "source-1",
+		BindingID:   "binding-1",
+		ObjectKey:   "folder-1",
+		IsContainer: true,
+		HasChildren: true,
+	}
+	scheduler := &sourceScheduleSpy{}
+	engine := newTestSourceEngineWithSchedule(t, repo, &sourceCoreSpy{}, &sourceSpyConnector{}, scheduler, now)
+
+	_, err := engine.TriggerSourceSync(context.Background(), TriggerSourceSyncRequest{
+		SourceID:  "source-1",
+		BindingID: "binding-1",
+		RequestID: "request-1",
+		ScopeType: string(connector.ScopeTypePartial),
+		ScopeRef:  map[string]any{"object_key": "folder-1"},
+	})
+	if err != nil {
+		t.Fatalf("trigger source sync: %v", err)
+	}
+	if len(scheduler.manual) != 1 {
+		t.Fatalf("expected one manual sync, got %+v", scheduler.manual)
+	}
+	if scheduler.manual[0].ScopeRef["node_ref"] != "folder-1" || scheduler.manual[0].ScopeRef["subtree_root"] != "folder-1" {
+		t.Fatalf("indexed container object_key should be converted to subtree sync: %+v", scheduler.manual[0])
+	}
+}
+
 func TestCreateSourceDuplicateConnectorFingerprintCompensates(t *testing.T) {
 	t.Parallel()
 
@@ -1476,6 +1518,7 @@ type sourceEngineRepoStub struct {
 	sources             map[string]store.Source
 	bindings            map[string][]store.Binding
 	listRecords         []store.SourceListRecord
+	objects             map[string]store.SourceObject
 	createRecords       []store.SourceCreateRecord
 	agentCommands       []store.AgentCommand
 	recordedJobErrors   []recordedSyncJobError
@@ -1498,6 +1541,7 @@ func newSourceEngineRepoStub() *sourceEngineRepoStub {
 		operations: map[string]store.CreateOperation{},
 		sources:    map[string]store.Source{},
 		bindings:   map[string][]store.Binding{},
+		objects:    map[string]store.SourceObject{},
 	}
 }
 
@@ -1594,6 +1638,14 @@ func (r *sourceEngineRepoStub) GetBinding(_ context.Context, sourceID, bindingID
 		}
 	}
 	return store.Binding{}, store.NewStoreError(store.ErrCodeBindingNotFound, "binding not found")
+}
+
+func (r *sourceEngineRepoStub) GetObject(_ context.Context, sourceID, bindingID, objectKey string) (store.SourceObject, error) {
+	object, ok := r.objects[sourceID+"\x00"+bindingID+"\x00"+objectKey]
+	if !ok {
+		return store.SourceObject{}, store.NewStoreError(store.ErrCodeNotFound, "object not found")
+	}
+	return object, nil
 }
 
 func (r *sourceEngineRepoStub) FindActiveBindingByTarget(_ context.Context, sourceID, excludeBindingID, connectorType, targetType, targetFingerprint string) (store.Binding, bool, error) {

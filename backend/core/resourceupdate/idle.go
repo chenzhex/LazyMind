@@ -13,6 +13,7 @@ import (
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
+	"lazymind/core/evolution"
 )
 
 const (
@@ -392,7 +393,7 @@ func (p *IdleProcessor) ProcessEvent(ctx context.Context, eventID string) error 
 		if err != nil {
 			return p.markEventFailed(tx, event.ID, now, "create_memory_task_failed", err.Error())
 		}
-		preferenceTaskID, err := createIdleGenerateTask(ctx, tx, event, orm.ResourceUpdateResourceTypeUserPreference, preference.ID, preference.Content, historyJSON, now)
+		preferenceTaskID, err := createIdleGenerateTask(ctx, tx, event, orm.ResourceUpdateResourceTypeUserPreference, preference.ID, evolution.FormatSystemUserPreferenceForChat(preference), historyJSON, now)
 		if err != nil {
 			return p.markEventFailed(tx, event.ID, now, "create_user_preference_task_failed", err.Error())
 		}

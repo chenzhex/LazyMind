@@ -12,6 +12,7 @@ import (
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
+	"lazymind/core/evolution"
 	"lazymind/core/resourcechange"
 	"lazymind/core/store"
 )
@@ -46,21 +47,24 @@ type skillReviewResultResponse struct {
 	RequestID      string    `json:"requestid"`
 	SkillContent   string    `json:"skill_content,omitempty"`
 	CurrentContent string    `json:"current_content,omitempty"`
+	Diff           string    `json:"diff,omitempty"`
 	Summary        string    `json:"summary"`
 	Time           time.Time `json:"time"`
 }
 
 type memoryReviewResultResponse struct {
-	ID            string          `json:"id"`
-	UserID        string          `json:"user_id"`
-	Target        string          `json:"target"`
-	SessionID     string          `json:"session_id"`
-	SourceContent string          `json:"source_content"`
-	Content       string          `json:"content"`
-	Operations    json.RawMessage `json:"operations,omitempty"`
-	State         string          `json:"state"`
-	ReviewStatus  string          `json:"review_status"`
-	Time          time.Time       `json:"time"`
+	ID             string          `json:"id"`
+	UserID         string          `json:"user_id"`
+	Target         string          `json:"target"`
+	SessionID      string          `json:"session_id"`
+	SourceContent  string          `json:"source_content"`
+	Content        string          `json:"content"`
+	CurrentContent string          `json:"current_content,omitempty"`
+	Diff           string          `json:"diff,omitempty"`
+	Operations     json.RawMessage `json:"operations,omitempty"`
+	State          string          `json:"state"`
+	ReviewStatus   string          `json:"review_status"`
+	Time           time.Time       `json:"time"`
 }
 
 func ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +139,9 @@ func ListSkillReviewResults(w http.ResponseWriter, r *http.Request) {
 	}
 	if typ := strings.TrimSpace(r.URL.Query().Get("type")); typ != "" {
 		query = query.Where("type = ?", typ)
+	}
+	if skillName := strings.TrimSpace(r.URL.Query().Get("skill_name")); skillName != "" {
+		query = query.Where("skill_name = ?", skillName)
 	}
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -235,21 +242,30 @@ func ListMemoryReviewResults(w http.ResponseWriter, r *http.Request) {
 	if target := strings.TrimSpace(r.URL.Query().Get("target")); target != "" {
 		query = query.Where("target = ?", target)
 	}
-	var total int64
-	if err := query.Count(&total).Error; err != nil {
-		common.ReplyErr(w, "query memory review results failed", http.StatusInternalServerError)
-		return
-	}
 	var rows []MemoryReviewResult
 	if err := query.Order("time DESC, id DESC").
-		Offset((page - 1) * pageSize).
-		Limit(pageSize).
 		Find(&rows).Error; err != nil {
 		common.ReplyErr(w, "query memory review results failed", http.StatusInternalServerError)
 		return
 	}
-	items := make([]memoryReviewResultResponse, 0, len(rows))
+	mappedRows := make([]MemoryReviewResult, 0, len(rows))
 	for _, row := range rows {
+		if !memoryReviewResultMapped(r.Context(), db, row) {
+			continue
+		}
+		mappedRows = append(mappedRows, row)
+	}
+	total := len(mappedRows)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	items := make([]memoryReviewResultResponse, 0, end-start)
+	for _, row := range mappedRows[start:end] {
 		items = append(items, memoryResultToResponse(row))
 	}
 	common.ReplyOK(w, map[string]any{"items": items, "page": page, "page_size": pageSize, "total": total})
@@ -271,7 +287,16 @@ func GetMemoryReviewResult(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "query memory review result failed", http.StatusInternalServerError)
 		return
 	}
-	common.ReplyOK(w, memoryResultToResponse(row))
+	if !memoryReviewResultMapped(r.Context(), db, row) {
+		common.ReplyErr(w, "memory review result not found", http.StatusNotFound)
+		return
+	}
+	resp, err := memoryResultDetailResponse(r.Context(), db, row)
+	if err != nil {
+		mapReviewError(w, err, "query memory review result")
+		return
+	}
+	common.ReplyOK(w, resp)
 }
 
 func AcceptMemoryReviewResult(w http.ResponseWriter, r *http.Request) {
@@ -364,6 +389,10 @@ func acceptSkillReviewResult(ctx context.Context, db *gorm.DB, userID, userName,
 	return out, err
 }
 
+func AcceptSkillReviewResultByID(ctx context.Context, db *gorm.DB, userID, userName, resultID string) (SkillReviewResult, error) {
+	return acceptSkillReviewResult(ctx, db, userID, userName, resultID)
+}
+
 func rejectSkillReviewResult(ctx context.Context, db *gorm.DB, userID, resultID string) (SkillReviewResult, error) {
 	var out SkillReviewResult
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -382,6 +411,10 @@ func rejectSkillReviewResult(ctx context.Context, db *gorm.DB, userID, resultID 
 		return nil
 	})
 	return out, err
+}
+
+func RejectSkillReviewResultByID(ctx context.Context, db *gorm.DB, userID, resultID string) (SkillReviewResult, error) {
+	return rejectSkillReviewResult(ctx, db, userID, resultID)
 }
 
 func acceptMemoryReviewResult(ctx context.Context, db *gorm.DB, userID, resultID string) (MemoryReviewResult, error) {
@@ -441,6 +474,10 @@ func acceptMemoryReviewResult(ctx context.Context, db *gorm.DB, userID, resultID
 	return out, err
 }
 
+func AcceptMemoryReviewResultByID(ctx context.Context, db *gorm.DB, userID, resultID string) (MemoryReviewResult, error) {
+	return acceptMemoryReviewResult(ctx, db, userID, resultID)
+}
+
 func rejectMemoryReviewResult(ctx context.Context, db *gorm.DB, userID, resultID string) (MemoryReviewResult, error) {
 	var out MemoryReviewResult
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -459,6 +496,83 @@ func rejectMemoryReviewResult(ctx context.Context, db *gorm.DB, userID, resultID
 		return nil
 	})
 	return out, err
+}
+
+func RejectMemoryReviewResultByID(ctx context.Context, db *gorm.DB, userID, resultID string) (MemoryReviewResult, error) {
+	return rejectMemoryReviewResult(ctx, db, userID, resultID)
+}
+
+func LatestPendingSkillPatchReviewResult(ctx context.Context, db *gorm.DB, userID, skillName string) (SkillReviewResult, error) {
+	var rows []SkillReviewResult
+	err := skillResultSelect(db.WithContext(ctx)).
+		Where("userid = ? AND type = ? AND review_status = ? AND skill_name = ?",
+			strings.TrimSpace(userID),
+			skillReviewTypePatch,
+			reviewStatusPending,
+			strings.TrimSpace(skillName),
+		).
+		Order("time DESC, id DESC").
+		Find(&rows).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return SkillReviewResult{}, errReviewNotFound
+	}
+	if err != nil {
+		return SkillReviewResult{}, err
+	}
+	for _, row := range rows {
+		if _, err := mapSkillPatchResultToResource(db.WithContext(ctx), row); err == nil {
+			return row, nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return SkillReviewResult{}, err
+		}
+	}
+	return SkillReviewResult{}, errReviewNotFound
+}
+
+func LatestPendingMemoryReviewResult(ctx context.Context, db *gorm.DB, userID, target string) (MemoryReviewResult, error) {
+	var rows []MemoryReviewResult
+	target = normalizeReviewTarget(target)
+	err := memoryResultSelect(db.WithContext(ctx)).
+		Where("user_id = ? AND target = ? AND state = ? AND review_status = ?",
+			strings.TrimSpace(userID),
+			target,
+			memoryReviewStateSuccess,
+			reviewStatusPending,
+		).
+		Order("time DESC, id DESC").
+		Find(&rows).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return MemoryReviewResult{}, errReviewNotFound
+	}
+	if err != nil {
+		return MemoryReviewResult{}, err
+	}
+	for _, row := range rows {
+		var err error
+		switch target {
+		case orm.ResourceUpdateResourceTypeMemory:
+			_, err = mapMemoryReviewResultToMemory(db.WithContext(ctx), row)
+		case orm.ResourceUpdateResourceTypeUserPreference:
+			_, err = mapMemoryReviewResultToPreference(db.WithContext(ctx), row)
+		default:
+			return MemoryReviewResult{}, errReviewInvalid
+		}
+		if err == nil {
+			return row, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return MemoryReviewResult{}, err
+		}
+	}
+	return MemoryReviewResult{}, errReviewNotFound
+}
+
+func ReplyReviewError(w http.ResponseWriter, err error, fallback string) {
+	mapReviewError(w, err, fallback)
+}
+
+func IsReviewNotFound(err error) bool {
+	return errors.Is(err, errReviewNotFound) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func requestDBAndUser(w http.ResponseWriter, r *http.Request) (*gorm.DB, string, bool) {
@@ -516,6 +630,13 @@ func skillResultToResponse(row SkillReviewResult) skillReviewResultResponse {
 func skillResultDetailResponse(ctx context.Context, db *gorm.DB, row SkillReviewResult) (skillReviewResultResponse, error) {
 	resp := skillResultToResponse(row)
 	if strings.TrimSpace(row.Type) != skillReviewTypePatch {
+		if strings.TrimSpace(row.SkillContent) != "" {
+			diff, err := evolution.BuildContentDiff("", row.SkillContent)
+			if err != nil {
+				return skillReviewResultResponse{}, err
+			}
+			resp.Diff = diff
+		}
 		return resp, nil
 	}
 	resource, err := mapSkillPatchResultToResource(db.WithContext(ctx), row)
@@ -526,22 +647,76 @@ func skillResultDetailResponse(ctx context.Context, db *gorm.DB, row SkillReview
 		return skillReviewResultResponse{}, err
 	}
 	resp.CurrentContent = resource.Content
+	diff, err := evolution.BuildContentDiff(resource.Content, row.SkillContent)
+	if err != nil {
+		return skillReviewResultResponse{}, err
+	}
+	resp.Diff = diff
 	return resp, nil
 }
 
 func memoryResultToResponse(row MemoryReviewResult) memoryReviewResultResponse {
 	return memoryReviewResultResponse{
-		ID:            row.ID,
-		UserID:        row.UserID,
-		Target:        row.Target,
-		SessionID:     row.SessionID,
-		SourceContent: row.SourceContent,
-		Content:       row.Content,
-		Operations:    row.Operations,
-		State:         row.State,
-		ReviewStatus:  row.ReviewStatus,
-		Time:          row.Time,
+		ID:             row.ID,
+		UserID:         row.UserID,
+		Target:         row.Target,
+		SessionID:      row.SessionID,
+		SourceContent:  row.SourceContent,
+		Content:        row.Content,
+		CurrentContent: "",
+		Diff:           "",
+		Operations:     row.Operations,
+		State:          row.State,
+		ReviewStatus:   row.ReviewStatus,
+		Time:           row.Time,
 	}
+}
+
+func memoryResultDetailResponse(ctx context.Context, db *gorm.DB, row MemoryReviewResult) (memoryReviewResultResponse, error) {
+	resp := memoryResultToResponse(row)
+	var currentContent string
+	switch normalizeReviewTarget(row.Target) {
+	case orm.ResourceUpdateResourceTypeMemory:
+		resource, err := mapMemoryReviewResultToMemory(db.WithContext(ctx), row)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return memoryReviewResultResponse{}, errReviewNotFound
+			}
+			return memoryReviewResultResponse{}, err
+		}
+		currentContent = resource.Content
+	case orm.ResourceUpdateResourceTypeUserPreference:
+		resource, err := mapMemoryReviewResultToPreference(db.WithContext(ctx), row)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return memoryReviewResultResponse{}, errReviewNotFound
+			}
+			return memoryReviewResultResponse{}, err
+		}
+		currentContent = evolution.FormatSystemUserPreferenceForChat(resource)
+	default:
+		return memoryReviewResultResponse{}, errReviewInvalid
+	}
+	resp.CurrentContent = currentContent
+	diff, err := evolution.BuildContentDiff(currentContent, row.Content)
+	if err != nil {
+		return memoryReviewResultResponse{}, err
+	}
+	resp.Diff = diff
+	return resp, nil
+}
+
+func memoryReviewResultMapped(ctx context.Context, db *gorm.DB, row MemoryReviewResult) bool {
+	var err error
+	switch normalizeReviewTarget(row.Target) {
+	case orm.ResourceUpdateResourceTypeMemory:
+		_, err = mapMemoryReviewResultToMemory(db.WithContext(ctx), row)
+	case orm.ResourceUpdateResourceTypeUserPreference:
+		_, err = mapMemoryReviewResultToPreference(db.WithContext(ctx), row)
+	default:
+		return false
+	}
+	return err == nil
 }
 
 func lockSkillReviewResultForUser(ctx context.Context, tx *gorm.DB, id, userID string) (SkillReviewResult, error) {

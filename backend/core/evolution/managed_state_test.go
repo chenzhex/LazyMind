@@ -16,16 +16,16 @@ type managedStateListAPITestResponse struct {
 	Message string `json:"message"`
 	Data    struct {
 		Items []struct {
-			ResourceID                  string  `json:"resource_id"`
-			ResourceType                string  `json:"resource_type"`
-			Title                       string  `json:"title"`
-			Content                     string  `json:"content"`
-			AgentPersona                *string `json:"agent_persona"`
-			UserAddress                 *string `json:"user_address"`
-			ResponseStyle               *string `json:"response_style"`
-			ContentSummary              string  `json:"content_summary"`
-			HasPendingReviewSuggestions bool    `json:"has_pending_review_suggestions"`
-			SuggestionStatus            string  `json:"suggestion_status"`
+			ResourceID             string  `json:"resource_id"`
+			ResourceType           string  `json:"resource_type"`
+			Title                  string  `json:"title"`
+			Content                string  `json:"content"`
+			AgentPersona           *string `json:"agent_persona"`
+			UserAddress            *string `json:"user_address"`
+			ResponseStyle          *string `json:"response_style"`
+			ContentSummary         string  `json:"content_summary"`
+			HasPendingReviewResult bool    `json:"has_pending_review_result"`
+			ReviewStatus           string  `json:"review_status"`
 		} `json:"items"`
 	} `json:"data"`
 }
@@ -98,6 +98,46 @@ func TestListManagedStatesReturnsDefaultsAndUserScopedRows(t *testing.T) {
 	if err := db.Create(&suggestions).Error; err != nil {
 		t.Fatalf("create suggestions: %v", err)
 	}
+	if err := db.Table("memory_review").Create([]map[string]any{
+		{
+			"id":             "memory-review-result-1",
+			"user_id":        "u1",
+			"target":         ResourceTypeMemory,
+			"session_id":     "",
+			"source_content": "",
+			"operations":     "[]",
+			"content":        "new memory",
+			"state":          "success",
+			"review_status":  "pending",
+			"time":           now,
+		},
+		{
+			"id":             "preference-review-result-1",
+			"user_id":        "u1",
+			"target":         ResourceTypeUserPreference,
+			"session_id":     "",
+			"source_content": "",
+			"operations":     "[]",
+			"content":        "---\nagent_persona: 严谨助手\nuser_address: 老师\nresponse_style: 先结论后论证\n---\n用户偏好简洁回答。",
+			"state":          "success",
+			"review_status":  "pending",
+			"time":           now,
+		},
+		{
+			"id":             "memory-review-result-other-user",
+			"user_id":        "u2",
+			"target":         ResourceTypeMemory,
+			"session_id":     "",
+			"source_content": "",
+			"operations":     "[]",
+			"content":        "other user memory",
+			"state":          "success",
+			"review_status":  "pending",
+			"time":           now,
+		},
+	}).Error; err != nil {
+		t.Fatalf("create review results: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/core/personalization-items", nil)
 	req.Header.Set("X-User-Id", "u1")
@@ -133,11 +173,11 @@ func TestListManagedStatesReturnsDefaultsAndUserScopedRows(t *testing.T) {
 	if memoryItem.AgentPersona != nil || memoryItem.UserAddress != nil || memoryItem.ResponseStyle != nil {
 		t.Fatalf("expected memory metadata fields to be omitted, got %#v", memoryItem)
 	}
-	if !memoryItem.HasPendingReviewSuggestions {
-		t.Fatalf("expected memory item to show pending review suggestions")
+	if !memoryItem.HasPendingReviewResult {
+		t.Fatalf("expected memory item to show pending review result")
 	}
-	if memoryItem.SuggestionStatus != SuggestionStatusPendingReview {
-		t.Fatalf("expected memory suggestion_status pending_review, got %q", memoryItem.SuggestionStatus)
+	if memoryItem.ReviewStatus != ReviewStatusPending {
+		t.Fatalf("expected memory review_status pending, got %q", memoryItem.ReviewStatus)
 	}
 
 	preferenceItem := resp.Data.Items[1]
@@ -153,11 +193,11 @@ func TestListManagedStatesReturnsDefaultsAndUserScopedRows(t *testing.T) {
 	if stringValue(preferenceItem.AgentPersona) != "严谨助手" || stringValue(preferenceItem.UserAddress) != "老师" || stringValue(preferenceItem.ResponseStyle) != "先结论后论证" {
 		t.Fatalf("unexpected preference metadata: %#v", preferenceItem)
 	}
-	if !preferenceItem.HasPendingReviewSuggestions {
-		t.Fatalf("expected preference item to show pending review suggestions")
+	if !preferenceItem.HasPendingReviewResult {
+		t.Fatalf("expected preference item to show pending review result")
 	}
-	if preferenceItem.SuggestionStatus != SuggestionStatusAccepted {
-		t.Fatalf("expected preference suggestion_status accepted, got %q", preferenceItem.SuggestionStatus)
+	if preferenceItem.ReviewStatus != ReviewStatusPending {
+		t.Fatalf("expected preference review_status pending, got %q", preferenceItem.ReviewStatus)
 	}
 
 	var preferenceCount int64

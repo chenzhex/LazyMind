@@ -349,17 +349,23 @@ func applyMemoryReviewResult(ctx context.Context, tx *gorm.DB, result MemoryRevi
 }
 
 func applyPreferenceReviewResult(ctx context.Context, tx *gorm.DB, result MemoryReviewResult, resource orm.SystemUserPreference, now time.Time, requireAutoEvo bool, source resourcechange.Source) error {
-	content := result.Content
-	if strings.TrimSpace(content) == "" {
-		return fmt.Errorf("%w: user_preference content required", errReviewInvalid)
+	parsed, err := evolution.ParseSystemUserPreferenceContent(result.Content)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errReviewInvalid, err)
 	}
 	if requireAutoEvo && !resource.AutoEvo {
 		return fmt.Errorf("%w: user_preference auto_evo disabled", errReviewConflict)
 	}
 	hashRow := resource
-	hashRow.Content = content
+	hashRow.Content = parsed.Content
+	hashRow.AgentPersona = parsed.AgentPersona
+	hashRow.UserAddress = parsed.UserAddress
+	hashRow.ResponseStyle = parsed.ResponseStyle
 	update := map[string]any{
-		"content":               content,
+		"content":               parsed.Content,
+		"agent_persona":         parsed.AgentPersona,
+		"user_address":          parsed.UserAddress,
+		"response_style":        parsed.ResponseStyle,
 		"content_hash":          evolution.HashSystemUserPreference(hashRow),
 		"version":               resource.Version + 1,
 		"draft_content":         "",
@@ -380,8 +386,8 @@ func applyPreferenceReviewResult(ctx context.Context, tx *gorm.DB, result Memory
 		UserID:        resource.UserID,
 		FromVersion:   resource.Version,
 		ToVersion:     resource.Version + 1,
-		BeforeContent: resource.Content,
-		AfterContent:  content,
+		BeforeContent: evolution.FormatSystemUserPreferenceForChat(resource),
+		AfterContent:  evolution.FormatSystemUserPreferenceForChat(hashRow),
 		Source:        source,
 	})
 	if err != nil {

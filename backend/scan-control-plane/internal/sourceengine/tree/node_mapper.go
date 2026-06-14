@@ -57,14 +57,16 @@ func bindingRootNode(binding store.Binding) TreeNode {
 		BindingID:     binding.BindingID,
 		TreeKey:       binding.TreeKey,
 		ObjectKey:     binding.TreeKey,
+		IsDocument:    true,
 		IsContainer:   true,
 		HasChildren:   true,
-		Selectable:    false,
+		Selectable:    true,
 	}
 }
 
 func sourceObjectNode(item ObjectWithState) TreeNode {
 	object := item.Object
+	selectableContainer := object.IsContainer || object.HasChildren
 	node := TreeNode{
 		Key:          object.BindingID + ":" + object.ObjectKey,
 		NodeRef:      object.ObjectKey,
@@ -75,22 +77,23 @@ func sourceObjectNode(item ObjectWithState) TreeNode {
 		TreeKey:      object.TreeKey,
 		ObjectKey:    object.ObjectKey,
 		ParentKey:    object.ParentKey,
-		IsDocument:   object.IsDocument,
+		IsDocument:   object.IsDocument || selectableContainer,
 		IsContainer:  object.IsContainer,
 		HasChildren:  object.HasChildren,
-		Selectable:   object.IsDocument,
+		Selectable:   object.IsDocument || selectableContainer,
 		ProviderMeta: store.CloneJSON(object.ProviderMeta),
 	}
 	if item.State != nil {
 		node.SourceState = item.State.SourceState
 		node.SyncState = item.State.SyncState
 		node.ParseQueueState = item.State.ParseQueueState
-		node.Selectable = item.State.Selectable
+		node.Selectable = item.State.Selectable || selectableContainer
 	}
 	return node
 }
 
 func liveSourceNode(sourceID string, binding store.Binding, raw connector.RawObject, normalized connector.NormalizedSourceObject) TreeNode {
+	selectableContainer := normalized.IsContainer || normalized.HasChildren
 	return TreeNode{
 		Key:           binding.BindingID + ":" + normalized.ObjectKey,
 		NodeRef:       raw.ObjectRef,
@@ -104,10 +107,10 @@ func liveSourceNode(sourceID string, binding store.Binding, raw connector.RawObj
 		TreeKey:       binding.TreeKey,
 		ObjectKey:     normalized.ObjectKey,
 		ParentKey:     normalized.ParentKey,
-		IsDocument:    normalized.IsDocument,
+		IsDocument:    normalized.IsDocument || selectableContainer,
 		IsContainer:   normalized.IsContainer,
 		HasChildren:   normalized.HasChildren,
-		Selectable:    normalized.IsDocument,
+		Selectable:    normalized.IsDocument || selectableContainer,
 		ProviderMeta:  providerMeta(raw.ProviderMeta),
 	}
 }

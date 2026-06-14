@@ -202,6 +202,20 @@ func TestBuildChatResourceContextFormatsUserPreferenceForChat(t *testing.T) {
 	}
 }
 
+func TestParseSystemUserPreferenceContentRequiresFrontmatterFields(t *testing.T) {
+	parsed, err := ParseSystemUserPreferenceContent("---\nagent_persona: 角色\nuser_address: 用户称谓\nresponse_style: 回复风格\n---\n")
+	if err != nil {
+		t.Fatalf("parse metadata-only preference: %v", err)
+	}
+	if parsed.Content != "" || parsed.AgentPersona != "角色" || parsed.UserAddress != "用户称谓" || parsed.ResponseStyle != "回复风格" {
+		t.Fatalf("unexpected parsed preference: %#v", parsed)
+	}
+
+	if _, err := ParseSystemUserPreferenceContent("---\nagent_persona: 角色\nuser_address: 用户称谓\n---\n正文"); err == nil {
+		t.Fatal("expected missing response_style to fail")
+	}
+}
+
 func TestResolveRequestUserIgnoresFallbackAndUsesSessionSnapshot(t *testing.T) {
 	db := newTestDB(t)
 

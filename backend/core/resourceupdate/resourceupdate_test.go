@@ -884,6 +884,43 @@ func TestSkillAcceptRejectAndUserFiltering(t *testing.T) {
 	}
 }
 
+func TestListSkillReviewResultsFiltersSkillName(t *testing.T) {
+	db := newResourceUpdateTestDB(t)
+	createSkillReviewResultsTable(t, db)
+	store.Init(db, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	now := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
+	insertFullSkillReviewResult(t, db, SkillReviewResult{ID: "target-1", UserID: "user-1", SkillName: "git-workflow", Type: skillReviewTypePatch, ReviewStatus: reviewStatusPending, SkillContent: skillContent("git-workflow", "target"), Time: now})
+	insertFullSkillReviewResult(t, db, SkillReviewResult{ID: "other-skill", UserID: "user-1", SkillName: "release-check", Type: skillReviewTypePatch, ReviewStatus: reviewStatusPending, SkillContent: skillContent("release-check", "other"), Time: now})
+	insertFullSkillReviewResult(t, db, SkillReviewResult{ID: "other-user", UserID: "user-2", SkillName: "git-workflow", Type: skillReviewTypePatch, ReviewStatus: reviewStatusPending, SkillContent: skillContent("git-workflow", "other user"), Time: now})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/skill-review-results?review_status=pending&type=patch&skill_name=git-workflow", nil)
+	req.Header.Set("X-User-Id", "user-1")
+	rec := httptest.NewRecorder()
+
+	ListSkillReviewResults(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []skillReviewResultResponse `json:"items"`
+			Total int                         `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if resp.Code != 0 {
+		t.Fatalf("expected code 0, got %d", resp.Code)
+	}
+	if resp.Data.Total != 1 || len(resp.Data.Items) != 1 || resp.Data.Items[0].ID != "target-1" {
+		t.Fatalf("expected only target result, got %#v", resp.Data)
+	}
+}
+
 func TestSkillReviewResultDetailIncludesCurrentContentForPatch(t *testing.T) {
 	db := newResourceUpdateTestDB(t)
 	createSkillReviewResultsTable(t, db)
@@ -1009,6 +1046,98 @@ func TestMemoryAcceptRejectTaskAPIAndNoAsyncJobID(t *testing.T) {
 	}
 	if len(listResp.Data.Items) != 1 || listResp.Data.Items[0].ID != "task-user-1" {
 		t.Fatalf("unexpected task list: %#v", listResp.Data.Items)
+	}
+}
+
+func TestListMemoryReviewResultsHidesUnmappedRows(t *testing.T) {
+	db := newResourceUpdateTestDB(t)
+	createMemoryReviewTable(t, db)
+	store.Init(db, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	now := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
+	insertMemoryResource(t, db, orm.SystemMemory{ID: "memory-1", UserID: "user-1", Content: "old memory", ContentHash: evolution.HashContent("old memory"), Version: 1, AutoEvo: false, CreatedAt: now, UpdatedAt: now})
+	insertMemoryReviewResult(t, db, MemoryReviewResult{ID: "mapped", UserID: "user-1", Target: orm.ResourceUpdateResourceTypeMemory, Content: "new memory", State: memoryReviewStateSuccess, ReviewStatus: reviewStatusPending, Time: now})
+	insertMemoryReviewResult(t, db, MemoryReviewResult{ID: "unmapped-preference", UserID: "user-1", Target: orm.ResourceUpdateResourceTypeUserPreference, Content: "---\nagent_persona: a\nuser_address: b\nresponse_style: c\n---\n\nbody", State: memoryReviewStateSuccess, ReviewStatus: reviewStatusPending, Time: now.Add(time.Second)})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/memory-review-results", nil)
+	req.Header.Set("X-User-Id", "user-1")
+	rec := httptest.NewRecorder()
+
+	ListMemoryReviewResults(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list memory review results failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []memoryReviewResultResponse `json:"items"`
+			Total int                          `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Data.Total != 1 || len(resp.Data.Items) != 1 || resp.Data.Items[0].ID != "mapped" {
+		t.Fatalf("expected only mapped memory review result, got total=%d items=%#v", resp.Data.Total, resp.Data.Items)
+	}
+}
+
+func TestAcceptUserPreferenceReviewResultParsesFrontmatter(t *testing.T) {
+	db := newResourceUpdateTestDB(t)
+	createMemoryReviewTable(t, db)
+	store.Init(db, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	now := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
+	resource := orm.SystemUserPreference{
+		ID:            "preference-1",
+		UserID:        "user-1",
+		Content:       "旧正文",
+		AgentPersona:  "旧角色",
+		UserAddress:   "旧称谓",
+		ResponseStyle: "旧风格",
+		Version:       1,
+		AutoEvo:       false,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	resource.ContentHash = evolution.HashSystemUserPreference(resource)
+	insertPreferenceResource(t, db, resource)
+	reviewContent := "---\nagent_persona: 新角色\nuser_address: 用户称谓\nresponse_style: 回复风格\n---\n\n新正文"
+	insertMemoryReviewResult(t, db, MemoryReviewResult{
+		ID:           "preference-accept",
+		UserID:       "user-1",
+		Target:       orm.ResourceUpdateResourceTypeUserPreference,
+		Content:      reviewContent,
+		State:        memoryReviewStateSuccess,
+		ReviewStatus: reviewStatusPending,
+		Time:         now,
+	})
+
+	req := mux.SetURLVars(httptest.NewRequest(http.MethodPost, "/api/core/memory-review-results/preference-accept:accept", nil), map[string]string{"review_result_id": "preference-accept"})
+	req.Header.Set("X-User-Id", "user-1")
+	rec := httptest.NewRecorder()
+
+	AcceptMemoryReviewResult(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("accept user_preference failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var updated orm.SystemUserPreference
+	if err := db.Take(&updated, "id = ?", "preference-1").Error; err != nil {
+		t.Fatalf("read preference: %v", err)
+	}
+	if updated.Content != "新正文" || updated.AgentPersona != "新角色" || updated.UserAddress != "用户称谓" || updated.ResponseStyle != "回复风格" {
+		t.Fatalf("expected frontmatter to be split into preference columns, got %#v", updated)
+	}
+	if strings.Contains(updated.Content, "agent_persona") || strings.Contains(updated.Content, "---") {
+		t.Fatalf("content should not keep raw frontmatter, got %q", updated.Content)
+	}
+	if updated.ContentHash != evolution.HashSystemUserPreference(updated) {
+		t.Fatalf("expected hash over split preference, got %q", updated.ContentHash)
+	}
+	if status := memoryReviewStatus(t, db, "preference-accept"); status != reviewStatusAccepted {
+		t.Fatalf("expected accepted status, got %s", status)
 	}
 }
 

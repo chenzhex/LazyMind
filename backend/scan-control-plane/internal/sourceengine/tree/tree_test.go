@@ -513,6 +513,9 @@ func TestSourceTreeListChildrenUsesIndexedRepoWhenUseCache(t *testing.T) {
 	if len(roots.Items) != 1 || roots.Items[0].BindingID != "binding-1" {
 		t.Fatalf("unexpected binding roots: %+v", roots)
 	}
+	if !roots.Items[0].Selectable || !roots.Items[0].IsDocument || !roots.Items[0].IsContainer {
+		t.Fatalf("binding root should be selectable as a sync target: %+v", roots.Items[0])
+	}
 
 	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
 		SourceID:  "source-1",
@@ -577,6 +580,9 @@ func TestSourceTreeBindingRequestExpandsIndexedRootObject(t *testing.T) {
 	for _, node := range page.Items {
 		if node.ObjectKey == "tree-root" {
 			t.Fatalf("binding request should expand root object instead of returning it: %+v", page.Items)
+		}
+		if node.ObjectKey == "folder-1" && (!node.Selectable || !node.IsDocument || !node.IsContainer) {
+			t.Fatalf("container child should be selectable as a sync target: %+v", node)
 		}
 	}
 }

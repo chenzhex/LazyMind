@@ -278,6 +278,12 @@ func TestIdleFallbackCreatesMemoryAndPreferenceTasksWithoutSensitiveRequestField
 		if request.SessionID != "session-fallback" || request.Target != task.ResourceType || len(request.History) == 0 {
 			t.Fatalf("unexpected request json: %#v", request)
 		}
+		if task.ResourceType == orm.ResourceUpdateResourceTypeUserPreference {
+			want := "---\nagent_persona: |-\n  当前角色\nuser_address: |-\n  当前称谓\nresponse_style: |-\n  当前风格\n---\n\ncurrent preference"
+			if request.CurrentContent != want {
+				t.Fatalf("expected formatted user_preference current_content, got %q", request.CurrentContent)
+			}
+		}
 		if strings.Contains(string(task.RequestJSON), "api_key") || strings.Contains(string(task.RequestJSON), "model_configs") || strings.Contains(string(task.RequestJSON), "llm_config") {
 			t.Fatalf("request_json contains sensitive field: %s", string(task.RequestJSON))
 		}
@@ -319,14 +325,17 @@ func insertIdleResources(t *testing.T, db *gorm.DB, userID string, now time.Time
 		t.Fatalf("insert memory: %v", err)
 	}
 	if err := db.Create(&orm.SystemUserPreference{
-		ID:          "preference-" + userID,
-		UserID:      userID,
-		Content:     "current preference",
-		ContentHash: "preference-hash",
-		Version:     1,
-		AutoEvo:     true,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:            "preference-" + userID,
+		UserID:        userID,
+		Content:       "current preference",
+		AgentPersona:  "当前角色",
+		UserAddress:   "当前称谓",
+		ResponseStyle: "当前风格",
+		ContentHash:   "preference-hash",
+		Version:       1,
+		AutoEvo:       true,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}).Error; err != nil {
 		t.Fatalf("insert preference: %v", err)
 	}
