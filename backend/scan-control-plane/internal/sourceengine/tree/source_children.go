@@ -24,7 +24,7 @@ func (e *DBSourceTreeQueryEngine) ListChildren(ctx context.Context, req SourceTr
 	if err != nil {
 		return TreeNodePage{}, mapStoreError(err)
 	}
-	if !req.UseCache {
+	if !sourceTreeUseCache(req) {
 		return e.listLiveChildren(ctx, req, binding, listMode)
 	}
 	treeKey := req.TreeKey
@@ -187,6 +187,13 @@ func defaultSourceTreeIncludes(req SourceTreeChildrenRequest) SourceTreeChildren
 		req.IncludeContainers = true
 	}
 	return req
+}
+
+func sourceTreeUseCache(req SourceTreeChildrenRequest) bool {
+	if req.UseCache == nil {
+		return true
+	}
+	return *req.UseCache
 }
 
 func objectPage(items []ObjectWithState, nextCursor string, hasMore bool, listComplete bool) TreeNodePage {

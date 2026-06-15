@@ -335,9 +335,13 @@ func treeNodeSchema() map[string]any {
 		"is_container", boolSchema(),
 		"has_children", boolSchema(),
 		"selectable", boolSchema(),
-		"source_state", stringSchema(),
-		"sync_state", stringSchema(),
+		"source_state", schemaRef("SourceState"),
+		"sync_state", schemaRef("SyncState"),
+		"pending_action", stringSchema(),
 		"parse_queue_state", stringSchema(),
+		"has_update", boolSchema(),
+		"update_type", stringSchema(),
+		"update_desc", stringSchema(),
 		"provider_meta", objectSchema(),
 	))
 }

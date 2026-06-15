@@ -210,7 +210,7 @@ func TestTargetTreeNodeUsesBindingTargetSemantics(t *testing.T) {
 	}
 }
 
-func TestSourceTreeListChildrenUsesLiveConnectorByDefault(t *testing.T) {
+func TestSourceTreeListChildrenUsesLiveConnectorWhenUseCacheFalse(t *testing.T) {
 	t.Parallel()
 
 	spy := &treeConnectorSpy{}
@@ -241,6 +241,7 @@ func TestSourceTreeListChildrenUsesLiveConnectorByDefault(t *testing.T) {
 	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
 		SourceID:        "source-1",
 		BindingID:       "binding-1",
+		UseCache:        boolPtr(false),
 		ProviderOptions: map[string]any{"user_id": "user-1"},
 		PageSize:        10,
 	})
@@ -293,6 +294,7 @@ func TestSourceTreeLiveRootRequestUsesTreeKeyNodeRef(t *testing.T) {
 		BindingID: "binding-1",
 		TreeKey:   "feishu:wiki:space-1:node-root",
 		ParentKey: "",
+		UseCache:  boolPtr(false),
 		PageSize:  40,
 	})
 	if err != nil {
@@ -334,6 +336,7 @@ func TestSourceTreeLiveWikiSpaceNodeRefPreserved(t *testing.T) {
 		BindingID: "binding-1",
 		TreeKey:   "feishu:feishu:wiki:spaces",
 		ParentKey: "feishu:wiki:space:space-1",
+		UseCache:  boolPtr(false),
 		PageSize:  40,
 	})
 	if err != nil {
@@ -382,6 +385,7 @@ func TestSourceTreeLiveWikiRootFallsBackToBindingTargetWhenEmpty(t *testing.T) {
 		SourceID:  "source-1",
 		BindingID: "binding-1",
 		TreeKey:   "feishu:wiki:space-1:node-root",
+		UseCache:  boolPtr(false),
 		PageSize:  40,
 	})
 	if err != nil {
@@ -442,6 +446,7 @@ func TestSourceTreeLiveWikiRootPreservesBindingRootLayer(t *testing.T) {
 		SourceID:  "source-1",
 		BindingID: "binding-1",
 		TreeKey:   "feishu:wiki:space-1:node-root",
+		UseCache:  boolPtr(false),
 		PageSize:  40,
 	})
 	if err != nil {
@@ -462,6 +467,7 @@ func TestSourceTreeLiveWikiRootPreservesBindingRootLayer(t *testing.T) {
 		BindingID: "binding-1",
 		TreeKey:   "feishu:wiki:space-1:node-root",
 		ParentKey: "feishu:wiki:space-1:node-root",
+		UseCache:  boolPtr(false),
 		PageSize:  40,
 	})
 	if err != nil {
@@ -521,7 +527,7 @@ func TestSourceTreeListChildrenUsesIndexedRepoWhenUseCache(t *testing.T) {
 		SourceID:  "source-1",
 		BindingID: "binding-1",
 		TreeKey:   "tree-root",
-		UseCache:  true,
+		UseCache:  boolPtr(true),
 		ParentKey: "",
 		PageSize:  10,
 	})
@@ -541,6 +547,45 @@ func TestSourceTreeListChildrenUsesIndexedRepoWhenUseCache(t *testing.T) {
 		if node.ObjectKey == "nested-1" {
 			t.Fatalf("source tree should not recursively build child levels: %+v", page.Items)
 		}
+	}
+}
+
+func TestSourceTreeCachedChildrenExposeDocumentUpdateState(t *testing.T) {
+	t.Parallel()
+
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{{
+		BindingID: "binding-1",
+		SourceID:  "source-1",
+		TreeKey:   "tree-root",
+		Status:    "ACTIVE",
+	}}
+	deleted := indexedObject("source-1", "binding-1", "tree-root", "doc-1", "", "Removed.md", true, false)
+	deleted.State.SourceState = "DELETED"
+	deleted.State.PendingAction = "DELETE"
+	deleted.State.ParseQueueState = "PENDING"
+	repo.objects = []ObjectWithState{deleted}
+	engine := NewDBSourceTreeQueryEngine(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10, MaxAllCurrentLevelItems: 10})
+
+	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
+		SourceID:  "source-1",
+		BindingID: "binding-1",
+		TreeKey:   "tree-root",
+		PageSize:  10,
+	})
+	if err != nil {
+		t.Fatalf("list indexed children: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("expected deleted indexed document, got %+v", page.Items)
+	}
+	node := page.Items[0]
+	if node.SourceState != "DELETED" || node.PendingAction != "DELETE" || node.ParseQueueState != "PENDING" {
+		t.Fatalf("tree node did not expose document state: %+v", node)
+	}
+	if !node.HasUpdate || node.UpdateType != "deleted" || node.UpdateDesc != "源端删除待清理" {
+		t.Fatalf("tree node did not expose document update status: %+v", node)
 	}
 }
 
@@ -565,7 +610,7 @@ func TestSourceTreeBindingRequestExpandsIndexedRootObject(t *testing.T) {
 	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
 		SourceID:  "source-1",
 		BindingID: "binding-1",
-		UseCache:  true,
+		UseCache:  boolPtr(true),
 		PageSize:  10,
 	})
 	if err != nil {
@@ -606,7 +651,7 @@ func TestSourceTreeBindingRequestFallsBackToLegacyRootLevelObjects(t *testing.T)
 	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
 		SourceID:  "source-1",
 		BindingID: "binding-1",
-		UseCache:  true,
+		UseCache:  boolPtr(true),
 		PageSize:  10,
 	})
 	if err != nil {
@@ -641,7 +686,7 @@ func TestSourceTreeAcceptsNodeRefAndTreeNodeKeyAsParent(t *testing.T) {
 	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
 		SourceID:  "source-1",
 		BindingID: "binding-1",
-		UseCache:  true,
+		UseCache:  boolPtr(true),
 		NodeRef:   "binding-1:folder-1",
 		PageSize:  10,
 	})
@@ -671,7 +716,7 @@ func TestSourceTreeAllCurrentLevelRejectsTooManyIndexedChildren(t *testing.T) {
 	_, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
 		SourceID:  "source-1",
 		BindingID: "binding-1",
-		UseCache:  true,
+		UseCache:  boolPtr(true),
 		ListMode:  ListModeAllCurrentLevel,
 		MaxItems:  1,
 	})
@@ -1034,6 +1079,10 @@ func paginateObjects(items []ObjectWithState, pageSize int, cursor string) ([]Ob
 		nextCursor = "next"
 	}
 	return append([]ObjectWithState(nil), items[offset:end]...), nextCursor, hasMore, nil
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func indexedObject(sourceID, bindingID, treeKey, objectKey, parentKey, displayName string, isDocument, isContainer bool) ObjectWithState {

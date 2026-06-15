@@ -212,7 +212,7 @@ func TestHandlersExposeConnectorsTargetTreeAndSourceTree(t *testing.T) {
 	setAPIContractActor(sourceReq)
 	sourceResp := httptest.NewRecorder()
 	handler.ServeHTTP(sourceResp, sourceReq)
-	if sourceResp.Code != http.StatusOK || sourceTree.childrenCalls != 1 || sourceTree.lastChildren.SourceID != "source-1" || !sourceTree.lastChildren.UseCache {
+	if sourceResp.Code != http.StatusOK || sourceTree.childrenCalls != 1 || sourceTree.lastChildren.SourceID != "source-1" || sourceTree.lastChildren.UseCache == nil || !*sourceTree.lastChildren.UseCache {
 		t.Fatalf("source tree handler did not set source_id: code=%d calls=%d req=%+v body=%s", sourceResp.Code, sourceTree.childrenCalls, sourceTree.lastChildren, sourceResp.Body.String())
 	}
 	if sourceTree.lastChildren.ProviderOptions["user_id"] != "user-1" || sourceTree.lastChildren.ProviderOptions["tenant_id"] != "tenant-1" {
