@@ -647,6 +647,83 @@ func TestAttachCaseDetailsReportResultAddsSummaryAndCSVFile(t *testing.T) {
 	assertOnlyTopLevelFileURL(t, data)
 }
 
+func TestAttachEvalReportSummaryResultAddsOnlyMissingFields(t *testing.T) {
+	baseDir := t.TempDir()
+	t.Setenv("LAZYMIND_EVO_BASE_DIR", baseDir)
+	manifestDir := filepath.Join(baseDir, "dev-runs", "thr-1", "store", "runs", "run_1", "artifacts", "manifests")
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatalf("create manifest dir: %v", err)
+	}
+	manifest := `{
+		"artifact_id": "eval_report",
+		"latest_version": 2,
+		"schema_name": "EvalReport",
+		"versions": [
+			{"version": 1, "payload_ref": "artifacts/blobs/eval_report/v0001.json"},
+			{"version": 2, "payload_ref": "artifacts/blobs/eval_report/v0042.json"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(manifestDir, "eval_report.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	payload := []any{
+		map[string]any{
+			"artifact_id":   "eval_report",
+			"artifact_ref":  "eval_report@v2",
+			"schema":        "EvalReport",
+			"case_count":    float64(0),
+			"unrelated_key": "keep-me",
+			"data": map[string]any{
+				"eval_dataset_ref": "eval_dataset@v1",
+				"metrics":          map[string]any{"correct_rate": 0.4},
+				"bad_cases": []any{
+					map[string]any{"case_id": "case_0001", "trace_id": "trace-1"},
+					map[string]any{"case_id": "case_0002", "trace_id": ""},
+					map[string]any{"case_id": "case_0003"},
+				},
+			},
+		},
+	}
+
+	found, err := attachEvalReportSummaryResult(payload, "thr-1")
+	if err != nil {
+		t.Fatalf("attachEvalReportSummaryResult returned error: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected eval report row to be found")
+	}
+	row := payload[0].(map[string]any)
+	if row[evalReportIDField] != "v0042" {
+		t.Fatalf("expected report_id from latest payload_ref, got %#v", row[evalReportIDField])
+	}
+	coverage, ok := row[evalReportTraceCoverageField].(evalReportTraceCoverage)
+	if !ok {
+		t.Fatalf("expected trace coverage, got %#v", row[evalReportTraceCoverageField])
+	}
+	if coverage.CoveredCount != 1 || coverage.TotalCount != 3 || math.Abs(coverage.Rate-1.0/3.0) > 0.000001 {
+		t.Fatalf("unexpected trace coverage: %#v", coverage)
+	}
+	if _, ok := row["eval_dataset_ref"]; ok {
+		t.Fatalf("did not expect eval_dataset_ref to be duplicated at result row")
+	}
+	if _, ok := row["accuracy"]; ok {
+		t.Fatalf("did not expect accuracy to be duplicated at result row")
+	}
+	if _, ok := row["bad_case_count"]; ok {
+		t.Fatalf("did not expect bad_case_count to be duplicated at result row")
+	}
+	data := row["data"].(map[string]any)
+	if data["eval_dataset_ref"] != "eval_dataset@v1" {
+		t.Fatalf("expected original dataset ref to remain in data")
+	}
+	if data["metrics"].(map[string]any)["correct_rate"] != 0.4 {
+		t.Fatalf("expected original metrics to remain in data")
+	}
+	if len(data["bad_cases"].([]any)) != 3 {
+		t.Fatalf("expected original bad_cases to remain in data")
+	}
+}
+
 func TestAttachCaseDetailsReportResultReadsCaseDetailsFromJSONPath(t *testing.T) {
 	uploadRoot := t.TempDir()
 	t.Setenv("LAZYMIND_UPLOAD_ROOT", uploadRoot)
