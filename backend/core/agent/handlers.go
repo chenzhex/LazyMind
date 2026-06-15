@@ -467,12 +467,78 @@ func GetThreadResultDatasets(w http.ResponseWriter, r *http.Request) {
 func GetThreadResultEvalReports(w http.ResponseWriter, r *http.Request) {
 	getThreadResults(w, r, "eval-reports")
 }
+func GetThreadResultEvalReportDetail(w http.ResponseWriter, r *http.Request) {
+	getThreadResultDetail(w, r, "eval-reports")
+}
 func GetThreadResultAnalysisReports(w http.ResponseWriter, r *http.Request) {
 	getThreadResults(w, r, "analysis-reports")
 }
 func GetThreadResultDiffs(w http.ResponseWriter, r *http.Request) { getThreadResults(w, r, "diffs") }
 func GetThreadResultAbtests(w http.ResponseWriter, r *http.Request) {
 	getThreadResults(w, r, "abtests")
+}
+func GetThreadResultAbtestDetail(w http.ResponseWriter, r *http.Request) {
+	getThreadResultDetail(w, r, "abtests")
+}
+func GetThreadResultTrace(w http.ResponseWriter, r *http.Request) {
+	threadID := strings.TrimSpace(mux.Vars(r)["thread_id"])
+	traceID := strings.TrimSpace(mux.Vars(r)["trace_id"])
+	if threadID == "" || traceID == "" {
+		common.ReplyErr(w, "thread_id and trace_id required", http.StatusBadRequest)
+		return
+	}
+	if _, err := loadUserThread(store.DB(), r, threadID); err != nil {
+		replyThreadLoadError(w, err)
+		return
+	}
+	proxy, statusCode, err := fetchUpstreamProxy(r.Context(), r, threadResultTraceURL(threadID, traceID))
+	if err != nil {
+		common.ReplyErrWithData(w, "fetch trace result failed", map[string]any{"detail": err.Error()}, statusCode)
+		return
+	}
+	writeProxyResponse(w, proxy)
+}
+
+func getThreadResultDetail(w http.ResponseWriter, r *http.Request, resultKind string) {
+	threadID := strings.TrimSpace(mux.Vars(r)["thread_id"])
+	if threadID == "" {
+		common.ReplyErr(w, "thread_id required", http.StatusBadRequest)
+		return
+	}
+	if _, err := loadUserThread(store.DB(), r, threadID); err != nil {
+		replyThreadLoadError(w, err)
+		return
+	}
+	proxy, statusCode, err := fetchUpstreamProxy(r.Context(), r, threadResultsURL(threadID, resultKind))
+	if err != nil {
+		common.ReplyErrWithData(w, "fetch thread result detail failed", map[string]any{"detail": err.Error()}, statusCode)
+		return
+	}
+	detail, err := buildThreadResultDetail(r.Context(), r, threadID, resultKind, proxy.Body)
+	if err != nil {
+		common.ReplyErrWithData(w, "build thread result detail failed", map[string]any{"detail": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	common.ReplyJSON(w, detail)
+}
+func GetThreadResultTraceCompare(w http.ResponseWriter, r *http.Request) {
+	threadID := strings.TrimSpace(mux.Vars(r)["thread_id"])
+	aTraceID := strings.TrimSpace(r.URL.Query().Get("a"))
+	bTraceID := strings.TrimSpace(r.URL.Query().Get("b"))
+	if threadID == "" || aTraceID == "" || bTraceID == "" {
+		common.ReplyErr(w, "thread_id, a and b required", http.StatusBadRequest)
+		return
+	}
+	if _, err := loadUserThread(store.DB(), r, threadID); err != nil {
+		replyThreadLoadError(w, err)
+		return
+	}
+	proxy, statusCode, err := fetchUpstreamProxy(r.Context(), r, threadResultTraceCompareURL(threadID, aTraceID, bTraceID))
+	if err != nil {
+		common.ReplyErrWithData(w, "fetch trace comparison failed", map[string]any{"detail": err.Error()}, statusCode)
+		return
+	}
+	writeProxyResponse(w, proxy)
 }
 func GetThreadFlowStatus(w http.ResponseWriter, r *http.Request) {
 	proxyThreadGet(w, r, func(threadID string) string { return threadFlowStatusURL(threadID) }, "fetch thread flow status failed")

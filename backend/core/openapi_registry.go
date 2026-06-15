@@ -468,6 +468,16 @@ type agentThreadPathParams struct {
 	ThreadID string `path:"thread_id"`
 }
 
+type agentTracePathParams struct {
+	ThreadID string `path:"thread_id"`
+	TraceID  string `path:"trace_id"`
+}
+
+type agentTraceCompareQueryParams struct {
+	A string `query:"a" required:"true"`
+	B string `query:"b" required:"true"`
+}
+
 type agentThreadOpenAPIResponse struct {
 	ThreadID      string         `json:"thread_id"`
 	CurrentTaskID string         `json:"current_task_id,omitempty"`
@@ -481,6 +491,29 @@ type agentThreadListOpenAPIResponse struct {
 	Threads       []agentThreadOpenAPIResponse `json:"threads"`
 	TotalSize     int64                        `json:"total_size"`
 	NextPageToken string                       `json:"next_page_token"`
+}
+
+type agentTraceSummaryOpenAPIResponse struct {
+	Status         string   `json:"status"`
+	LatencyMS      *float64 `json:"latency_ms,omitempty"`
+	RoundCount     int      `json:"round_count"`
+	ToolCallCount  int      `json:"tool_call_count"`
+	RetrievalCount int      `json:"retrieval_count"`
+	RerankCount    int      `json:"rerank_count"`
+}
+
+type agentTraceDetailOpenAPIResponse struct {
+	TraceID     string                           `json:"trace_id"`
+	TraceStatus string                           `json:"trace_status"`
+	Query       string                           `json:"query"`
+	Summary     agentTraceSummaryOpenAPIResponse `json:"summary"`
+	Trace       map[string]any                   `json:"trace,omitempty"`
+}
+
+type agentTraceCompareOpenAPIResponse struct {
+	Query string                          `json:"query"`
+	A     agentTraceDetailOpenAPIResponse `json:"a"`
+	B     agentTraceDetailOpenAPIResponse `json:"b"`
 }
 
 type agentEvalReportTraceCoverageOpenAPIResponse struct {
@@ -524,6 +557,33 @@ type agentEvalReportBadCaseListOpenAPIResponse struct {
 	Items         []agentEvalReportBadCaseListItemOpenAPIResponse `json:"items"`
 	TotalSize     int                                             `json:"total_size"`
 	NextPageToken string                                          `json:"next_page_token"`
+}
+
+type agentResultDetailCaseOpenAPIResponse struct {
+	CaseID        string         `json:"case_id"`
+	Query         string         `json:"query,omitempty"`
+	Reference     string         `json:"reference,omitempty"`
+	Answer        string         `json:"answer,omitempty"`
+	Score         *float64       `json:"score,omitempty"`
+	FailureType   string         `json:"failure_type,omitempty"`
+	FailureReason string         `json:"failure_reason,omitempty"`
+	ExecutionMode string         `json:"execution_mode,omitempty"`
+	TraceID       string         `json:"trace_id,omitempty"`
+	TraceLinked   bool           `json:"trace_linked"`
+	LatencyMS     *float64       `json:"latency_ms,omitempty"`
+	Metrics       map[string]any `json:"metrics,omitempty"`
+	MissingFields []string       `json:"missing_fields,omitempty"`
+}
+
+type agentResultDetailOpenAPIResponse struct {
+	ThreadID        string                                 `json:"thread_id"`
+	Kind            string                                 `json:"kind"`
+	Report          map[string]any                         `json:"report"`
+	Summary         map[string]any                         `json:"summary"`
+	Cases           []agentResultDetailCaseOpenAPIResponse `json:"cases"`
+	SelectedCase    map[string]any                         `json:"selected_case,omitempty"`
+	SourceArtifacts map[string]any                         `json:"source_artifacts,omitempty"`
+	MissingFields   []string                               `json:"missing_fields,omitempty"`
 }
 
 type skillPathParams struct {
@@ -2314,6 +2374,43 @@ func registeredCoreOperations() []openAPIOperation {
 			Tags:        []string{"agent"},
 			PathParams:  agentThreadPathParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Eval report result rows", []agentEvalReportResultOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/agent/threads/{thread_id}/results/traces/{trace_id}",
+			Summary:     "Get agent trace detail",
+			Description: "Get one trace detail for a thread owned by the current user.",
+			Tags:        []string{"agent"},
+			PathParams:  agentTracePathParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Agent trace detail", agentTraceDetailOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/agent/threads/{thread_id}/results/eval-reports/detail",
+			Summary:     "Get eval report display detail",
+			Description: "Get structured eval report detail for frontend display, including report summary and case rows.",
+			Tags:        []string{"agent"},
+			PathParams:  agentThreadPathParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Agent eval report display detail", agentResultDetailOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/agent/threads/{thread_id}/results/abtests/detail",
+			Summary:     "Get ABTest display detail",
+			Description: "Get structured ABTest detail for frontend display, including comparison summary and case rows.",
+			Tags:        []string{"agent"},
+			PathParams:  agentThreadPathParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Agent ABTest display detail", agentResultDetailOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/agent/threads/{thread_id}/results/traces-compare",
+			Summary:     "Compare agent traces",
+			Description: "Compare two trace details in a thread. Query parameters a and b are trace IDs.",
+			Tags:        []string{"agent"},
+			PathParams:  agentThreadPathParams{},
+			QueryParams: agentTraceCompareQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Agent trace comparison", agentTraceCompareOpenAPIResponse{})},
 		},
 		{
 			Method:      "GET",
