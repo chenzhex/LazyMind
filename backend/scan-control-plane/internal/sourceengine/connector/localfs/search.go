@@ -24,7 +24,7 @@ func (c *LocalFSConnector) search(ctx context.Context, req connector.SearchReque
 	if err := c.validateSearchRequest(req, keyword); err != nil {
 		return connector.RawObjectPage{}, err
 	}
-	page, err := c.recursiveSearch(ctx, req, keyword)
+	page, err := c.currentLevelSearch(ctx, req, keyword)
 	if err != nil {
 		return connector.RawObjectPage{}, err
 	}
@@ -47,31 +47,28 @@ func (c *LocalFSConnector) validateSearchRequest(req connector.SearchRequest, ke
 	return validatePageSize(req.PageSize, c.Spec().MaxPageSize)
 }
 
-func (c *LocalFSConnector) recursiveSearch(ctx context.Context, req connector.SearchRequest, keyword string) (connector.RawObjectPage, error) {
+func (c *LocalFSConnector) currentLevelSearch(ctx context.Context, req connector.SearchRequest, keyword string) (connector.RawObjectPage, error) {
 	offset, err := parseCursor(req.Cursor)
 	if err != nil {
 		return connector.RawObjectPage{}, err
 	}
-	queue, err := c.searchRoots(ctx, req)
+	current, err := c.currentLevelSearchItems(ctx, req)
 	if err != nil {
 		return connector.RawObjectPage{}, err
 	}
 	items := make([]connector.RawObject, 0, req.PageSize)
 	seenObjects := map[string]struct{}{}
-	seenDirs := map[string]struct{}{}
 	matchCount := 0
-	for len(queue) > 0 {
+	for _, item := range current {
 		if err := ctx.Err(); err != nil {
 			return connector.RawObjectPage{}, err
 		}
-		current := queue[0]
-		queue = queue[1:]
-		raw := c.rawObject(req.AgentID, current.info, current.parentPath)
+		raw := c.rawObject(req.AgentID, item.info, item.parentPath)
 		if _, ok := seenObjects[raw.ObjectKey]; ok {
 			continue
 		}
 		seenObjects[raw.ObjectKey] = struct{}{}
-		if localSearchNameMatches(current.info, keyword) {
+		if localSearchNameMatches(item.info, keyword) {
 			matchCount++
 			if matchCount > offset {
 				items = append(items, raw)
@@ -80,24 +77,11 @@ func (c *LocalFSConnector) recursiveSearch(ctx context.Context, req connector.Se
 				}
 			}
 		}
-		if !current.info.IsDir {
-			continue
-		}
-		dirPath := canonicalPath(current.info)
-		if _, ok := seenDirs[dirPath]; ok {
-			continue
-		}
-		seenDirs[dirPath] = struct{}{}
-		children, err := c.listSearchChildren(ctx, req, dirPath)
-		if err != nil {
-			return connector.RawObjectPage{}, err
-		}
-		queue = append(queue, children...)
 	}
 	return connector.RawObjectPage{Items: items, ListComplete: true}, nil
 }
 
-func (c *LocalFSConnector) searchRoots(ctx context.Context, req connector.SearchRequest) ([]searchItem, error) {
+func (c *LocalFSConnector) currentLevelSearchItems(ctx context.Context, req connector.SearchRequest) ([]searchItem, error) {
 	if strings.TrimSpace(req.NodeRef) != "" || strings.TrimSpace(req.TargetRef) != "" {
 		path, err := c.decodeNodeRef(req.TargetRef, req.NodeRef)
 		if err != nil {
@@ -111,7 +95,10 @@ func (c *LocalFSConnector) searchRoots(ctx context.Context, req connector.Search
 		if err != nil {
 			return nil, err
 		}
-		return []searchItem{{info: info, parentPath: filepath.Dir(canonicalPath(info))}}, nil
+		if !info.IsDir {
+			return []searchItem{{info: info, parentPath: filepath.Dir(canonicalPath(info))}}, nil
+		}
+		return c.listSearchChildren(ctx, req, canonicalPath(info))
 	}
 	roots, err := c.initialRootInfos(ctx, connector.ListChildrenRequest{AgentID: req.AgentID, ProviderOptions: req.ProviderOptions})
 	if err != nil {

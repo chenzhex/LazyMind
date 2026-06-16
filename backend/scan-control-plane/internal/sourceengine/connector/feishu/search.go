@@ -32,7 +32,7 @@ func (c *FeishuConnector) search(ctx context.Context, req connector.SearchReques
 	if err != nil {
 		return connector.RawObjectPage{}, err
 	}
-	page, err := c.recursiveSearch(ctx, token.AccessToken, keyword, req)
+	page, err := c.currentLevelSearch(ctx, token.AccessToken, keyword, req)
 	if err != nil {
 		return connector.RawObjectPage{}, err
 	}
@@ -50,7 +50,7 @@ type searchRoot struct {
 	nodeRef    string
 }
 
-func (c *FeishuConnector) recursiveSearch(ctx context.Context, token, keyword string, req connector.SearchRequest) (ObjectPage, error) {
+func (c *FeishuConnector) currentLevelSearch(ctx context.Context, token, keyword string, req connector.SearchRequest) (ObjectPage, error) {
 	offset, err := parseCursor(req.Cursor)
 	if err != nil {
 		return ObjectPage{}, err
@@ -58,7 +58,6 @@ func (c *FeishuConnector) recursiveSearch(ctx context.Context, token, keyword st
 	roots := searchRoots(req)
 	matches := make([]Object, 0, req.PageSize)
 	seenObjects := map[string]struct{}{}
-	seenContainers := map[string]struct{}{}
 	seenMatchCount := 0
 	for len(roots) > 0 {
 		if err := ctx.Err(); err != nil {
@@ -66,11 +65,6 @@ func (c *FeishuConnector) recursiveSearch(ctx context.Context, token, keyword st
 		}
 		root := roots[0]
 		roots = roots[1:]
-		containerKey := searchContainerKey(root)
-		if _, ok := seenContainers[containerKey]; ok {
-			continue
-		}
-		seenContainers[containerKey] = struct{}{}
 		cursor := ""
 		for {
 			page, err := c.listProviderPageForSearch(ctx, token, root, cursor, providerPageSize(root.targetType, root.nodeRef, c.Spec().MaxPageSize))
@@ -91,9 +85,6 @@ func (c *FeishuConnector) recursiveSearch(ctx context.Context, token, keyword st
 							return ObjectPage{Items: matches[:req.PageSize], HasMore: true, NextCursor: strconv.Itoa(offset + req.PageSize)}, nil
 						}
 					}
-				}
-				if item.IsContainer || item.HasChildren {
-					roots = append(roots, childSearchRoot(root, item))
 				}
 			}
 			if !page.HasMore {
@@ -135,18 +126,6 @@ func searchRoots(req connector.SearchRequest) []searchRoot {
 			{targetType: TargetTypeWikiNode, nodeRef: VirtualWikiSpacesRef},
 		}
 	}
-}
-
-func childSearchRoot(parent searchRoot, item Object) searchRoot {
-	return searchRoot{
-		targetType: parent.targetType,
-		targetRef:  parent.targetRef,
-		nodeRef:    targetRefFor(item),
-	}
-}
-
-func searchContainerKey(root searchRoot) string {
-	return string(root.targetType) + "\x00" + firstNonEmpty(root.nodeRef, root.targetRef)
 }
 
 func searchNameMatches(item Object, keyword string) bool {

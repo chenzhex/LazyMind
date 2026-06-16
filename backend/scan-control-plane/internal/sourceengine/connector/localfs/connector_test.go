@@ -313,10 +313,23 @@ func TestPublicRootRejectsStaleExternalExportPath(t *testing.T) {
 	}
 }
 
-func TestSearchRecursivelyMatchesLocalNamesAndDeltaUnsupported(t *testing.T) {
+func TestSearchCurrentLevelMatchesLocalNamesAndDeltaUnsupported(t *testing.T) {
 	t.Parallel()
 
 	agent := newAgentStub()
+	rootMatch := PathInfo{
+		Path:           "/workspace/docs/test-root.md",
+		NormalizedPath: "/workspace/docs/test-root.md",
+		DisplayName:    "test-root.md",
+		Exists:         true,
+		Readable:       true,
+		SizeBytes:      7,
+		MTimeUnixNano:  85,
+		FileExtension:  ".md",
+		StableID:       "file-test-root",
+		ParentStableID: "root-docs",
+		ParentPath:     "/workspace/docs",
+	}
 	nested := PathInfo{
 		Path:           "/workspace/docs/guides/test-plan.md",
 		NormalizedPath: "/workspace/docs/guides/test-plan.md",
@@ -330,29 +343,35 @@ func TestSearchRecursivelyMatchesLocalNamesAndDeltaUnsupported(t *testing.T) {
 		ParentStableID: "folder-guides",
 		ParentPath:     "/workspace/docs/guides",
 	}
+	agent.infos[rootMatch.NormalizedPath] = rootMatch
 	agent.infos[nested.NormalizedPath] = nested
+	agent.children["/workspace/docs"] = append(agent.children["/workspace/docs"], rootMatch)
 	agent.children["/workspace/docs/guides"] = []PathInfo{nested}
 	conn := NewLocalFSConnector(agent, WithRecommendedRoots("/workspace/docs"))
 
 	page, err := conn.Search(context.Background(), connector.SearchRequest{
-		Keyword:  "test",
-		PageSize: 10,
-		AgentID:  "agent-1",
+		TargetType: TargetTypeLocalPath,
+		TargetRef:  "/workspace/docs",
+		Keyword:    "test",
+		PageSize:   10,
+		AgentID:    "agent-1",
 	})
 	if err != nil {
 		t.Fatalf("search local files: %v", err)
 	}
-	if got := localObjectKeys(page.Items); !sameStrings(got, []string{"local_fs:agent-1:id:file-test"}) {
+	if got := localObjectKeys(page.Items); !sameStrings(got, []string{"local_fs:agent-1:id:file-test-root"}) {
 		t.Fatalf("unexpected local search results: %v", got)
 	}
-	if page.Items[0].ParentRef != "/workspace/docs/guides" || page.Items[0].ProviderMeta["parent_path"] != "/workspace/docs/guides" {
+	if page.Items[0].ParentRef != "/workspace/docs" || page.Items[0].ProviderMeta["parent_path"] != "/workspace/docs" {
 		t.Fatalf("search result should keep parent metadata: %+v", page.Items[0])
 	}
 
 	virtualConn := NewLocalFSConnector(agent, WithDefaultAgentID("agent-default"), WithRecommendedRoots("/"), WithPublicRoot("/host/root"))
 	virtualPage, err := virtualConn.Search(context.Background(), connector.SearchRequest{
-		Keyword:  "readme",
-		PageSize: 10,
+		TargetType: TargetTypeLocalPath,
+		TargetRef:  "/project-a",
+		Keyword:    "readme",
+		PageSize:   10,
 	})
 	if err != nil {
 		t.Fatalf("search virtual local files: %v", err)

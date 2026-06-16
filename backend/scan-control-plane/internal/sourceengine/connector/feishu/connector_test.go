@@ -659,12 +659,16 @@ func TestWikiListClampsProviderPageSizeToOpenAPILimit(t *testing.T) {
 	}
 }
 
-func TestRecursiveSearchByNameAndDeltaUnsupported(t *testing.T) {
+func TestCurrentLevelSearchByNameAndDeltaUnsupported(t *testing.T) {
 	t.Parallel()
 
 	auth := &authStub{}
 	api := newFeishuAPIStub()
+	rootMatch := Object{Kind: ObjectKindDriveFile, Token: "file-test-root", ParentToken: "folder-root", Name: "test-root.pdf", IsDocument: true, Revision: "rev-test-root", FileExtension: ".pdf", StableID: "file-test-root"}
 	nested := Object{Kind: ObjectKindDriveFile, Token: "file-test", ParentToken: "folder-guides", Name: "test-plan.pdf", IsDocument: true, Revision: "rev-test", FileExtension: ".pdf", StableID: "file-test"}
+	api.driveObjects["file-test-root"] = rootMatch
+	api.driveObjects["file-test"] = nested
+	api.driveChildren["folder-root"] = append(api.driveChildren["folder-root"], rootMatch)
 	api.driveChildren["folder-guides"] = []Object{nested}
 	api.driveListErrors = []error{connector.NewError(connector.ErrorCodeRateLimited, "request trigger frequency limit")}
 	conn := NewFeishuConnector(auth, api)
@@ -681,10 +685,10 @@ func TestRecursiveSearchByNameAndDeltaUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search drive files: %v", err)
 	}
-	if auth.calls != 1 || len(api.drivePageSizes) < 3 {
-		t.Fatalf("search should recursively list drive folders, auth=%d drive_page_sizes=%v", auth.calls, api.drivePageSizes)
+	if auth.calls != 1 || len(api.drivePageSizes) != 2 {
+		t.Fatalf("search should retry and only list the current drive level, auth=%d drive_page_sizes=%v", auth.calls, api.drivePageSizes)
 	}
-	if got := feishuObjectKeys(page.Items); !sameStrings(got, []string{"feishu:drive:file-test"}) {
+	if got := feishuObjectKeys(page.Items); !sameStrings(got, []string{"feishu:drive:file-test-root"}) {
 		t.Fatalf("unexpected search results: %v", got)
 	}
 	if page.Items[0].ProviderMeta["auth_connection_id"] != "auth-1" {
@@ -698,12 +702,12 @@ func TestRecursiveSearchByNameAndDeltaUnsupported(t *testing.T) {
 	wikiPage, err := conn.Search(context.Background(), connector.SearchRequest{
 		Keyword:          "wiki child",
 		TargetType:       TargetTypeWikiNode,
-		TargetRef:        VirtualWikiSpacesRef,
+		TargetRef:        "space-1:node-root",
 		PageSize:         10,
 		AuthConnectionID: "auth-1",
 	})
 	if err != nil {
-		t.Fatalf("search wiki recursively: %v", err)
+		t.Fatalf("search wiki current level: %v", err)
 	}
 	if got := feishuObjectKeys(wikiPage.Items); !sameStrings(got, []string{"feishu:wiki:space-1:node-child"}) {
 		t.Fatalf("unexpected wiki search results: %v", got)
