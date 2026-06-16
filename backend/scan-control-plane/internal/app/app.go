@@ -263,6 +263,7 @@ func newHandlerWithComponents(built Components) http.Handler {
 	limits := tree.TreeQueryLimits{DefaultPageSize: 50, MaxPageSize: 100, MaxAllCurrentLevelItems: 1000}
 	sourceTree := tree.NewDBSourceTreeQueryEngine(repo, limits, tree.WithSourceTreeConnectorRegistry(registry))
 	documents := tree.NewDBSourceDocumentQuery(repo, limits)
+	readRefresher := tree.NewDBSourceReadRefresher(built.Repository, registry)
 	targetTree := tree.NewDefaultTargetTreeEngine(
 		registry,
 		tree.WithTargetTreeLimits(limits),
@@ -275,6 +276,7 @@ func newHandlerWithComponents(built Components) http.Handler {
 		server.WithTargetTreeEngine(targetTree),
 		server.WithSourceTreeQueryEngine(sourceTree),
 		server.WithSourceDocumentQuery(documents),
+		server.WithSourceReadRefresher(readRefresher),
 		server.WithTaskPlanner(taskPlanner),
 		server.WithParseTaskQuery(taskQuery),
 		server.WithAdminService(adminSvc),

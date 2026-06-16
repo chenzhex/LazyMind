@@ -628,6 +628,46 @@ func TestSourceTreeIndexedBindingRootDocumentExposesUpdateState(t *testing.T) {
 	}
 }
 
+func TestSourceTreeIndexedBindingRootUsesVisibleChildrenForExpandState(t *testing.T) {
+	t.Parallel()
+
+	base := newTreeReadRepo()
+	base.sources["source-1"] = store.Source{SourceID: "source-1"}
+	base.bindings["source-1"] = []store.Binding{{
+		BindingID:     "binding-1",
+		SourceID:      "source-1",
+		TreeKey:       "wiki-root",
+		ConnectorType: "feishu",
+		Status:        "ACTIVE",
+	}}
+	root := indexedObject("source-1", "binding-1", "wiki-root", "wiki-root", "", "Wiki Root", true, false)
+	root.Object.HasChildren = false
+	root.State.SourceState = "UNCHANGED"
+	deletedChild := indexedObject("source-1", "binding-1", "wiki-root", "doc-deleted", "wiki-root", "Deleted.md", true, false)
+	deletedChild.State.SourceState = "DELETED"
+	deletedChild.State.PendingAction = "DELETE"
+	deletedChild.State.DocumentListVisible = true
+	base.objects = []ObjectWithState{root, deletedChild}
+	repo := &treeReadRepoWithObject{treeReadRepo: base}
+	engine := NewDBSourceTreeQueryEngine(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10, MaxAllCurrentLevelItems: 10})
+
+	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
+		SourceID:  "source-1",
+		BindingID: "binding-1",
+		UseCache:  boolPtr(true),
+		PageSize:  10,
+	})
+	if err != nil {
+		t.Fatalf("list indexed binding root: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("expected binding root document, got %+v", page.Items)
+	}
+	if !page.Items[0].HasChildren {
+		t.Fatalf("binding root should stay expandable while it has visible deleted children: %+v", page.Items[0])
+	}
+}
+
 func TestSourceTreeBindingRequestExpandsIndexedRootObject(t *testing.T) {
 	t.Parallel()
 

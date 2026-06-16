@@ -156,6 +156,18 @@ func (e *DBSourceTreeQueryEngine) indexedBindingRoot(ctx context.Context, req So
 		}
 		return ObjectWithState{}, false, mapStoreError(err)
 	}
+	if !root.HasChildren {
+		children, _, hasMore, err := e.listObjects(ctx, SourceTreeChildrenRequest{
+			SourceID:          req.SourceID,
+			BindingID:         binding.BindingID,
+			IncludeDocuments:  true,
+			IncludeContainers: true,
+		}, binding.TreeKey, root.ObjectKey, 1)
+		if err != nil {
+			return ObjectWithState{}, false, mapStoreError(err)
+		}
+		root.HasChildren = hasMore || len(children) > 0
+	}
 	item := ObjectWithState{Object: root}
 	if root.IsDocument {
 		if stateReader, ok := e.repo.(sourceDocumentStateReader); ok {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/lazymind/scan_control_plane/internal/access"
@@ -84,6 +85,12 @@ func (h *Handler) listSourceTreeChildren(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	req.ProviderOptions = withActorProviderOptions(req.ProviderOptions, actor)
+	if req.UseCache == nil {
+		if err := h.refreshSourceRead(r.Context(), req.SourceID, req.BindingID); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	page, err := h.sourceTree.ListChildren(r.Context(), req)
 	if err != nil {
 		writeError(w, err)
@@ -144,6 +151,10 @@ func (h *Handler) listSourceDocuments(w http.ResponseWriter, r *http.Request) {
 		Page:          parseIntQuery(r, "page"),
 		PageSize:      parseIntQuery(r, "page_size"),
 	}
+	if err := h.refreshSourceRead(r.Context(), req.SourceID, req.BindingID); err != nil {
+		writeError(w, err)
+		return
+	}
 	page, err := h.documents.ListDocuments(r.Context(), req)
 	if err != nil {
 		writeError(w, err)
@@ -160,6 +171,16 @@ func targetAccessFromChildren(req tree.TargetTreeChildrenRequest) access.Binding
 		AgentID:          req.AgentID,
 		AuthConnectionID: req.AuthConnectionID,
 	}
+}
+
+func (h *Handler) refreshSourceRead(ctx context.Context, sourceID, bindingID string) error {
+	if h.refresher == nil {
+		return nil
+	}
+	return h.refresher.RefreshSourceRead(ctx, tree.SourceReadRefreshRequest{
+		SourceID:  sourceID,
+		BindingID: bindingID,
+	})
 }
 
 func targetAccessFromSearch(req tree.TargetTreeSearchRequest) access.BindingTargetRequest {
