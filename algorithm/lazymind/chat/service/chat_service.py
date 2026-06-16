@@ -8,6 +8,7 @@ import lazyllm
 from lazyllm import LOG, set_trace_context
 from fastapi.responses import StreamingResponse
 from lazymind.chat.config import (
+    IMAGE_EXTENSIONS,
     LAZYMIND_LLM_PRIORITY,
     MAX_CONCURRENCY,
     RAG_MODE,
@@ -19,12 +20,15 @@ from lazymind.chat.service.component import (
     AgentEventFrameTranslator,
     DEFAULT_TOOLS,
     build_agent_tools,
+    filter_tools,
     normalize_history_for_agent,
 )
 from lazymind.chat.engine.agent_core import build_react_agent, drive_agent
 from lazymind.chat.service.utils import (
     SensitiveFilter,
+    basename_from_path,
     log_and_emit_frame,
+    register_image_url,
     response_payload,
     single_event_stream_response,
     sse_line,
@@ -204,13 +208,22 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
         'has_subagents': bool(has_subagents),
         'conversation_id': (conversation_id or '').strip(),
     }
+    display_files: list[str] = []
+    for path in resolved_files:
+        if path.lower().endswith(IMAGE_EXTENSIONS):
+            register_image_url(translator.citation_state, path)
+            display_files.append(basename_from_path(path) or path)
+        else:
+            display_files.append(path)
     lazyllm.globals._init_sid(sid=session_id)
     lazyllm.locals._init_sid(sid=session_id)
     inject_model_config(model_config)
     inject_tool_config(tool_config)
     lazyllm.globals['agentic_config'] = agentic_config
     disabled = set(disabled_tools or [])
-    active_configs = [cfg for cfg in DEFAULT_TOOLS if cfg.name not in disabled]
+    active_configs = filter_tools(
+        [cfg for cfg in DEFAULT_TOOLS if cfg.name not in disabled],
+    )
     agent_tools = build_agent_tools(active_configs)
     subagent_tools = _build_subagent_chat_tools(bool(has_subagents))
     mcp_tools = _build_mcp_tools(mcp_config) if mcp_config else []
@@ -229,7 +242,7 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
         use_memory=use_memory,
         user_preference=user_preference,
         memory=memory,
-        files=resolved_files,
+        files=display_files,
     )
 
     llm = AutoModel(model='llm')
