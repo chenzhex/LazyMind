@@ -167,6 +167,12 @@ func TestTargetTreeSearchRespectsIncludeFiles(t *testing.T) {
 	if len(withoutFiles.Items) != 0 {
 		t.Fatalf("search should filter files when include_files=false, got %+v", withoutFiles.Items)
 	}
+	if len(spy.searchRequests) != 0 || len(spy.listRequests) != 1 {
+		t.Fatalf("target search should filter normal list results without connector search, searches=%d lists=%d", len(spy.searchRequests), len(spy.listRequests))
+	}
+	if spy.listRequests[0].Cursor != "" || spy.listRequests[0].PageSize != 2 {
+		t.Fatalf("search should pass normal list pagination, got %+v", spy.listRequests[0])
+	}
 
 	withFiles, err := engine.Search(context.Background(), TargetTreeSearchRequest{
 		ConnectorType: treeTestConnectorType,
@@ -179,6 +185,9 @@ func TestTargetTreeSearchRespectsIncludeFiles(t *testing.T) {
 	}
 	if len(withFiles.Items) != 1 || withFiles.Items[0].ObjectKey != "doc-1" {
 		t.Fatalf("search should keep files when include_files=true, got %+v", withFiles.Items)
+	}
+	if len(spy.searchRequests) != 0 || len(spy.listRequests) != 2 {
+		t.Fatalf("target search should continue using normal list results, searches=%d lists=%d", len(spy.searchRequests), len(spy.listRequests))
 	}
 }
 

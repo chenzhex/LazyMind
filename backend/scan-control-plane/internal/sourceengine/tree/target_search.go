@@ -25,11 +25,11 @@ func (e *DefaultTargetTreeEngine) Search(ctx context.Context, req TargetTreeSear
 		return e.fallback.Search(ctx, req)
 	}
 	pageSize := normalizePageSize(req.PageSize, e.limitForConnector(conn.Spec()))
-	rawPage, err := conn.Search(ctx, connector.SearchRequest{
+	rawPage, err := conn.ListChildren(ctx, connector.ListChildrenRequest{
 		TargetType:       req.TargetType,
 		TargetRef:        req.TargetRef,
 		NodeRef:          req.NodeRef,
-		Keyword:          req.Keyword,
+		ListMode:         connector.ListModePage,
 		Cursor:           req.Cursor,
 		PageSize:         pageSize,
 		AgentID:          req.AgentID,
@@ -52,6 +52,9 @@ func (e *DefaultTargetTreeEngine) mapTargetSearchPage(ctx context.Context, conn 
 		if !req.IncludeFiles && !isTargetDirectoryNode(raw, normalized) {
 			continue
 		}
+		if !targetSearchMatches(normalized, req.Keyword) {
+			continue
+		}
 		nodes = append(nodes, targetNode(req.ConnectorType, raw, normalized))
 	}
 	return TreeNodePage{
@@ -61,4 +64,17 @@ func (e *DefaultTargetTreeEngine) mapTargetSearchPage(ctx context.Context, conn 
 		ListComplete: rawPage.ListComplete,
 		SearchMode:   SearchModeConnector,
 	}, nil
+}
+
+func targetSearchMatches(normalized connector.NormalizedSourceObject, keyword string) bool {
+	needle := strings.ToLower(strings.TrimSpace(keyword))
+	if needle == "" {
+		return true
+	}
+	for _, value := range []string{normalized.SearchName, normalized.DisplayName} {
+		if strings.Contains(strings.ToLower(value), needle) {
+			return true
+		}
+	}
+	return false
 }
