@@ -247,7 +247,7 @@ func TestDocumentHandlerPassesFiltersAndPagination(t *testing.T) {
 	}
 }
 
-func TestReadHandlersRefreshSourceBeforeDefaultReads(t *testing.T) {
+func TestReadHandlersRefreshSourceStateOnlyWhenRequested(t *testing.T) {
 	t.Parallel()
 
 	sourceTree := &serverSourceTreeStub{}
@@ -267,19 +267,19 @@ func TestReadHandlersRefreshSourceBeforeDefaultReads(t *testing.T) {
 	if treeResp.Code != http.StatusOK {
 		t.Fatalf("tree read failed: code=%d body=%s", treeResp.Code, treeResp.Body.String())
 	}
-	if refresher.calls != 1 || refresher.lastReq.SourceID != "source-1" || refresher.lastReq.BindingID != "binding-1" {
-		t.Fatalf("default tree read did not refresh source: calls=%d req=%+v", refresher.calls, refresher.lastReq)
+	if refresher.calls != 0 {
+		t.Fatalf("default tree read should not refresh source state, calls=%d", refresher.calls)
 	}
 
-	cachedTreeReq := httptest.NewRequest(http.MethodPost, "/api/scan/sources/source-1/tree/children", strings.NewReader(`{"binding_id":"binding-1","use_cache":true}`))
-	setAPIContractActor(cachedTreeReq)
-	cachedTreeResp := httptest.NewRecorder()
-	handler.ServeHTTP(cachedTreeResp, cachedTreeReq)
-	if cachedTreeResp.Code != http.StatusOK {
-		t.Fatalf("cached tree read failed: code=%d body=%s", cachedTreeResp.Code, cachedTreeResp.Body.String())
+	refreshTreeReq := httptest.NewRequest(http.MethodPost, "/api/scan/sources/source-1/tree/children", strings.NewReader(`{"binding_id":"binding-1","refresh_state":true}`))
+	setAPIContractActor(refreshTreeReq)
+	refreshTreeResp := httptest.NewRecorder()
+	handler.ServeHTTP(refreshTreeResp, refreshTreeReq)
+	if refreshTreeResp.Code != http.StatusOK {
+		t.Fatalf("refreshing tree read failed: code=%d body=%s", refreshTreeResp.Code, refreshTreeResp.Body.String())
 	}
-	if refresher.calls != 1 {
-		t.Fatalf("explicit cached tree read should not refresh source, calls=%d", refresher.calls)
+	if refresher.calls != 1 || refresher.lastReq.SourceID != "source-1" || refresher.lastReq.BindingID != "binding-1" {
+		t.Fatalf("tree read did not refresh requested source state: calls=%d req=%+v", refresher.calls, refresher.lastReq)
 	}
 
 	docReq := httptest.NewRequest(http.MethodGet, "/api/scan/sources/source-1/documents?binding_id=binding-1", nil)
@@ -289,8 +289,19 @@ func TestReadHandlersRefreshSourceBeforeDefaultReads(t *testing.T) {
 	if docResp.Code != http.StatusOK {
 		t.Fatalf("document read failed: code=%d body=%s", docResp.Code, docResp.Body.String())
 	}
+	if refresher.calls != 1 {
+		t.Fatalf("default document read should not refresh source state, calls=%d", refresher.calls)
+	}
+
+	refreshDocReq := httptest.NewRequest(http.MethodGet, "/api/scan/sources/source-1/documents?binding_id=binding-1&refresh_state=true", nil)
+	setAPIContractActor(refreshDocReq)
+	refreshDocResp := httptest.NewRecorder()
+	handler.ServeHTTP(refreshDocResp, refreshDocReq)
+	if refreshDocResp.Code != http.StatusOK {
+		t.Fatalf("refreshing document read failed: code=%d body=%s", refreshDocResp.Code, refreshDocResp.Body.String())
+	}
 	if refresher.calls != 2 || refresher.lastReq.SourceID != "source-1" || refresher.lastReq.BindingID != "binding-1" {
-		t.Fatalf("document read did not refresh source: calls=%d req=%+v", refresher.calls, refresher.lastReq)
+		t.Fatalf("document read did not refresh requested source state: calls=%d req=%+v", refresher.calls, refresher.lastReq)
 	}
 }
 

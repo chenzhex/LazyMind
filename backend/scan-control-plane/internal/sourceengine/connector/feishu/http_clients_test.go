@@ -434,6 +434,69 @@ func TestDefaultFeishuAPIClientExportsDriveDocumentRawContent(t *testing.T) {
 	}
 }
 
+func TestDefaultFeishuAPIClientSearchDriveFilesByTitle(t *testing.T) {
+	t.Parallel()
+
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer user-token" {
+			t.Fatalf("missing bearer token on %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/open-apis/search/v2/doc_wiki/search" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeFeishuOpenAPIData(t, w, map[string]any{
+			"res_units": []map[string]any{
+				{
+					"title_highlighted": "<h>test</h>.pdf",
+					"result_meta": map[string]any{
+						"token":          "file-test",
+						"doc_types":      []string{"file"},
+						"file_extension": ".pdf",
+						"mime_type":      "application/pdf",
+						"size":           7,
+						"update_time":    "1710000000",
+					},
+				},
+				{
+					"title_highlighted": "test doc",
+					"result_meta": map[string]any{
+						"token":       "doc-test",
+						"doc_types":   []string{"docx"},
+						"update_time": "1710000001",
+					},
+				},
+			},
+			"has_more":   true,
+			"page_token": "next-search",
+		})
+	}))
+	defer server.Close()
+
+	client := newHTTPFeishuAPITestClient(t, server.URL)
+	page, err := client.SearchDriveFiles(context.Background(), "user-token", "test", "folder-1", "cursor-1", 50)
+	if err != nil {
+		t.Fatalf("search drive files: %v", err)
+	}
+	filter, _ := requestBody["doc_filter"].(map[string]any)
+	folderTokens, _ := filter["folder_tokens"].([]any)
+	if requestBody["query"] != "test" || requestBody["page_token"] != "cursor-1" || requestBody["page_size"] != float64(20) || filter["only_title"] != true || len(folderTokens) != 1 || folderTokens[0] != "folder-1" {
+		t.Fatalf("unexpected search request body: %+v", requestBody)
+	}
+	if !page.HasMore || page.NextCursor != "next-search" || len(page.Items) != 2 {
+		t.Fatalf("unexpected search page: %+v", page)
+	}
+	if page.Items[0].Name != "test.pdf" || page.Items[0].Token != "file-test" || page.Items[0].FileExtension != ".pdf" || page.Items[0].MimeType != "application/pdf" {
+		t.Fatalf("file search result was not mapped: %+v", page.Items[0])
+	}
+	if page.Items[1].Token != "doc-test" || page.Items[1].DriveType != "docx" {
+		t.Fatalf("doc search result was not mapped: %+v", page.Items[1])
+	}
+}
+
 func TestDefaultFeishuAPIClientMapsScopeMissing(t *testing.T) {
 	t.Parallel()
 

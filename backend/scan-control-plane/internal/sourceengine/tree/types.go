@@ -98,6 +98,7 @@ type SourceTreeChildrenRequest struct {
 	ParentRef         string         `json:"parent_ref,omitempty"`
 	Key               string         `json:"key,omitempty"`
 	UseCache          *bool          `json:"use_cache,omitempty"`
+	RefreshState      bool           `json:"refresh_state,omitempty"`
 	ProviderOptions   map[string]any `json:"-"`
 	IncludeDocuments  bool           `json:"include_documents"`
 	IncludeContainers bool           `json:"include_containers"`

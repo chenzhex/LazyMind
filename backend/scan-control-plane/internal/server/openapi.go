@@ -270,7 +270,7 @@ func openAPISchemas() map[string]any {
 		"TriggerSourceSyncRequest":      object(nil, props("request_id", stringSchema(), "binding_id", stringSchema(), "scope_type", stringSchema(), "scope_ref", objectSchema())),
 		"TriggerSourceSyncResponse":     object([]string{"run_ids", "job_ids"}, props("run_ids", stringArray(), "job_ids", stringArray(), "intents", arrayOf("SyncRunIntent"))),
 		"SyncRunIntent":                 syncRunIntentSchema(),
-		"SourceTreeChildrenRequest":     object(nil, mergeProps(sourceTreeRequestProps(), props("use_cache", boolSchema()))),
+		"SourceTreeChildrenRequest":     object(nil, mergeProps(sourceTreeRequestProps(), props("use_cache", boolSchema(), "refresh_state", boolSchema()))),
 		"SourceTreeSearchRequest":       object([]string{"keyword"}, mergeProps(sourceTreeRequestProps(), props("keyword", stringSchema()))),
 		"SourceDocumentListResponse":    object([]string{"items", "total", "page", "page_size"}, props("items", arrayOf("SourceDocumentItem"), "total", integerSchema(), "page", integerSchema(), "page_size", integerSchema(), "summary", objectSchema())),
 		"SourceDocumentItem":            sourceDocumentItemSchema(),
@@ -793,6 +793,7 @@ func documentQueryParameters() []map[string]any {
 		queryParameter("keyword", stringSchema()),
 		queryParameter("state_filter", stringArray()),
 		queryParameter("parse_status", stringArray()),
+		queryParameter("refresh_state", boolSchema()),
 		queryParameter("page", integerSchema()),
 		queryParameter("page_size", integerSchema()),
 	}

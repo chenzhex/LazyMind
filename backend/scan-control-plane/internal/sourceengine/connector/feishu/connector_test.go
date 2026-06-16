@@ -658,14 +658,40 @@ func TestWikiListClampsProviderPageSizeToOpenAPILimit(t *testing.T) {
 	}
 }
 
-func TestSearchReturnsUnsupportedForUnimplementedScopeAndDeltaUnsupported(t *testing.T) {
+func TestSearchDriveFilesByNameAndDeltaUnsupported(t *testing.T) {
 	t.Parallel()
 
-	conn := NewFeishuConnector(&authStub{}, newFeishuAPIStub())
+	auth := &authStub{}
+	api := newFeishuAPIStub()
+	api.searchResults = []Object{
+		{Kind: ObjectKindDriveFile, Token: "file-test", ParentToken: "folder-root", Name: "test-plan.pdf", IsDocument: true, Revision: "rev-test", FileExtension: ".pdf", StableID: "file-test"},
+	}
+	conn := NewFeishuConnector(auth, api)
 	if !conn.Spec().SupportsSearch {
 		t.Fatalf("feishu spec should advertise search support per connector contract")
 	}
-	_, err := conn.Search(context.Background(), connector.SearchRequest{Keyword: "a"})
+	page, err := conn.Search(context.Background(), connector.SearchRequest{
+		Keyword:          "test",
+		TargetType:       TargetTypeDriveFolder,
+		TargetRef:        "drive:folder-root",
+		PageSize:         50,
+		AuthConnectionID: "auth-1",
+		ProviderOptions:  connector.ProviderOptions{"user_id": "user-1"},
+	})
+	if err != nil {
+		t.Fatalf("search drive files: %v", err)
+	}
+	if auth.calls != 1 || len(api.searchKeywords) != 1 || api.searchKeywords[0] != "test" || api.searchFolderTokens[0] != "folder-root" || api.searchPageSizes[0] != 50 {
+		t.Fatalf("search did not pass expected provider request, auth=%d keywords=%v folders=%v page_sizes=%v", auth.calls, api.searchKeywords, api.searchFolderTokens, api.searchPageSizes)
+	}
+	if got := feishuObjectKeys(page.Items); !sameStrings(got, []string{"feishu:drive:file-test"}) {
+		t.Fatalf("unexpected search results: %v", got)
+	}
+	if page.Items[0].ProviderMeta["auth_connection_id"] != "auth-1" {
+		t.Fatalf("search results should preserve auth connection metadata: %+v", page.Items[0].ProviderMeta)
+	}
+
+	_, err = conn.Search(context.Background(), connector.SearchRequest{Keyword: "test", TargetType: TargetTypeWikiNode, PageSize: 10, AuthConnectionID: "auth-1"})
 	assertFeishuErrorCode(t, err, connector.ErrorCodeUnsupported)
 
 	_, err = conn.FetchPage(context.Background(), connector.FetchPageRequest{
@@ -719,16 +745,20 @@ func (a *authStub) GetToken(context.Context, TokenRequest) (Token, error) {
 }
 
 type feishuAPIStub struct {
-	driveObjects     map[string]Object
-	wikiObjects      map[string]Object
-	driveChildren    map[string][]Object
-	wikiChildren     map[string][]Object
-	wikiSpaces       []Object
-	drivePageSizes   []int
-	wikiPageSizes    []int
-	driveFolderCalls int
-	downloadCalls    int
-	driveExportCalls int
+	driveObjects       map[string]Object
+	wikiObjects        map[string]Object
+	driveChildren      map[string][]Object
+	wikiChildren       map[string][]Object
+	wikiSpaces         []Object
+	searchResults      []Object
+	drivePageSizes     []int
+	wikiPageSizes      []int
+	searchKeywords     []string
+	searchFolderTokens []string
+	searchPageSizes    []int
+	driveFolderCalls   int
+	downloadCalls      int
+	driveExportCalls   int
 }
 
 func newFeishuAPIStub() *feishuAPIStub {
@@ -778,6 +808,13 @@ func (a *feishuAPIStub) GetDriveFolder(_ context.Context, _ string, folderToken 
 func (a *feishuAPIStub) ListDriveChildren(_ context.Context, _ string, folderToken, cursor string, pageSize int) (ObjectPage, error) {
 	a.drivePageSizes = append(a.drivePageSizes, pageSize)
 	return objectPage(a.driveChildren[driveFolderToken(folderToken)], cursor, pageSize)
+}
+
+func (a *feishuAPIStub) SearchDriveFiles(_ context.Context, _ string, keyword, folderToken, cursor string, pageSize int) (ObjectPage, error) {
+	a.searchKeywords = append(a.searchKeywords, keyword)
+	a.searchFolderTokens = append(a.searchFolderTokens, folderToken)
+	a.searchPageSizes = append(a.searchPageSizes, pageSize)
+	return objectPage(a.searchResults, cursor, pageSize)
 }
 
 func (a *feishuAPIStub) DownloadDriveFile(_ context.Context, _ string, fileToken, expectedVersion string) (ExportedContent, error) {

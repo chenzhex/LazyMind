@@ -315,6 +315,10 @@ func (a *appFeishuAPIStub) ListDriveChildren(context.Context, string, string, st
 	return feishu.ObjectPage{}, fmt.Errorf("not implemented")
 }
 
+func (a *appFeishuAPIStub) SearchDriveFiles(context.Context, string, string, string, string, int) (feishu.ObjectPage, error) {
+	return feishu.ObjectPage{}, fmt.Errorf("not implemented")
+}
+
 func (a *appFeishuAPIStub) DownloadDriveFile(context.Context, string, string, string) (feishu.ExportedContent, error) {
 	return feishu.ExportedContent{Content: []byte("drive content"), ExportedVersion: "rev-a"}, nil
 }

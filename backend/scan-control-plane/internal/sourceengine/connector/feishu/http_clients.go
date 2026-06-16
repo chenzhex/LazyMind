@@ -208,6 +208,14 @@ func (c *DefaultFeishuAPIClient) ListDriveChildren(ctx context.Context, token, f
 	return driveObjectPage(out, folderToken), nil
 }
 
+func (c *DefaultFeishuAPIClient) SearchDriveFiles(ctx context.Context, token, keyword, folderToken, cursor string, pageSize int) (ObjectPage, error) {
+	var out openAPIDocWikiSearch
+	if err := doFeishuOpenAPIJSON(ctx, c.httpClient, endpoint(c.baseURL, "/search/v2/doc_wiki/search", nil), http.MethodPost, token, docWikiSearchBody(keyword, folderToken, cursor, pageSize), &out); err != nil {
+		return ObjectPage{}, err
+	}
+	return docWikiSearchPage(out), nil
+}
+
 func (c *DefaultFeishuAPIClient) DownloadDriveFile(ctx context.Context, token, fileToken, expectedVersion string) (ExportedContent, error) {
 	body, err := doFeishuDownload(ctx, c.httpClient, endpoint(c.baseURL, "/drive/v1/files/"+url.PathEscape(fileToken)+"/download", nil), token)
 	if err != nil {
@@ -364,6 +372,19 @@ type openAPIWikiNodes struct {
 	HasMore       bool             `json:"has_more"`
 }
 
+type openAPIDocWikiSearch struct {
+	ResUnits        []openAPIDocWikiResult `json:"res_units"`
+	PageToken       string                 `json:"page_token"`
+	PaginationToken string                 `json:"pagination_token"`
+	HasMore         bool                   `json:"has_more"`
+}
+
+type openAPIDocWikiResult struct {
+	TitleHighlighted string         `json:"title_highlighted"`
+	EntityType       string         `json:"entity_type"`
+	ResultMeta       map[string]any `json:"result_meta"`
+}
+
 func doFeishuOpenAPIJSON(ctx context.Context, client *http.Client, url, method, token string, in any, out any) error {
 	body, err := encodeFeishuBody(in)
 	if err != nil {
@@ -477,6 +498,29 @@ func driveFilesQuery(folderToken, cursor string, pageSize int) url.Values {
 	return query
 }
 
+func docWikiSearchBody(keyword, folderToken, cursor string, pageSize int) map[string]any {
+	filter := map[string]any{"only_title": true}
+	if folderToken = strings.TrimSpace(folderToken); folderToken != "" && folderToken != "root" {
+		filter["folder_tokens"] = []string{folderToken}
+	}
+	body := map[string]any{
+		"query":      strings.TrimSpace(keyword),
+		"doc_filter": filter,
+		"page_size":  docWikiSearchPageSize(pageSize),
+	}
+	if cursor = strings.TrimSpace(cursor); cursor != "" {
+		body["page_token"] = cursor
+	}
+	return body
+}
+
+func docWikiSearchPageSize(pageSize int) int {
+	if pageSize <= 0 || pageSize > 20 {
+		return 20
+	}
+	return pageSize
+}
+
 func driveRootObject(data map[string]any) Object {
 	token := firstNonEmpty(openAPIString(data["token"]), openAPIString(data["folder_token"]), "root")
 	return Object{
@@ -573,6 +617,105 @@ func driveObject(item map[string]any, parentToken string) Object {
 		object.FileExtension = ""
 	}
 	return object
+}
+
+func docWikiSearchPage(data openAPIDocWikiSearch) ObjectPage {
+	items := make([]Object, 0, len(data.ResUnits))
+	for _, unit := range data.ResUnits {
+		object, ok := docWikiSearchObject(unit)
+		if ok {
+			items = append(items, object)
+		}
+	}
+	next := firstNonEmpty(data.PageToken, data.PaginationToken)
+	return ObjectPage{
+		Items:      items,
+		NextCursor: next,
+		HasMore:    next != "" && data.HasMore,
+	}
+}
+
+func docWikiSearchObject(unit openAPIDocWikiResult) (Object, bool) {
+	meta := unit.ResultMeta
+	token := firstNonEmpty(
+		openAPIString(meta["token"]),
+		openAPIString(meta["docs_token"]),
+		openAPIString(meta["doc_token"]),
+		openAPIString(meta["file_token"]),
+		openAPIString(meta["obj_token"]),
+	)
+	if token == "" {
+		return Object{}, false
+	}
+	driveType := normalizedFeishuObjectType(firstNonEmpty(
+		openAPIString(meta["file_type"]),
+		firstOpenAPIString(meta["doc_types"]),
+		openAPIString(meta["docs_type"]),
+		openAPIString(meta["doc_type"]),
+		openAPIString(meta["type"]),
+		unit.EntityType,
+	))
+	name := stripFeishuHighlightTags(firstNonEmpty(
+		unit.TitleHighlighted,
+		openAPIString(meta["title"]),
+		openAPIString(meta["name"]),
+		token,
+	))
+	extension := openAPIFileExtension(name, driveType, meta)
+	modified := openAPIInt64(firstNonEmpty(
+		openAPIString(meta["update_time"]),
+		openAPIString(meta["edit_time"]),
+		openAPIString(meta["modified_time"]),
+		openAPIString(meta["file_edit_time"]),
+	))
+	return Object{
+		Kind:            ObjectKindDriveFile,
+		Token:           token,
+		Name:            name,
+		IsDocument:      true,
+		Revision:        firstNonEmpty(openAPIString(meta["revision"]), openAPIString(meta["update_time"]), openAPIString(meta["edit_time"]), token),
+		ModifiedUnixSec: modified,
+		SizeBytes:       openAPIInt64(firstNonEmpty(openAPIString(meta["size"]), openAPIString(meta["file_size"]))),
+		MimeType:        firstNonEmpty(openAPIString(meta["mime_type"]), mime.TypeByExtension(extension)),
+		FileExtension:   extension,
+		DriveType:       driveType,
+		StableID:        token,
+	}, true
+}
+
+func firstOpenAPIString(value any) string {
+	switch typed := value.(type) {
+	case []any:
+		if len(typed) == 0 {
+			return ""
+		}
+		return openAPIString(typed[0])
+	case []string:
+		if len(typed) == 0 {
+			return ""
+		}
+		return openAPIString(typed[0])
+	default:
+		return openAPIString(typed)
+	}
+}
+
+func openAPIFileExtension(name, driveType string, meta map[string]any) string {
+	if extension := openAPIString(meta["file_extension"]); extension != "" {
+		if strings.HasPrefix(extension, ".") {
+			return extension
+		}
+		return "." + extension
+	}
+	if driveType == "file" || driveType == "" {
+		return path.Ext(name)
+	}
+	return "." + driveType
+}
+
+func stripFeishuHighlightTags(value string) string {
+	value = strings.ReplaceAll(value, "<h>", "")
+	return strings.ReplaceAll(value, "</h>", "")
 }
 
 func wikiSpacesPage(data openAPIWikiSpaces) ObjectPage {

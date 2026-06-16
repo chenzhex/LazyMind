@@ -739,7 +739,8 @@ func TestUpdateBindingTargetChangeKeepsExistingTargetFieldsAndIncrementsGenerati
 			}
 		},
 	}
-	engine := newTestSourceEngine(t, repo, core, spy, now)
+	scheduler := &sourceScheduleSpy{triggerErr: errors.New("queue is down")}
+	engine := newTestSourceEngineWithSchedule(t, repo, core, spy, scheduler, now)
 
 	resp, err := engine.UpdateBinding(context.Background(), "user-1", "source-1", "binding-1", BindingInput{
 		TargetRef: "new",
@@ -756,6 +757,15 @@ func TestUpdateBindingTargetChangeKeepsExistingTargetFieldsAndIncrementsGenerati
 	}
 	if resp.OldGeneration != 3 || resp.NewGeneration != 4 {
 		t.Fatalf("expected generation increment, got old=%d new=%d", resp.OldGeneration, resp.NewGeneration)
+	}
+	if len(resp.JobIDs) != 0 || len(resp.CompensationErrors) != 0 {
+		t.Fatalf("target change should not create initial sync jobs: %+v", resp)
+	}
+	if len(scheduler.triggered) != 0 {
+		t.Fatalf("target change triggered initial sync: %+v", scheduler.triggered)
+	}
+	if len(repo.recordedJobErrors) != 0 {
+		t.Fatalf("target change should not record sync job errors: %+v", repo.recordedJobErrors)
 	}
 	updated := repo.bindings["source-1"][0]
 	if updated.TargetRef != "normalized-new" || updated.TargetFingerprint != "fp-new" || updated.TreeKey != "root-new" {
@@ -981,7 +991,7 @@ func TestUpdateBindingScheduleChangeRecomputesNextSyncAndCancelsPendingScheduled
 	}
 }
 
-func TestAddBindingRecordsSyncJobErrorOnBindingAndCheckpoint(t *testing.T) {
+func TestAddBindingDoesNotTriggerInitialSync(t *testing.T) {
 	t.Parallel()
 
 	now := fixedSourceTestTime()
@@ -999,23 +1009,22 @@ func TestAddBindingRecordsSyncJobErrorOnBindingAndCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
 	}
-	if len(resp.CompensationErrors) != 1 {
-		t.Fatalf("expected job warning, got %+v", resp)
+	if len(resp.JobIDs) != 0 || len(resp.CompensationErrors) != 0 {
+		t.Fatalf("add binding should not create initial sync jobs: %+v", resp)
 	}
-	if len(repo.recordedJobErrors) != 1 {
-		t.Fatalf("expected recorded sync job error, got %+v", repo.recordedJobErrors)
-	}
-	recorded := repo.recordedJobErrors[0]
-	if recorded.bindingID != resp.Binding.BindingID || recorded.generation != int64(1) || recorded.lastError["message"] != "queue is down" {
-		t.Fatalf("unexpected recorded job error: %+v", recorded)
+	if len(scheduler.triggered) != 0 {
+		t.Fatalf("add binding triggered initial sync: %+v", scheduler.triggered)
 	}
 	binding := repo.bindings["source-1"][0]
-	if binding.Status != BindingStatusActive || binding.LastError["message"] != "queue is down" {
-		t.Fatalf("binding should stay active with last_error: %+v", binding)
+	if binding.Status != BindingStatusActive || len(binding.LastError) != 0 {
+		t.Fatalf("binding should stay active without sync last_error: %+v", binding)
+	}
+	if len(repo.recordedJobErrors) != 0 {
+		t.Fatalf("add binding should not record sync job errors: %+v", repo.recordedJobErrors)
 	}
 }
 
-func TestCreateSourceTriggersInitialSyncForCreatedBindings(t *testing.T) {
+func TestCreateSourceDoesNotTriggerInitialSyncForAnySyncMode(t *testing.T) {
 	t.Parallel()
 
 	now := fixedSourceTestTime()
@@ -1042,27 +1051,33 @@ func TestCreateSourceTriggersInitialSyncForCreatedBindings(t *testing.T) {
 				SyncMode:       SyncModeScheduled,
 				SchedulePolicy: sourceTestSchedulePolicy("UTC", sourceTestScheduleRule([]string{"everyday"}, "02:00:00")),
 			},
+			{
+				ConnectorType: spyConnectorType,
+				TargetType:    spyTargetType,
+				TargetRef:     "target-3",
+				SyncMode:      SyncModeWatch,
+			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("create source: %v", err)
 	}
-	if !reflect.DeepEqual(resp.JobIDs, []string{"job-1", "job-2"}) || len(resp.JobErrors) != 0 {
-		t.Fatalf("create source should return initial sync jobs: %+v", resp)
+	if len(resp.JobIDs) != 0 || len(resp.JobErrors) != 0 {
+		t.Fatalf("create source should not return initial sync jobs: %+v", resp)
 	}
 	op := repo.operations["user-1\x00request-1"]
 	if op.Status != OperationStatusSucceeded {
-		t.Fatalf("operation should succeed after initial sync enqueue, got %+v", op)
+		t.Fatalf("operation should succeed without initial sync enqueue, got %+v", op)
 	}
-	if len(scheduler.triggered) != 2 {
-		t.Fatalf("create source should trigger initial sync for both bindings: %+v", scheduler.triggered)
+	if len(scheduler.triggered) != 0 {
+		t.Fatalf("create source triggered initial sync: %+v", scheduler.triggered)
 	}
 	if len(repo.recordedJobErrors) != 0 {
-		t.Fatalf("successful initial sync enqueue should not record job errors: %+v", repo.recordedJobErrors)
+		t.Fatalf("create source should not record sync job errors: %+v", repo.recordedJobErrors)
 	}
 }
 
-func TestCreateSourceRecordsInitialSyncWarning(t *testing.T) {
+func TestCreateSourceDoesNotRecordInitialSyncWarning(t *testing.T) {
 	t.Parallel()
 
 	now := fixedSourceTestTime()
@@ -1085,28 +1100,110 @@ func TestCreateSourceRecordsInitialSyncWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create source: %v", err)
 	}
-	if len(resp.JobIDs) != 0 || len(resp.JobErrors) != 1 {
-		t.Fatalf("expected initial sync warning, got %+v", resp)
-	}
-	if resp.JobErrors[0].Message != "queue is down" {
-		t.Fatalf("unexpected initial sync warning: %+v", resp.JobErrors[0])
+	if len(resp.JobIDs) != 0 || len(resp.JobErrors) != 0 {
+		t.Fatalf("create source should not return initial sync warning: %+v", resp)
 	}
 	op := repo.operations["user-1\x00request-1"]
-	if op.Status != OperationStatusSucceededWithWarning {
-		t.Fatalf("operation should keep source creation with sync warning, got %+v", op)
+	if op.Status != OperationStatusSucceeded {
+		t.Fatalf("operation should succeed without sync warning, got %+v", op)
 	}
-	if _, ok := op.Warning["job_errors"]; !ok {
-		t.Fatalf("operation should persist sync warning details: %+v", op.Warning)
+	if len(op.Warning) != 0 {
+		t.Fatalf("operation should not persist sync warning details: %+v", op.Warning)
 	}
-	if len(scheduler.triggered) != 1 {
-		t.Fatalf("create source should attempt initial sync: %+v", scheduler.triggered)
+	if len(scheduler.triggered) != 0 {
+		t.Fatalf("create source triggered initial sync: %+v", scheduler.triggered)
 	}
-	if len(repo.recordedJobErrors) != 1 {
-		t.Fatalf("expected recorded sync job error, got %+v", repo.recordedJobErrors)
+	if len(repo.recordedJobErrors) != 0 {
+		t.Fatalf("create source should not record sync job errors: %+v", repo.recordedJobErrors)
 	}
-	recorded := repo.recordedJobErrors[0]
-	if recorded.bindingID != resp.Bindings[0].BindingID || recorded.generation != int64(1) || recorded.lastError["message"] != "queue is down" {
-		t.Fatalf("unexpected recorded job error: %+v", recorded)
+}
+
+func TestCreateSourceSyncStrategyMatrix(t *testing.T) {
+	t.Parallel()
+
+	now := fixedSourceTestTime()
+	scheduledNext := now.Add(time.Hour)
+	cases := []struct {
+		name         string
+		syncMode     string
+		explicitSync bool
+		wantNextSync bool
+	}{
+		{name: "manual create only", syncMode: SyncModeManual},
+		{name: "manual create and sync", syncMode: SyncModeManual, explicitSync: true},
+		{name: "scheduled create only", syncMode: SyncModeScheduled, wantNextSync: true},
+		{name: "scheduled create and sync", syncMode: SyncModeScheduled, explicitSync: true, wantNextSync: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := newSourceEngineRepoStub()
+			scheduler := &sourceScheduleSpy{}
+			if tc.wantNextSync {
+				scheduler.nextSyncAt = &scheduledNext
+			}
+			engine := newTestSourceEngineWithSchedule(t, repo, &sourceCoreSpy{}, &sourceSpyConnector{}, scheduler, now)
+			bindingInput := BindingInput{
+				ConnectorType: spyConnectorType,
+				TargetType:    spyTargetType,
+				TargetRef:     "target-1",
+				SyncMode:      tc.syncMode,
+			}
+			if tc.syncMode == SyncModeScheduled {
+				bindingInput.SchedulePolicy = sourceTestSchedulePolicy("UTC", sourceTestScheduleRule([]string{"everyday"}, "02:00:00"))
+			}
+
+			createResp, err := engine.CreateSource(context.Background(), CreateSourceRequest{
+				CallerID:  "user-1",
+				TenantID:  "tenant-1",
+				RequestID: "create-" + tc.name,
+				Name:      "Docs",
+				Bindings:  []BindingInput{bindingInput},
+			})
+			if err != nil {
+				t.Fatalf("create source: %v", err)
+			}
+			if len(createResp.JobIDs) != 0 || len(createResp.JobErrors) != 0 || len(scheduler.triggered) != 0 {
+				t.Fatalf("create should not enqueue initial sync: resp=%+v triggered=%+v", createResp, scheduler.triggered)
+			}
+			binding := repo.bindings[createResp.Source.SourceID][0]
+			if tc.wantNextSync {
+				if binding.NextSyncAt == nil || !binding.NextSyncAt.Equal(scheduledNext) {
+					t.Fatalf("scheduled create should keep next_sync_at: got=%v want=%v", binding.NextSyncAt, scheduledNext)
+				}
+			} else if binding.NextSyncAt != nil {
+				t.Fatalf("manual create should not set next_sync_at: %+v", binding.NextSyncAt)
+			}
+
+			if !tc.explicitSync {
+				if len(scheduler.manual) != 0 {
+					t.Fatalf("create-only should not enqueue explicit sync: %+v", scheduler.manual)
+				}
+				return
+			}
+
+			triggerResp, err := engine.TriggerSourceSync(context.Background(), TriggerSourceSyncRequest{
+				SourceID:  createResp.Source.SourceID,
+				RequestID: "sync-" + tc.name,
+				ScopeType: string(connector.ScopeTypeFull),
+				ScopeRef:  map[string]any{},
+			})
+			if err != nil {
+				t.Fatalf("trigger source sync: %v", err)
+			}
+			if len(triggerResp.RunIDs) != 1 || len(scheduler.manual) != 1 {
+				t.Fatalf("create-and-sync should enqueue one explicit sync: resp=%+v manual=%+v", triggerResp, scheduler.manual)
+			}
+			if scheduler.manual[0].SourceID != createResp.Source.SourceID || scheduler.manual[0].BindingID != binding.BindingID || scheduler.manual[0].ScopeType != connector.ScopeTypeFull {
+				t.Fatalf("explicit sync request lost source/binding/full scope: %+v", scheduler.manual[0])
+			}
+			if len(scheduler.triggered) != 0 {
+				t.Fatalf("explicit sync should not use initial sync path: %+v", scheduler.triggered)
+			}
+		})
 	}
 }
 
@@ -1263,6 +1360,57 @@ func TestUpdateSourceWithBindingsUsesAtomicStoreContract(t *testing.T) {
 	}
 	if len(core.createdFolders) != 1 || len(core.deletedFolders) != 1 || core.createdFolders[0] != core.deletedFolders[0] {
 		t.Fatalf("new target folder was not compensated after failed mutation: created=%v deleted=%v", core.createdFolders, core.deletedFolders)
+	}
+}
+
+func TestUpdateSourceWithNewBindingDoesNotTriggerInitialSync(t *testing.T) {
+	t.Parallel()
+
+	now := fixedSourceTestTime()
+	repo := newSourceEngineRepoStub()
+	repo.sources["source-1"] = store.Source{
+		SourceID:      "source-1",
+		TenantID:      "tenant-1",
+		CreatedBy:     "user-1",
+		Name:          "Docs",
+		DatasetID:     "dataset-1",
+		Status:        SourceStatusActive,
+		ConfigVersion: 7,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	scheduler := &sourceScheduleSpy{triggerErr: errors.New("queue is down")}
+	engine := newTestSourceEngineWithSchedule(t, repo, &sourceCoreSpy{}, &sourceSpyConnector{}, scheduler, now)
+
+	resp, err := engine.UpdateSource(context.Background(), "user-1", "source-1", UpdateSourceRequest{
+		ConfigVersion:    7,
+		BindingsProvided: true,
+		Bindings: []BindingInput{{
+			ConnectorType:  spyConnectorType,
+			TargetType:     spyTargetType,
+			TargetRef:      "target-new",
+			SyncMode:       SyncModeScheduled,
+			SchedulePolicy: sourceTestSchedulePolicy("UTC", sourceTestScheduleRule([]string{"everyday"}, "02:00:00")),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("update source: %v", err)
+	}
+	if len(resp.CreatedBindingIDs) != 1 || len(resp.UpdatedBindingIDs) != 0 || len(resp.RemovedBindingIDs) != 0 {
+		t.Fatalf("unexpected binding mutation summary: %+v", resp)
+	}
+	if len(resp.JobIDs) != 0 || len(resp.JobErrors) != 0 {
+		t.Fatalf("source update should not create initial sync jobs: %+v", resp)
+	}
+	if len(scheduler.triggered) != 0 {
+		t.Fatalf("source update triggered initial sync: %+v", scheduler.triggered)
+	}
+	binding := repo.bindings["source-1"][0]
+	if binding.Status != BindingStatusActive || len(binding.LastError) != 0 {
+		t.Fatalf("new binding should stay active without sync last_error: %+v", binding)
+	}
+	if len(repo.recordedJobErrors) != 0 {
+		t.Fatalf("source update should not record sync job errors: %+v", repo.recordedJobErrors)
 	}
 }
 

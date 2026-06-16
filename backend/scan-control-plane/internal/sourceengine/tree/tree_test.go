@@ -550,6 +550,106 @@ func TestSourceTreeListChildrenUsesIndexedRepoWhenUseCache(t *testing.T) {
 	}
 }
 
+func TestSourceTreeBindingRootRequestReturnsAllBindingRootsForMultiBindingSource(t *testing.T) {
+	t.Parallel()
+
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{
+		{
+			BindingID:              "binding-1",
+			SourceID:               "source-1",
+			TreeKey:                "wiki-root-1",
+			CoreParentDocumentName: "test1",
+			ConnectorType:          "feishu",
+			TargetType:             "wiki_node",
+			TargetRef:              "wiki:space-1:node-1",
+			Status:                 "ACTIVE",
+		},
+		{
+			BindingID:              "binding-2",
+			SourceID:               "source-1",
+			TreeKey:                "wiki-root-2",
+			CoreParentDocumentName: "test1",
+			ConnectorType:          "feishu",
+			TargetType:             "wiki_node",
+			TargetRef:              "wiki:space-1:node-2",
+			Status:                 "ACTIVE",
+		},
+	}
+	engine := NewDBSourceTreeQueryEngine(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10, MaxAllCurrentLevelItems: 10})
+
+	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
+		SourceID:  "source-1",
+		BindingID: "binding-1",
+		TreeKey:   "wiki-root-1",
+		UseCache:  boolPtr(true),
+		PageSize:  10,
+	})
+	if err != nil {
+		t.Fatalf("list binding roots: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("expected both same-name binding roots, got %+v", page.Items)
+	}
+	if page.Items[0].BindingID != "binding-1" || page.Items[1].BindingID != "binding-2" {
+		t.Fatalf("unexpected binding roots: %+v", page.Items)
+	}
+	if page.Items[0].DisplayName != "test1" || page.Items[1].DisplayName != "test1" {
+		t.Fatalf("same-name roots should preserve display names: %+v", page.Items)
+	}
+}
+
+func TestSourceTreeParentKeyCanSelectSiblingBindingRoot(t *testing.T) {
+	t.Parallel()
+
+	base := newTreeReadRepo()
+	repo := &treeReadRepoWithObject{treeReadRepo: base}
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{
+		{
+			BindingID:              "binding-1",
+			SourceID:               "source-1",
+			TreeKey:                "wiki-root-1",
+			CoreParentDocumentName: "test1",
+			ConnectorType:          "feishu",
+			TargetType:             "wiki_node",
+			TargetRef:              "wiki:space-1:node-1",
+			Status:                 "ACTIVE",
+		},
+		{
+			BindingID:              "binding-2",
+			SourceID:               "source-1",
+			TreeKey:                "wiki-root-2",
+			CoreParentDocumentName: "test1",
+			ConnectorType:          "feishu",
+			TargetType:             "wiki_node",
+			TargetRef:              "wiki:space-1:node-2",
+			Status:                 "ACTIVE",
+		},
+	}
+	repo.objects = []ObjectWithState{
+		indexedObject("source-1", "binding-2", "wiki-root-2", "wiki-root-2", "", "test1", true, true),
+		indexedObject("source-1", "binding-2", "wiki-root-2", "doc-2", "wiki-root-2", "Nested.md", true, false),
+	}
+	engine := NewDBSourceTreeQueryEngine(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10, MaxAllCurrentLevelItems: 10})
+
+	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
+		SourceID:  "source-1",
+		BindingID: "binding-1",
+		TreeKey:   "wiki-root-1",
+		UseCache:  boolPtr(true),
+		ParentKey: "wiki-root-2",
+		PageSize:  10,
+	})
+	if err != nil {
+		t.Fatalf("list sibling binding root children: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].BindingID != "binding-2" || page.Items[0].ObjectKey != "doc-2" {
+		t.Fatalf("expected children from sibling binding root, got %+v", page.Items)
+	}
+}
+
 func TestSourceTreeCachedChildrenExposeDocumentUpdateState(t *testing.T) {
 	t.Parallel()
 

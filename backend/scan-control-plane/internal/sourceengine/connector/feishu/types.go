@@ -25,6 +25,7 @@ type FeishuClient interface {
 	GetDriveRoot(ctx context.Context, token string) (Object, error)
 	GetDriveFolder(ctx context.Context, token, folderToken string) (Object, error)
 	ListDriveChildren(ctx context.Context, token, folderToken, cursor string, pageSize int) (ObjectPage, error)
+	SearchDriveFiles(ctx context.Context, token, keyword, folderToken, cursor string, pageSize int) (ObjectPage, error)
 	DownloadDriveFile(ctx context.Context, token, fileToken, expectedVersion string) (ExportedContent, error)
 	ExportDriveDocumentMarkdown(ctx context.Context, token, docToken, expectedVersion string) (ExportedContent, error)
 	ListWikiSpaces(ctx context.Context, token, cursor string, pageSize int) (ObjectPage, error)

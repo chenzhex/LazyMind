@@ -85,8 +85,8 @@ func (h *Handler) listSourceTreeChildren(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	req.ProviderOptions = withActorProviderOptions(req.ProviderOptions, actor)
-	if req.UseCache == nil {
-		if err := h.refreshSourceRead(r.Context(), req.SourceID, req.BindingID); err != nil {
+	if req.RefreshState {
+		if err := h.refreshSourceState(r.Context(), req.SourceID, req.BindingID); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -151,9 +151,11 @@ func (h *Handler) listSourceDocuments(w http.ResponseWriter, r *http.Request) {
 		Page:          parseIntQuery(r, "page"),
 		PageSize:      parseIntQuery(r, "page_size"),
 	}
-	if err := h.refreshSourceRead(r.Context(), req.SourceID, req.BindingID); err != nil {
-		writeError(w, err)
-		return
+	if boolQuery(r, "refresh_state") {
+		if err := h.refreshSourceState(r.Context(), req.SourceID, req.BindingID); err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	page, err := h.documents.ListDocuments(r.Context(), req)
 	if err != nil {
@@ -173,7 +175,7 @@ func targetAccessFromChildren(req tree.TargetTreeChildrenRequest) access.Binding
 	}
 }
 
-func (h *Handler) refreshSourceRead(ctx context.Context, sourceID, bindingID string) error {
+func (h *Handler) refreshSourceState(ctx context.Context, sourceID, bindingID string) error {
 	if h.refresher == nil {
 		return nil
 	}
