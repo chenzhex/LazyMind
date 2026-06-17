@@ -77,10 +77,6 @@ func CreateServer(ctx context.Context, db *gorm.DB, req CreateServerRequest, use
 	if err != nil {
 		return nil, err
 	}
-	enabled := true
-	if req.Enabled != nil {
-		enabled = *req.Enabled
-	}
 	now := time.Now()
 	row := orm.MCPServer{
 		ID:               newServerID(),
@@ -89,7 +85,7 @@ func CreateServer(ctx context.Context, db *gorm.DB, req CreateServerRequest, use
 		URL:              serverURL,
 		HeadersJSON:      headersJSON,
 		AllowedToolsJSON: allowedJSON,
-		Enabled:          enabled,
+		Enabled:          false,
 		Timeout:          timeout,
 		BaseModel: orm.BaseModel{
 			CreateUserID:   strings.TrimSpace(userID),
@@ -98,7 +94,7 @@ func CreateServer(ctx context.Context, db *gorm.DB, req CreateServerRequest, use
 			UpdatedAt:      now,
 		},
 	}
-	if err := db.WithContext(ctx).Create(&row).Error; err != nil {
+	if err := db.WithContext(ctx).Select("*").Create(&row).Error; err != nil {
 		return nil, err
 	}
 	resp := serverResponse(row, 0, nil)
@@ -153,6 +149,9 @@ func UpdateServer(ctx context.Context, db *gorm.DB, userID, id string, req Updat
 		updates["allowed_tools_json"] = allowedJSON
 	}
 	if req.Enabled != nil {
+		if *req.Enabled && !row.IsVerified {
+			return nil, fmt.Errorf("%w: mcp server must be verified before enabling", errBadRequest)
+		}
 		updates["enabled"] = *req.Enabled
 	}
 	if req.Timeout != nil {

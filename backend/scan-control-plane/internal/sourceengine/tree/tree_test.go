@@ -215,31 +215,78 @@ func TestTargetTreeSearchWithoutCurrentLevelUsesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cached search first response: %v", err)
 	}
-	if first.SearchMode != SearchModeCache || !first.CacheBuilding {
-		t.Fatalf("first cached search should start background build, got %+v", first)
+	if first.SearchMode != SearchModeCache || first.CacheStatus != targetSearchCacheStatusMissing || first.CacheBuilding || len(first.Items) != 0 {
+		t.Fatalf("first cached search should only read missing cache, got %+v", first)
+	}
+	if len(spy.searchRequests) != 0 || len(spy.listRequests) != 0 {
+		t.Fatalf("cache miss search should not access connector, searches=%d lists=%d", len(spy.searchRequests), len(spy.listRequests))
 	}
 
-	var page TreeNodePage
-	for i := 0; i < 20; i++ {
-		page, err = engine.Search(context.Background(), TargetTreeSearchRequest{
-			ConnectorType: treeTestConnectorType,
-			Keyword:       "welcome",
-			PageSize:      10,
-			IncludeFiles:  true,
-		})
-		if err != nil {
-			t.Fatalf("cached search: %v", err)
-		}
-		if !page.CacheBuilding {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := engine.Prewarm(context.Background(), TargetTreeSearchRequest{
+		ConnectorType: treeTestConnectorType,
+		IncludeFiles:  true,
+	}); err != nil {
+		t.Fatalf("prewarm target search cache: %v", err)
 	}
-	if page.CacheBuilding || !page.CacheComplete || len(page.Items) != 1 || page.Items[0].ObjectKey != "doc-1" {
+
+	page, err := engine.Search(context.Background(), TargetTreeSearchRequest{
+		ConnectorType: treeTestConnectorType,
+		Keyword:       "welcome",
+		PageSize:      10,
+		IncludeFiles:  true,
+	})
+	if err != nil {
+		t.Fatalf("cached search: %v", err)
+	}
+	if page.CacheStatus != targetSearchCacheStatusComplete || page.CacheBuilding || !page.CacheComplete || len(page.Items) != 1 || page.Items[0].ObjectKey != "doc-1" {
 		t.Fatalf("cached search should return completed cache matches, got %+v", page)
 	}
 	if len(spy.searchRequests) != 0 || len(spy.listRequests) == 0 {
-		t.Fatalf("cached search should build from normal list calls only, searches=%d lists=%d", len(spy.searchRequests), len(spy.listRequests))
+		t.Fatalf("prewarm should build from normal list calls only, searches=%d lists=%d", len(spy.searchRequests), len(spy.listRequests))
+	}
+}
+
+func TestTargetTreeSearchCacheFailureIsReadableAndRetryable(t *testing.T) {
+	t.Parallel()
+
+	spy := &treeConnectorSpy{
+		supportsSearch: true,
+		listErr:        connector.NewError(connector.ErrorCodePermissionDenied, "permission denied"),
+	}
+	registry, err := connector.NewDefaultConnectorRegistry(spy)
+	if err != nil {
+		t.Fatalf("create registry: %v", err)
+	}
+	engine := NewDefaultTargetTreeEngine(registry)
+	engine.cache.delay = 0
+
+	req := TargetTreeSearchRequest{
+		ConnectorType: treeTestConnectorType,
+		Keyword:       "welcome",
+		PageSize:      10,
+		IncludeFiles:  true,
+	}
+	if err := engine.Prewarm(context.Background(), req); err != nil {
+		t.Fatalf("prewarm target search cache: %v", err)
+	}
+	page, err := engine.Search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("cached search after failed prewarm: %v", err)
+	}
+	if page.CacheStatus != targetSearchCacheStatusFailed || page.CacheError == "" || page.CacheBuilding {
+		t.Fatalf("failed prewarm should leave readable failed cache state, got %+v", page)
+	}
+
+	spy.listErr = nil
+	if err := engine.Prewarm(context.Background(), req); err != nil {
+		t.Fatalf("retry prewarm target search cache: %v", err)
+	}
+	page, err = engine.Search(context.Background(), req)
+	if err != nil {
+		t.Fatalf("cached search after retry: %v", err)
+	}
+	if page.CacheStatus != targetSearchCacheStatusComplete || !page.CacheComplete || len(page.Items) != 1 {
+		t.Fatalf("retry prewarm should replace failed state with complete cache, got %+v", page)
 	}
 }
 
@@ -1056,7 +1103,7 @@ func TestSourceDocumentQueryReadsIndexedDocumentsOnly(t *testing.T) {
 	}
 }
 
-func TestSourceDocumentQueryMarksUnparsedUpdatesPending(t *testing.T) {
+func TestSourceDocumentQueryMarksUnparsedUpdatesPendingParse(t *testing.T) {
 	t.Parallel()
 
 	repo := newTreeReadRepo()
@@ -1085,8 +1132,118 @@ func TestSourceDocumentQueryMarksUnparsedUpdatesPending(t *testing.T) {
 	if len(resp.Items) != 1 {
 		t.Fatalf("expected one document, got %+v", resp.Items)
 	}
-	if resp.Items[0].ParseQueueState != "PENDING" || resp.Items[0].ParseState != "PENDING" {
-		t.Fatalf("unparsed update should be marked pending: %+v", resp.Items[0])
+	if resp.Items[0].ParseQueueState != "PENDING_PARSE" || resp.Items[0].ParseState != "PENDING_PARSE" {
+		t.Fatalf("unparsed update should be marked pending parse: %+v", resp.Items[0])
+	}
+}
+
+func TestSourceDocumentQueryKeepsActiveQueueStateForExistingDocument(t *testing.T) {
+	t.Parallel()
+
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{{BindingID: "binding-1", SourceID: "source-1"}}
+	object := indexedObject("source-1", "binding-1", "tree-root", "doc-1", "", "Welcome", true, false).Object
+	repo.documents = []DocumentWithState{{
+		Object: object,
+		State: store.DocumentState{
+			SourceID:            "source-1",
+			BindingID:           "binding-1",
+			ObjectKey:           "doc-1",
+			SourceState:         "MODIFIED",
+			SyncState:           "IDLE",
+			PendingAction:       "REPARSE",
+			DocumentListVisible: true,
+			Selectable:          true,
+			ParseQueueState:     "RUNNING",
+		},
+		Document: &store.Document{
+			DocumentID:  "document-1",
+			SourceID:    "source-1",
+			BindingID:   "binding-1",
+			ObjectKey:   "doc-1",
+			ParseStatus: "SUCCEEDED",
+		},
+	}}
+	query := NewDBSourceDocumentQuery(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10})
+
+	resp, err := query.ListDocuments(context.Background(), SourceDocumentListRequest{SourceID: "source-1", BindingID: "binding-1"})
+	if err != nil {
+		t.Fatalf("list documents: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ParseStatus != "SUCCEEDED" || resp.Items[0].ParseState != "RUNNING" {
+		t.Fatalf("active queue state should not be hidden by previous document status: %+v", resp.Items)
+	}
+}
+
+func TestSourceDocumentQueryDedupesSamePathAndPrefersActiveParse(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{{BindingID: "binding-1", SourceID: "source-1"}}
+	parsed := indexedObject("source-1", "binding-1", "tree-root", "doc-old", "folder-1", "CN-43", true, false).Object
+	parsed.FileExtension = ".txt"
+	pending := indexedObject("source-1", "binding-1", "tree-root", "doc-new", "folder-1", "CN-43", true, false).Object
+	pending.FileExtension = ".txt"
+	repo.documents = []DocumentWithState{
+		{
+			Object: parsed,
+			State: store.DocumentState{
+				SourceID:            "source-1",
+				BindingID:           "binding-1",
+				ObjectKey:           "doc-old",
+				SourceState:         "UNCHANGED",
+				SyncState:           "IDLE",
+				DocumentListVisible: true,
+				Selectable:          true,
+				ParseQueueState:     "NONE",
+				LastSyncedAt:        &now,
+			},
+			Document: &store.Document{
+				DocumentID:  "document-old",
+				SourceID:    "source-1",
+				BindingID:   "binding-1",
+				ObjectKey:   "doc-old",
+				DisplayName: "CN-43",
+				ParseStatus: "SUCCEEDED",
+			},
+		},
+		{
+			Object: pending,
+			State: store.DocumentState{
+				SourceID:            "source-1",
+				BindingID:           "binding-1",
+				ObjectKey:           "doc-new",
+				SourceState:         "NEW",
+				SyncState:           "IDLE",
+				PendingAction:       "CREATE",
+				DocumentListVisible: true,
+				Selectable:          true,
+				ParseQueueState:     "PENDING",
+			},
+			Document: &store.Document{
+				DocumentID:  "document-new",
+				SourceID:    "source-1",
+				BindingID:   "binding-1",
+				ObjectKey:   "doc-new",
+				DisplayName: "CN-43",
+				ParseStatus: "PENDING",
+			},
+		},
+	}
+	query := NewDBSourceDocumentQuery(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10})
+
+	resp, err := query.ListDocuments(context.Background(), SourceDocumentListRequest{SourceID: "source-1", BindingID: "binding-1"})
+	if err != nil {
+		t.Fatalf("list documents: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 {
+		t.Fatalf("same-path documents should be collapsed, got total=%d items=%+v", resp.Total, resp.Items)
+	}
+	if resp.Items[0].ObjectKey != "doc-new" || resp.Items[0].ParseState != "PENDING" {
+		t.Fatalf("active parse row should win over stale parsed row: %+v", resp.Items[0])
 	}
 }
 

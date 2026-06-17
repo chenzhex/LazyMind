@@ -176,7 +176,7 @@ func (r *Repository) ListItems(ctx context.Context, evalSetID, shardID string, f
 		Where("shard_id = ? AND eval_set_id = ?", shardID, evalSetID)
 	if filter.Keyword != "" {
 		like := containsLikePattern(filter.Keyword)
-		q = q.Where("(case_id LIKE ? ESCAPE '!' OR question LIKE ? ESCAPE '!' OR ground_truth LIKE ? ESCAPE '!' OR reference_doc LIKE ? ESCAPE '!')", like, like, like, like)
+		q = q.Where("(question LIKE ? ESCAPE '!' OR ground_truth LIKE ? ESCAPE '!')", like, like)
 	}
 	if filter.QuestionType != "" {
 		q = q.Where("question_type = ?", filter.QuestionType)

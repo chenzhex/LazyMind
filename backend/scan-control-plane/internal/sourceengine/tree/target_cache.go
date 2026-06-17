@@ -18,6 +18,11 @@ const (
 	targetSearchCacheTTL        = 10 * time.Minute
 	targetSearchCacheMaxObjects = 5000
 	targetSearchCachePageDelay  = time.Second
+
+	targetSearchCacheStatusMissing  = "missing"
+	targetSearchCacheStatusBuilding = "building"
+	targetSearchCacheStatusComplete = "complete"
+	targetSearchCacheStatusFailed   = "failed"
 )
 
 type targetSearchCache struct {
@@ -40,6 +45,7 @@ type targetSearchCacheEntry struct {
 
 type targetSearchCacheSnapshot struct {
 	nodes     []TreeNode
+	status    string
 	building  bool
 	complete  bool
 	truncated bool
@@ -61,7 +67,7 @@ func newTargetSearchCache() *targetSearchCache {
 	}
 }
 
-func (c *targetSearchCache) snapshotOrStart(ctx context.Context, conn connector.SourceConnector, req TargetTreeSearchRequest, build func(context.Context, connector.SourceConnector, TargetTreeSearchRequest) ([]TreeNode, bool, error)) targetSearchCacheSnapshot {
+func (c *targetSearchCache) snapshot(ctx context.Context, req TargetTreeSearchRequest) targetSearchCacheSnapshot {
 	if c == nil {
 		return targetSearchCacheSnapshot{}
 	}
@@ -70,58 +76,95 @@ func (c *targetSearchCache) snapshotOrStart(ctx context.Context, conn connector.
 		if snapshot, ok, err := c.store.Get(ctx, key); err == nil && ok {
 			return snapshot
 		}
-		if locked, err := c.store.TryLock(ctx, key, c.ttl); err == nil {
-			if locked {
-				go c.build(key, conn, req, build)
-			}
-			return targetSearchCacheSnapshot{building: true}
-		}
 	}
-	return c.memorySnapshotOrStart(key, conn, req, build)
-}
-
-func (c *targetSearchCache) memorySnapshotOrStart(key string, conn connector.SourceConnector, req TargetTreeSearchRequest, build func(context.Context, connector.SourceConnector, TargetTreeSearchRequest) ([]TreeNode, bool, error)) targetSearchCacheSnapshot {
-	now := time.Now()
 	c.mu.Lock()
 	entry := c.entries[key]
-	if entry == nil || now.After(entry.expiresAt) {
-		entry = &targetSearchCacheEntry{building: true, expiresAt: now.Add(c.ttl)}
-		c.entries[key] = entry
-		go c.build(key, conn, req, build)
+	if entry != nil && time.Now().Before(entry.expiresAt) {
+		snapshot := entry.snapshot()
+		c.mu.Unlock()
+		return snapshot
 	}
-	snapshot := entry.snapshot()
 	c.mu.Unlock()
-	return snapshot
+	return targetSearchCacheSnapshot{status: targetSearchCacheStatusMissing}
 }
 
-func (c *targetSearchCache) build(key string, conn connector.SourceConnector, req TargetTreeSearchRequest, build func(context.Context, connector.SourceConnector, TargetTreeSearchRequest) ([]TreeNode, bool, error)) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.ttl)
+func (c *targetSearchCache) build(ctx context.Context, key string, conn connector.SourceConnector, req TargetTreeSearchRequest, build func(context.Context, connector.SourceConnector, TargetTreeSearchRequest) ([]TreeNode, bool, error)) targetSearchCacheSnapshot {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	buildCtx, cancel := context.WithTimeout(ctx, c.ttl)
 	defer cancel()
-	nodes, truncated, err := build(ctx, conn, req)
+	nodes, truncated, err := build(buildCtx, conn, req)
+	snapshot := targetSearchCacheSnapshot{
+		nodes:     append([]TreeNode(nil), nodes...),
+		status:    targetSearchCacheStatusComplete,
+		complete:  true,
+		truncated: truncated,
+	}
+	if err != nil {
+		snapshot.nodes = nil
+		snapshot.status = targetSearchCacheStatusFailed
+		snapshot.complete = false
+		snapshot.truncated = false
+		snapshot.lastError = err.Error()
+	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	entry := c.entries[key]
 	if entry == nil {
 		entry = &targetSearchCacheEntry{}
 		c.entries[key] = entry
 	}
-	entry.nodes = nodes
-	entry.truncated = truncated
-	entry.complete = err == nil
+	entry.nodes = snapshot.nodes
+	entry.truncated = snapshot.truncated
+	entry.complete = snapshot.complete
 	entry.building = false
-	entry.lastError = ""
-	if err != nil {
-		entry.lastError = err.Error()
-	}
+	entry.lastError = snapshot.lastError
 	entry.expiresAt = time.Now().Add(c.ttl)
+	c.mu.Unlock()
 	if c.store != nil {
-		snapshot := entry.snapshot()
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_ = c.store.Set(ctx, key, snapshot, c.ttl)
-		}()
+		setCtx, setCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer setCancel()
+		_ = c.store.Set(setCtx, key, snapshot, c.ttl)
 	}
+	return snapshot
+}
+
+func (c *targetSearchCache) buildIfUnlocked(ctx context.Context, conn connector.SourceConnector, req TargetTreeSearchRequest, build func(context.Context, connector.SourceConnector, TargetTreeSearchRequest) ([]TreeNode, bool, error)) targetSearchCacheSnapshot {
+	if c == nil {
+		return targetSearchCacheSnapshot{status: targetSearchCacheStatusMissing}
+	}
+	key := targetSearchCacheKey(req)
+	if c.store != nil {
+		if snapshot, ok, err := c.store.Get(ctx, key); err == nil && ok && snapshot.complete {
+			return snapshot
+		}
+		locked, err := c.store.TryLock(ctx, key, c.ttl)
+		if err != nil {
+			return targetSearchCacheSnapshot{status: targetSearchCacheStatusFailed, lastError: err.Error()}
+		}
+		if !locked {
+			if snapshot, ok, err := c.store.Get(ctx, key); err == nil && ok {
+				return snapshot
+			}
+			return targetSearchCacheSnapshot{status: targetSearchCacheStatusBuilding, building: true}
+		}
+		return c.build(ctx, key, conn, req, build)
+	}
+	c.mu.Lock()
+	entry := c.entries[key]
+	if entry != nil && time.Now().Before(entry.expiresAt) && entry.complete {
+		snapshot := entry.snapshot()
+		c.mu.Unlock()
+		return snapshot
+	}
+	if entry != nil && entry.building {
+		snapshot := entry.snapshot()
+		c.mu.Unlock()
+		return snapshot
+	}
+	c.entries[key] = &targetSearchCacheEntry{building: true, expiresAt: time.Now().Add(c.ttl)}
+	c.mu.Unlock()
+	return c.build(ctx, key, conn, req, build)
 }
 
 func (e *targetSearchCacheEntry) snapshot() targetSearchCacheSnapshot {
@@ -131,11 +174,28 @@ func (e *targetSearchCacheEntry) snapshot() targetSearchCacheSnapshot {
 	nodes := append([]TreeNode(nil), e.nodes...)
 	return targetSearchCacheSnapshot{
 		nodes:     nodes,
+		status:    entryStatus(e),
 		building:  e.building,
 		complete:  e.complete,
 		truncated: e.truncated,
 		lastError: e.lastError,
 	}
+}
+
+func entryStatus(e *targetSearchCacheEntry) string {
+	if e == nil {
+		return targetSearchCacheStatusMissing
+	}
+	if e.building {
+		return targetSearchCacheStatusBuilding
+	}
+	if e.complete {
+		return targetSearchCacheStatusComplete
+	}
+	if strings.TrimSpace(e.lastError) != "" {
+		return targetSearchCacheStatusFailed
+	}
+	return targetSearchCacheStatusMissing
 }
 
 func targetSearchCacheKey(req TargetTreeSearchRequest) string {

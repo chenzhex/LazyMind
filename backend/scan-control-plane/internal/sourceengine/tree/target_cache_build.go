@@ -21,7 +21,7 @@ type targetCacheListScope struct {
 
 func (e *DefaultTargetTreeEngine) searchCachedTargets(ctx context.Context, conn connector.SourceConnector, req TargetTreeSearchRequest) (TreeNodePage, error) {
 	pageSize := normalizePageSize(req.PageSize, e.limitForConnector(conn.Spec()))
-	snapshot := e.cache.snapshotOrStart(ctx, conn, req, e.buildTargetSearchCache)
+	snapshot := e.cache.snapshot(ctx, req)
 	if err := ctx.Err(); err != nil {
 		return TreeNodePage{}, err
 	}
@@ -29,6 +29,7 @@ func (e *DefaultTargetTreeEngine) searchCachedTargets(ctx context.Context, conn 
 	if err != nil {
 		return TreeNodePage{}, err
 	}
+	page.CacheStatus = snapshot.status
 	page.CacheBuilding = snapshot.building
 	page.CacheComplete = snapshot.complete
 	page.Truncated = snapshot.truncated
@@ -44,7 +45,7 @@ func (e *DefaultTargetTreeEngine) Prewarm(ctx context.Context, req TargetTreeSea
 	if !conn.Spec().SupportsSearch {
 		return nil
 	}
-	_ = e.cache.snapshotOrStart(ctx, conn, req, e.buildTargetSearchCache)
+	_ = e.cache.buildIfUnlocked(ctx, conn, req, e.buildTargetSearchCache)
 	return nil
 }
 

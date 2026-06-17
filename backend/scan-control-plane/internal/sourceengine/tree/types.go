@@ -57,6 +57,7 @@ type TreeNodePage struct {
 	ListComplete  bool       `json:"list_complete"`
 	Truncated     bool       `json:"truncated"`
 	SearchMode    string     `json:"search_mode,omitempty"`
+	CacheStatus   string     `json:"cache_status,omitempty"`
 	CacheBuilding bool       `json:"cache_building,omitempty"`
 	CacheComplete bool       `json:"cache_complete,omitempty"`
 	CacheError    string     `json:"cache_error,omitempty"`

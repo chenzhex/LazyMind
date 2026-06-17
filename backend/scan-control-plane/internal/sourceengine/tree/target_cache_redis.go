@@ -17,6 +17,7 @@ type redisTargetSearchCacheStore struct {
 
 type redisTargetSearchCachePayload struct {
 	Nodes     []TreeNode `json:"nodes"`
+	Status    string     `json:"status,omitempty"`
 	Complete  bool       `json:"complete"`
 	Truncated bool       `json:"truncated"`
 	LastError string     `json:"last_error,omitempty"`
@@ -41,6 +42,16 @@ func (s *redisTargetSearchCacheStore) Get(ctx context.Context, key string) (targ
 	}
 	data, err := s.client.Get(ctx, s.dataKey(key)).Bytes()
 	if err == redis.Nil {
+		locked, lockErr := s.hasLock(ctx, key)
+		if lockErr != nil {
+			return targetSearchCacheSnapshot{}, false, lockErr
+		}
+		if locked {
+			return targetSearchCacheSnapshot{
+				status:   targetSearchCacheStatusBuilding,
+				building: true,
+			}, true, nil
+		}
 		return targetSearchCacheSnapshot{}, false, nil
 	}
 	if err != nil {
@@ -52,6 +63,7 @@ func (s *redisTargetSearchCacheStore) Get(ctx context.Context, key string) (targ
 	}
 	return targetSearchCacheSnapshot{
 		nodes:     append([]TreeNode(nil), payload.Nodes...),
+		status:    payload.status(),
 		complete:  payload.Complete,
 		truncated: payload.Truncated,
 		lastError: payload.LastError,
@@ -64,6 +76,7 @@ func (s *redisTargetSearchCacheStore) Set(ctx context.Context, key string, snaps
 	}
 	payload := redisTargetSearchCachePayload{
 		Nodes:     append([]TreeNode(nil), snapshot.nodes...),
+		Status:    snapshot.status,
 		Complete:  snapshot.complete,
 		Truncated: snapshot.truncated,
 		LastError: snapshot.lastError,
@@ -88,6 +101,25 @@ func (s *redisTargetSearchCacheStore) TryLock(ctx context.Context, key string, t
 		lockTTL = time.Minute
 	}
 	return s.client.SetNX(ctx, s.lockKey(key), "1", lockTTL).Result()
+}
+
+func (s *redisTargetSearchCacheStore) hasLock(ctx context.Context, key string) (bool, error) {
+	n, err := s.client.Exists(ctx, s.lockKey(key)).Result()
+	return n > 0, err
+}
+
+func (p redisTargetSearchCachePayload) status() string {
+	switch p.Status {
+	case targetSearchCacheStatusMissing, targetSearchCacheStatusBuilding, targetSearchCacheStatusComplete, targetSearchCacheStatusFailed:
+		return p.Status
+	}
+	if p.Complete {
+		return targetSearchCacheStatusComplete
+	}
+	if strings.TrimSpace(p.LastError) != "" {
+		return targetSearchCacheStatusFailed
+	}
+	return targetSearchCacheStatusMissing
 }
 
 func (s *redisTargetSearchCacheStore) dataKey(key string) string {

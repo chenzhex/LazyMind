@@ -339,14 +339,20 @@ func TestChatConversationsMergesPersistedDisabledTools(t *testing.T) {
 	if err := disableToolForUser(context.Background(), db.DB, "u1", "User 1", "bing"); err != nil {
 		t.Fatalf("disable tool: %v", err)
 	}
-	if _, err := mcp.CreateServer(context.Background(), db.DB, mcp.CreateServerRequest{
+	created, err := mcp.CreateServer(context.Background(), db.DB, mcp.CreateServerRequest{
 		Name:         "context7",
 		Transport:    "sse",
 		URL:          "https://mcp.example.com/sse",
 		APIKey:       "sk-secret-xyz",
 		AllowedTools: []string{"resolve-library-id"},
-	}, "u1", "User 1"); err != nil {
+	}, "u1", "User 1")
+	if err != nil {
 		t.Fatalf("create mcp server: %v", err)
+	}
+	if err := db.Model(&orm.MCPServer{}).
+		Where("id = ?", created.ID).
+		Updates(map[string]any{"is_verified": true, "enabled": true}).Error; err != nil {
+		t.Fatalf("enable verified mcp server: %v", err)
 	}
 
 	var upstreamBody map[string]any
