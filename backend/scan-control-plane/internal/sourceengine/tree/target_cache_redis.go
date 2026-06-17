@@ -23,7 +23,7 @@ type redisTargetSearchCachePayload struct {
 	LastError string     `json:"last_error,omitempty"`
 }
 
-func NewRedisTargetSearchCacheStore(rawURL string) (targetSearchCacheStore, error) {
+func NewRedisTargetSearchCacheStore(rawURL string) (TargetSearchCacheStore, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return nil, nil

@@ -50,6 +50,7 @@ type Components struct {
 	TempObjectStore                   worker.TempObjectStore
 	JobQueue                          taskengine.JobQueue
 	Scheduler                         *schedule.CheckpointScheduleEngine
+	TargetSearchCacheStore            tree.TargetSearchCacheStore
 	TargetTreeOptions                 []tree.TargetTreeOption
 	TargetSearchCachePrewarmer        *targetTreeCachePrewarmer
 	ParseWorkerRunner                 *worker.Runner
@@ -203,10 +204,11 @@ func buildAdapters(cfg config.Config) (Components, error) {
 	if err != nil {
 		return Components{}, err
 	}
-	targetTreeOptions, err := buildTargetTreeOptions(cfg)
+	targetSearchCacheStore, err := buildTargetSearchCacheStore(cfg)
 	if err != nil {
 		return Components{}, err
 	}
+	targetTreeOptions := buildTargetTreeOptions(targetSearchCacheStore)
 	temp := buildTempObjectStore(cfg)
 	connectorTypes := enabledConnectorTypes()
 	return Components{
@@ -219,6 +221,7 @@ func buildAdapters(cfg config.Config) (Components, error) {
 		AuthConnectionClient:              auth,
 		FeishuClient:                      feishuClient,
 		TempObjectStore:                   temp,
+		TargetSearchCacheStore:            targetSearchCacheStore,
 		TargetTreeOptions:                 targetTreeOptions,
 		Metrics:                           observability.NewRegistry(),
 		Logger:                            observability.DefaultLogger(),
@@ -419,15 +422,19 @@ func buildFeishuClients(cfg config.Config) (feishu.AuthConnectionClient, feishu.
 	return auth, api, nil
 }
 
-func buildTargetTreeOptions(cfg config.Config) ([]tree.TargetTreeOption, error) {
+func buildTargetSearchCacheStore(cfg config.Config) (tree.TargetSearchCacheStore, error) {
 	store, err := tree.NewRedisTargetSearchCacheStore(cfg.RedisURL)
 	if err != nil {
 		return nil, fmt.Errorf("configure target search cache redis: %w", err)
 	}
+	return store, nil
+}
+
+func buildTargetTreeOptions(store tree.TargetSearchCacheStore) []tree.TargetTreeOption {
 	if store == nil {
-		return nil, nil
+		return nil
 	}
-	return []tree.TargetTreeOption{tree.WithTargetSearchCacheStore(store)}, nil
+	return []tree.TargetTreeOption{tree.WithTargetSearchCacheStore(store)}
 }
 
 func buildTempObjectStore(cfg config.Config) worker.TempObjectStore {
@@ -457,7 +464,11 @@ func buildTargetSearchCachePrewarmer(built Components, cfg config.Config) (*targ
 		return nil, err
 	}
 	options := []tree.TargetTreeOption{tree.WithTargetTreeLimits(tree.TreeQueryLimits{DefaultPageSize: 50, MaxPageSize: 100, MaxAllCurrentLevelItems: 1000})}
+	if built.TargetSearchCacheStore != nil {
+		options = append(options, tree.WithTargetSearchCacheStore(built.TargetSearchCacheStore))
+	}
 	options = append(options, built.TargetTreeOptions...)
+	fmt.Fprintf(os.Stdout, "target search cache prewarmer enabled redis=%t interval=%s stagger=%s\n", built.TargetSearchCacheStore != nil, cfg.TargetSearchCachePrewarmInterval, cfg.TargetSearchCachePrewarmStagger)
 	return &targetTreeCachePrewarmer{
 		auth:    auth,
 		engine:  tree.NewDefaultTargetTreeEngine(registry, options...),
@@ -476,6 +487,7 @@ func (p *targetTreeCachePrewarmer) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stdout, "target search cache prewarm candidates=%d\n", len(connections))
 	started := 0
 	for _, item := range connections {
 		if err := ctx.Err(); err != nil {
@@ -499,11 +511,13 @@ func (p *targetTreeCachePrewarmer) RunOnce(ctx context.Context) error {
 		if tenantKey := strings.TrimSpace(item.ProviderTenantKey); tenantKey != "" {
 			options["tenant_key"] = tenantKey
 		}
-		_ = p.engine.Prewarm(ctx, tree.TargetTreeSearchRequest{
+		if err := p.engine.Prewarm(ctx, tree.TargetTreeSearchRequest{
 			ConnectorType:    feishu.ConnectorType,
 			AuthConnectionID: item.ConnectionID,
 			ProviderOptions:  options,
-		})
+		}); err != nil {
+			fmt.Fprintf(os.Stdout, "target search cache prewarm connection=%s error=%v\n", item.ConnectionID, err)
+		}
 		started++
 	}
 	return nil

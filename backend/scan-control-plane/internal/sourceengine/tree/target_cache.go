@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,11 +54,13 @@ type targetSearchCacheSnapshot struct {
 	lastError string
 }
 
-type targetSearchCacheStore interface {
+type TargetSearchCacheStore interface {
 	Get(ctx context.Context, key string) (targetSearchCacheSnapshot, bool, error)
 	Set(ctx context.Context, key string, snapshot targetSearchCacheSnapshot, ttl time.Duration) error
 	TryLock(ctx context.Context, key string, ttl time.Duration) (bool, error)
 }
+
+type targetSearchCacheStore = TargetSearchCacheStore
 
 func newTargetSearchCache() *targetSearchCache {
 	return &targetSearchCache{
@@ -126,6 +130,7 @@ func (c *targetSearchCache) build(ctx context.Context, key string, conn connecto
 		defer setCancel()
 		_ = c.store.Set(setCtx, key, snapshot, c.ttl)
 	}
+	fmt.Fprintf(os.Stdout, "target search cache build status=%s nodes=%d truncated=%t error=%q\n", snapshot.status, len(snapshot.nodes), snapshot.truncated, snapshot.lastError)
 	return snapshot
 }
 

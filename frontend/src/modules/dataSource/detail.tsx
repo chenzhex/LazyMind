@@ -248,7 +248,7 @@ function getParseStatusMeta(status: DocumentStatusRow["parseStatus"], t: TFuncti
   }
   if (status === "pending") {
     return {
-      color: "#1677ff",
+      color: "default",
       text: t("admin.dataSourceParsePending"),
       icon: <ClockCircleFilled />,
     };
@@ -1321,8 +1321,10 @@ export default function DataSourceDetail() {
             color={
               parseStatus === "parsed"
                 ? "success"
-                : parseStatus === "reindexing" || parseStatus === "pending"
+                : parseStatus === "reindexing"
                   ? "processing"
+                  : parseStatus === "pending"
+                    ? "default"
                   : parseStatus === "duplicate"
                     ? "warning"
                     : "error"
