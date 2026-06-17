@@ -1,12 +1,14 @@
 from __future__ import annotations
 import asyncio
 import json
+import re
 import time
 from typing import Any, Dict, List, Optional, Union
 import lazyllm
 from lazyllm import LOG, set_trace_context
 from fastapi.responses import StreamingResponse
 from lazymind.chat.config import (
+    IMAGE_EXTENSIONS,
     LAZYMIND_LLM_PRIORITY,
     MAX_CONCURRENCY,
     RAG_MODE,
@@ -18,11 +20,15 @@ from lazymind.chat.service.component import (
     AgentEventFrameTranslator,
     DEFAULT_TOOLS,
     build_agent_tools,
+    filter_tools,
     normalize_history_for_agent,
 )
+from lazymind.chat.engine.agent_core import build_react_agent, drive_agent
 from lazymind.chat.service.utils import (
     SensitiveFilter,
+    basename_from_path,
     log_and_emit_frame,
+    register_image_url,
     response_payload,
     single_event_stream_response,
     sse_line,
@@ -37,6 +43,38 @@ from lazymind.config import config as _cfg
 
 rag_sem = asyncio.Semaphore(MAX_CONCURRENCY)
 sensitive_filter = SensitiveFilter(SENSITIVE_WORDS_PATH)
+_CITE_MESSAGE_PATTERN = re.compile(
+    r'<cite_message>([\s\S]*?)</cite_message>\s*',
+    re.IGNORECASE,
+)
+
+
+def _normalize_cite_message_query_for_agent(query: str) -> tuple[str, str]:
+    cite_messages: list[str] = []
+
+    def collect_cite_message(match: re.Match[str]) -> str:
+        cite_message = match.group(1).strip()
+        if cite_message:
+            cite_messages.append(cite_message)
+        return ''
+
+    user_query = _CITE_MESSAGE_PATTERN.sub(collect_cite_message, query).strip()
+    if not cite_messages:
+        return query, query
+
+    if len(cite_messages) == 1:
+        cite_text = cite_messages[0]
+    else:
+        cite_text = '\n\n'.join(
+            f'{index}. {cite_message}'
+            for index, cite_message in enumerate(cite_messages, start=1)
+        )
+
+    agent_query = (
+        f'用户本次引用的消息：\n{cite_text}\n\n'
+        f'用户本次的问题：\n{user_query}'
+    ).strip()
+    return user_query, agent_query
 
 
 def _normalize_kb_id_filter(raw_kb_id: Any) -> str | list[str] | None:
@@ -87,6 +125,49 @@ def _build_mcp_tools(mcp_config: List[Dict[str, Any]]) -> list:
     return tools
 
 
+def _build_subagent_chat_tools(has_subagents: bool) -> list:
+    """Assemble ChatAgent SubAgent tools. create_subagent is always available; query tools
+    are registered only when the conversation already has SubAgent tasks."""
+    from lazymind.chat.engine.tools.subagent_chat_tools import (
+        create_subagent,
+        get_subagent_artifacts,
+        get_subagent_status,
+        list_subagent_artifacts,
+        list_subagents,
+    )
+    tools = [create_subagent]
+    if has_subagents:
+        tools.extend([
+            list_subagents,
+            get_subagent_status,
+            list_subagent_artifacts,
+            get_subagent_artifacts,
+        ])
+    return tools
+
+
+def _collect_active_tool_names(configs: list) -> set[str]:
+    # Build a per-request callable allowlist from filtered tool configs.
+    # This is consumed by tool_runtime guard to prevent accidental execution
+    # when the model tries to call a tool that is not active in this session.
+    names: set[str] = set()
+    for cfg in configs:
+        inst = getattr(cfg, 'instance', None)
+        if inst is None:
+            continue
+        if callable(inst):
+            tool_name = str(getattr(inst, '__name__', '')).strip()
+            if tool_name:
+                names.add(tool_name)
+        public_apis = getattr(inst, '__public_apis__', None)
+        if isinstance(public_apis, (list, tuple)):
+            for method_name in public_apis:
+                method = str(method_name).strip()
+                if method:
+                    names.add(method)
+    return names
+
+
 async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
                       session_id: str, filters: Optional[Dict[str, Any]],
                       files: Optional[List[str]],
@@ -96,17 +177,25 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
                       user_preference: Optional[str], use_memory: Optional[bool],
                       environment_context: Optional[Dict[str, Any]] = None,
                       user_id: Optional[str] = None,
+                      conversation_id: Optional[str] = None,
+                      mode: Optional[str] = 'auto',
+                      has_subagents: Optional[bool] = False,
                       model_config: Optional[Dict[str, Any]] = None,
                       tool_config: Optional[Dict[str, Union[str, List[str]]]] = None,
                       mcp_config: Optional[List[Dict[str, Any]]] = None,
                       trace: Optional[bool] = False,
+                      plugin_context: Optional[Dict[str, Any]] = None,
                       ) -> Union[Dict[str, Any], StreamingResponse]:
     LOG.info(
         f'[ChatServer] [MODEL_CONFIG_RECEIVED] [sid={session_id}] [user_id={user_id or ""}] '
         f'[{summarize_model_config_for_log(model_config)}]'
     )
+    LOG.info(
+        f'[ChatServer] [PLUGIN_CONTEXT] [sid={session_id}] [plugin_context={plugin_context!r}]'
+    )
     start_time = time.time()
     priority = priority or LAZYMIND_LLM_PRIORITY
+    query, agent_query = _normalize_cite_message_query_for_agent(query)
     sensitive_word = check_sensitive_content(query)
     if sensitive_word:
         cost = round(time.time() - start_time, 3)
@@ -128,7 +217,6 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
     filters = dict(filters or {})
     resolved_files = validate_and_resolve_files(files)
     filters['kb_id'] = _normalize_kb_id_filter(filters.get('kb_id'))
-    resolved_use_memory = use_memory is not False
 
     raw_history = list(history) if isinstance(history, list) else []
     agent_history = normalize_history_for_agent(raw_history)
@@ -140,19 +228,46 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
         'files': resolved_files,
         'priority': priority,
         'user_id': user_id or '',
-        'use_memory': resolved_use_memory,
+        'use_memory': use_memory,
         'citation_state': translator.citation_state,
+        'mode': mode if mode in ('auto', 'manual') else 'auto',
+        'has_subagents': bool(has_subagents),
+        'conversation_id': (conversation_id or '').strip(),
+        'query': query or '',
     }
+    display_files: list[str] = []
+    for path in resolved_files:
+        if path.lower().endswith(IMAGE_EXTENSIONS):
+            register_image_url(translator.citation_state, path)
+            display_files.append(basename_from_path(path) or path)
+        else:
+            display_files.append(path)
+
+    from lazymind.chat.plugin.plugin_manager import resolve_plugin_injection
+    plugin_tools, plugin_system_prompt, plugin_stop_tools, agentic_config_patch = \
+        resolve_plugin_injection(plugin_context)
+    agentic_config.update(agentic_config_patch)
+
     lazyllm.globals._init_sid(sid=session_id)
     lazyllm.locals._init_sid(sid=session_id)
     inject_model_config(model_config)
     inject_tool_config(tool_config)
     lazyllm.globals['agentic_config'] = agentic_config
     disabled = set(disabled_tools or [])
-    active_configs = [cfg for cfg in DEFAULT_TOOLS if cfg.name not in disabled]
+    active_configs = filter_tools(
+        [cfg for cfg in DEFAULT_TOOLS if cfg.name not in disabled],
+    )
+    # Persist the allowlist in session globals so every @handle_tool_errors-wrapped
+    # tool can do a cheap runtime check before executing business logic.
+    lazyllm.globals['active_tool_names'] = _collect_active_tool_names(active_configs)
+    # Plugin tools are dynamically injected and pre-validated by resolve_plugin_injection;
+    # add their names to the allowlist so the ToolGuard does not block them.
+    if plugin_stop_tools:
+        lazyllm.globals['active_tool_names'] |= set(plugin_stop_tools)
     agent_tools = build_agent_tools(active_configs)
+    subagent_tools = _build_subagent_chat_tools(bool(has_subagents))
     mcp_tools = _build_mcp_tools(mcp_config) if mcp_config else []
-    all_tools = agent_tools + mcp_tools
+    all_tools = agent_tools + subagent_tools + plugin_tools + mcp_tools
     set_trace_context({
         'enabled': bool(trace),
         'trace_id': session_id if trace else None,
@@ -164,55 +279,51 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
     runtime_prompt = build_system_prompt(
         {cfg.name for cfg in active_configs},
         environment_context=environment_context,
-        use_memory=resolved_use_memory,
+        use_memory=use_memory,
         user_preference=user_preference,
         memory=memory,
-        files=resolved_files,
+        files=display_files,
     )
+    if plugin_system_prompt:
+        runtime_prompt = runtime_prompt + '\n\n' + plugin_system_prompt
 
     llm = AutoModel(model='llm')
 
-    react_agent = lazyllm.tools.agent.ReactAgent(
+    react_agent = build_react_agent(
         llm=llm,
         tools=all_tools,
-        max_retries=_cfg['max_retries'],
-        stream=True,
+        force_summarize_context=query,
         prompt=runtime_prompt,
         skills=available_skills,
         workspace=_cfg['agentic_workspace'],
         keep_full_turns=_cfg['agentic_keep_full_turns'],
         fs=FS,
         skills_dir=_cfg['skill_fs_url'],
-        enable_builtin_tools=False,
-        force_summarize=True,
-        force_summarize_context=query,
     )
+    if plugin_stop_tools:
+        react_agent.set_stop_tools(plugin_stop_tools)
 
     async def event_stream() -> Any:
         final_result: Any = None
 
         try:
             async with rag_sem:
-                helper = lazyllm.module.stream_helper.StreamCallHelper(react_agent, init_sid=False)
-                async for item in helper.astream(query, llm_chat_history=agent_history):
-                    for frame in translator.feed(item):
-                        cost = round(time.time() - start_time, 3)
-                        yield log_and_emit_frame(frame, cost, query, session_id, tag='FEED')
-
-                try:
-                    result = helper.future.result()
-                except Exception as exc:
-                    LOG.exception('[ChatServer] agent failed')
-                    raise RuntimeError(f'agent failed: {exc}') from exc
-
-                final_result = result
+                async for kind, payload in drive_agent(react_agent, agent_query, history=agent_history):
+                    if kind == 'event':
+                        for frame in translator.feed(payload):
+                            cost = round(time.time() - start_time, 3)
+                            yield log_and_emit_frame(frame, cost, query, session_id, tag='FEED')
+                    else:
+                        # 'final' -- payload is already the resolved result value;
+                        # if future.result() raised, drive_agent propagated it before yielding.
+                        final_result = payload
 
             for frame in translator.finish(final_result):
                 cost = round(time.time() - start_time, 3)
                 yield log_and_emit_frame(frame, cost, query, session_id, tag='FINISH')
 
         except Exception as exc:
-            LOG.exception(exc)
+            LOG.exception('[ChatServer] agent failed')
             final_resp = response_payload(
                 500,
                 f'chat service failed: {exc}',

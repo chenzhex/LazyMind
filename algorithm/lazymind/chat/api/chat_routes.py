@@ -45,6 +45,7 @@ async def chat(
         Body(description='Conversation history (each item may contain role and content)'),
     ] = None,
     session_id: Annotated[str, Body(description='Session ID')] = 'session_id',
+    conversation_id: Annotated[Optional[str], Body(description='Conversation ID for SubAgent task lookup')] = None,
     filters: Annotated[Optional[Dict[str, Any]], Body(description='Retrieval filter conditions')] = None,
     files: Annotated[Optional[List[str]], Body(description='Uploaded temporary files')] = None,
     debug: Annotated[Optional[bool], Body(description='Enable debug mode')] = False,
@@ -65,6 +66,11 @@ async def chat(
         Body(description='Environment context, e.g. current user time and timezone'),
     ] = None,
     user_id: Annotated[Optional[str], Body(description='User ID for loading user-specific vocabulary')] = None,
+    mode: Annotated[Optional[str], Body(description="SubAgent driving mode: 'auto' or 'manual'")] = 'auto',
+    has_subagents: Annotated[
+        Optional[bool],
+        Body(description='Whether the conversation already has SubAgent tasks (enables query tools)'),
+    ] = False,
     trace: Annotated[Optional[bool], Body(description='Enable trace recording (for admin debugging only)')] = False,
     llm_config: Annotated[
         Optional[Dict[str, Any]],
@@ -83,8 +89,8 @@ async def chat(
         Body(
             description=(
                 'Per-request tool credentials. Format: {tool_name: token} or {tool_name: [token, ...]}. '
-                'For OAuth2 providers (e.g. feishu) pass a valid, unexpired access token. '
-                'Example: {"feishu": "u-xxx", "bing": ["sk-1", "sk-2"]}'
+                'For OAuth2 providers (e.g. feishu, notion) pass a valid, unexpired access token. '
+                'Example: {"feishu": "u-xxx", "notion": "ntn_xxx", "bing": ["sk-1", "sk-2"]}'
             )
         ),
     ] = None,
@@ -98,11 +104,23 @@ async def chat(
             )
         ),
     ] = None,
+    plugin_context: Annotated[
+        Optional[Dict[str, Any]],
+        Body(
+            description=(
+                'Active plugin session context injected by Go. '
+                'Fields: session_id, plugin_id, current_step, advance. '
+                'When present with session_id, only advance_step is injected; '
+                'when absent or empty, cold-start trigger tools are injected.'
+            )
+        ),
+    ] = None,
 ):
     return await handle_chat(
         query=query,
         history=history,
         session_id=session_id,
+        conversation_id=(conversation_id or '').strip(),
         filters=filters,
         files=files,
         databases=databases,
@@ -114,8 +132,11 @@ async def chat(
         use_memory=use_memory,
         environment_context=environment_context,
         user_id=(user_id or '').strip(),
+        mode=mode,
+        has_subagents=bool(has_subagents),
         model_config=llm_config,
         tool_config=tool_config,
         mcp_config=mcp_config,
         trace=trace,
+        plugin_context=plugin_context,
     )

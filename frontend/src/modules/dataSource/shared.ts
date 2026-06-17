@@ -9,6 +9,8 @@ export type FileSyncMode = "all" | "partial";
 export type OAuthState = "pending" | "waiting" | "connected" | "expired" | "error";
 export type FileUpdateState = "new" | "changed" | "unchanged" | "deleted";
 export type FeishuTargetType = "wiki_space" | "drive_folder";
+export type NotionTargetType = "page" | "database";
+export type CloudTargetType = FeishuTargetType | NotionTargetType;
 export type DetailParseStatus =
   | "parsed"
   | "pending"
@@ -16,7 +18,7 @@ export type DetailParseStatus =
   | "duplicate"
   | "deleted"
   | "failed";
-export type DataSourceKind = "local" | "feishu";
+export type DataSourceKind = "local" | "feishu" | "notion";
 
 // New source state machine fields exposed by the backend.
 export type SourceStateValue = "UNCHANGED" | "NEW" | "MODIFIED" | "DELETED";
@@ -30,6 +32,7 @@ export type PendingActionValue = "NONE" | "CREATE" | "UPDATE" | "DELETE";
 
 export const DEFAULT_SCAN_TENANT_ID = "tenant-demo";
 export const FEISHU_APP_SETUP_STORAGE_KEY = "lazymind:datasource:feishu:app-setup";
+export const NOTION_APP_SETUP_STORAGE_KEY = "lazymind:datasource:notion:app-setup";
 export const FEISHU_DEFAULT_SCOPES = [
   "offline_access",
   "drive:drive",
@@ -126,8 +129,8 @@ export interface DataSourceItem {
   rootPath?: string;
   targetRef?: string;
   targetRefs?: string[];
-  targetType?: FeishuTargetType;
-  targetTypes?: Record<string, FeishuTargetType>;
+  targetType?: CloudTargetType;
+  targetTypes?: Record<string, CloudTargetType>;
   authConnectionId?: string;
   datasetId?: string;
   bindingId?: string;
@@ -149,7 +152,7 @@ export interface SourceFormValues {
   region?: string;
   prefix?: string;
   target?: string | string[];
-  targetType?: FeishuTargetType;
+  targetType?: CloudTargetType;
   spaceKey?: string;
   scopes?: string[];
   syncMode?: SyncMode;
@@ -218,7 +221,7 @@ export interface DocumentStatusRow {
 }
 
 export function isCloudType(type?: SourceType) {
-  return type === "feishu";
+  return type === "feishu" || type === "notion";
 }
 
 function getStatusTokens(value?: string) {
@@ -436,6 +439,9 @@ export function getSourceTypeTitle(type: SourceType, t: TFunction) {
   if (type === "feishu") {
     return t("admin.dataSourceTypeFeishu");
   }
+  if (type === "notion") {
+    return t("admin.dataSourceTypeNotion");
+  }
   return type;
 }
 
@@ -445,6 +451,9 @@ export function getSourceTypeDescription(type: SourceType, t: TFunction) {
   }
   if (type === "feishu") {
     return t("admin.dataSourceTypeFeishuDesc");
+  }
+  if (type === "notion") {
+    return t("admin.dataSourceTypeNotionDesc");
   }
   return "";
 }

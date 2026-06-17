@@ -57,11 +57,11 @@ func (e *DefaultTargetTreeEngine) searchCurrentLevelTargets(ctx context.Context,
 
 func (e *DefaultTargetTreeEngine) searchConnectorTargets(ctx context.Context, conn connector.SourceConnector, req TargetTreeSearchRequest) (TreeNodePage, error) {
 	pageSize := normalizePageSize(req.PageSize, e.limitForConnector(conn.Spec()))
-	rawPage, err := conn.Search(ctx, connector.SearchRequest{
+	rawPage, err := conn.ListChildren(ctx, connector.ListChildrenRequest{
 		TargetType:       req.TargetType,
 		TargetRef:        req.TargetRef,
 		NodeRef:          req.NodeRef,
-		Keyword:          req.Keyword,
+		ListMode:         connector.ListModePage,
 		Cursor:           req.Cursor,
 		PageSize:         pageSize,
 		AgentID:          req.AgentID,

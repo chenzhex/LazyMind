@@ -11,10 +11,12 @@ import (
 	"lazymind/core/mcp"
 	"lazymind/core/memory"
 	"lazymind/core/modelprovider"
+	"lazymind/core/plugin"
 	"lazymind/core/preference"
 	"lazymind/core/resourcechange"
 	"lazymind/core/resourceupdate"
 	"lazymind/core/skill"
+	"lazymind/core/subagent"
 	"lazymind/core/wordgroup"
 
 	"github.com/gorilla/mux"
@@ -148,11 +150,14 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/agent/threads/{thread_id}/results/analysis-reports", []string{"qa.read"}, agent.GetThreadResultAnalysisReports)
 	handleAPI(r, "GET", "/agent/threads/{thread_id}/results/diffs", []string{"qa.read"}, agent.GetThreadResultDiffs)
 	handleAPI(r, "GET", "/agent/threads/{thread_id}/results/abtests", []string{"qa.read"}, agent.GetThreadResultAbtests)
+	handleAPI(r, "GET", "/agent/threads/{thread_id}/flow-status", []string{"qa.read"}, agent.GetThreadFlowStatus)
+	handleAPI(r, "GET", "/agent/threads/{thread_id}/artifacts/{artifact_id}", []string{"qa.read"}, agent.GetThreadArtifact)
 	handleAPI(r, "POST", "/agent/threads/{thread_id}:messages", []string{"qa.write"}, agent.StreamThreadMessages)
 	handleAPI(r, "POST", "/agent/threads/{thread_id}:start", []string{"qa.write"}, agent.StartThread)
 	handleAPI(r, "POST", "/agent/threads/{thread_id}:pause", []string{"qa.write"}, agent.PauseThread)
 	handleAPI(r, "POST", "/agent/threads/{thread_id}:cancel", []string{"qa.write"}, agent.CancelThread)
 	handleAPI(r, "POST", "/agent/threads/{thread_id}:retry", []string{"qa.write"}, agent.RetryThread)
+	handleAPI(r, "POST", "/agent/threads/{thread_id}:continue", []string{"qa.write"}, agent.ContinueThread)
 	handleAPI(r, "GET", "/agent/reports/{report_id}:content", []string{"qa.read"}, agent.GetReportContent)
 	handleAPI(r, "GET", "/agent/diffs/{apply_id}/{filename:.*}", []string{"qa.read"}, agent.GetDiffContent)
 	handleAPI(r, "POST", "/agent/files:content", []string{"qa.read"}, agent.GetAgentFileContent)
@@ -162,6 +167,29 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/conversations:resumeChat", []string{"qa.write"}, chat.ResumeChat)
 	handleAPI(r, "POST", "/conversations:stopChatGeneration", []string{"qa.write"}, chat.StopChatGeneration)
 	handleAPI(r, "GET", "/conversations/{conversation_id}:status", []string{"qa.read"}, chat.GetChatStatus)
+
+	// ----- SubAgent (Task Center) -----
+	handleAPI(r, "GET", "/conversations/{conversation_id}/tasks", []string{"qa.read"}, subagent.ListConversationTasks)
+	handleAPI(r, "GET", "/conversations/{conversation_id}/events", []string{"qa.read"}, chat.StreamConvEvents)
+	handleAPI(r, "GET", "/tasks/{task_id}:stream", []string{"qa.read"}, subagent.StreamTask)
+	handleAPI(r, "GET", "/tasks/{task_id}/artifacts", []string{"qa.read"}, subagent.GetTaskArtifacts)
+	handleAPI(r, "GET", "/tasks/{task_id}", []string{"qa.read"}, subagent.GetTaskDetail)
+	// Internal endpoint for algorithm service auto polling; no request-level RBAC.
+	handleAPI(r, "GET", "/internal/subagent/tasks/{task_id}", nil, subagent.InternalGetTaskStatus)
+	handleAPI(r, "GET", "/internal/subagent/tasks/{task_id}/events", nil, subagent.InternalGetTaskEvents)
+
+	// ----- Plugin Info -----
+	handleAPI(r, "GET", "/plugins", []string{"qa.read"}, plugin.ListPlugins)
+	handleAPI(r, "GET", "/plugins/{plugin_id}", []string{"qa.read"}, plugin.GetPluginInfo)
+
+	// ----- Plugin Sessions -----
+	handleAPI(r, "GET", "/conversations/{conversation_id}/plugin-sessions", []string{"qa.read"}, plugin.ListConversationSessions)
+	handleAPI(r, "GET", "/conversations/{conversation_id}/plugin-sessions:active", []string{"qa.read"}, plugin.GetActiveConversationSession)
+	handleAPI(r, "GET", "/conversations/{conversation_id}/plugin-sessions:latest", []string{"qa.read"}, plugin.GetLatestConversationSession)
+	handleAPI(r, "GET", "/plugin-sessions/{session_id}", []string{"qa.read"}, plugin.GetSessionDetail)
+	handleAPI(r, "GET", "/plugin-sessions/{session_id}/slots", []string{"qa.read"}, plugin.GetSessionSlots)
+	handleAPI(r, "PATCH", "/plugin-sessions/{session_id}/slots/{slot_id}", []string{"qa.write"}, plugin.PatchSessionSlot)
+	handleAPI(r, "POST", "/plugin-sessions/{session_id}:advance", []string{"qa.write"}, plugin.AdvanceSession)
 	handleAPI(r, "GET", "/evolution/tasks", []string{"qa.read"}, resourceupdate.ListTasks)
 	handleAPI(r, "GET", "/evolution/tasks/{task_id}", []string{"qa.read"}, resourceupdate.GetTask)
 	handleAPI(r, "GET", "/skill-review-results", []string{"qa.read"}, resourceupdate.ListSkillReviewResults)
@@ -275,13 +303,14 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/prompts/{name}", []string{"document.read"}, chat.GetPrompt)
 	handleAPI(r, "GET", "/prompts", []string{"document.read"}, chat.ListPrompts)
 
-	// ----- Evolution / long-term state -----
 	// Algorithm service callbacks: no request-level RBAC, protected by internal service token at infra level.
 	handleAPI(r, "POST", "/skill/create", nil, skill.Create)
 	handleAPI(r, "GET", "/remote-fs/list", []string{"qa.read"}, skill.RemoteFSList)
 	handleAPI(r, "GET", "/remote-fs/info", []string{"qa.read"}, skill.RemoteFSInfo)
 	handleAPI(r, "GET", "/remote-fs/exists", []string{"qa.read"}, skill.RemoteFSExists)
 	handleAPI(r, "GET", "/remote-fs/content", []string{"qa.read"}, skill.RemoteFSContent)
+	handleAPI(r, "PUT", "/remote-fs/content", []string{"qa.write"}, skill.RemoteFSWrite)
+	handleAPI(r, "DELETE", "/remote-fs/path", []string{"qa.write"}, skill.RemoteFSDelete)
 
 	// ----- ACL（Knowledge basetextPermission） -----
 	handleAPI(r, "GET", "/kb/list", []string{"document.read"}, acl.ListKB)

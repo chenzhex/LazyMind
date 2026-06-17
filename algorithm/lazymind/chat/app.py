@@ -3,21 +3,35 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from lazymind.config import config
-from lazymind.chat.api import chat_routes, health_routes, model_check_routes, model_features_routes
+from lazymind.chat.api import (
+    chat_routes,
+    health_routes,
+    model_check_routes,
+    model_features_routes,
+    plugin_routes,
+    subagent_routes,
+)
 from lazymind.rewrite.api import rewrite_routes
-from lazymind.review.api import skill_review_routes
+from lazymind.review.api import memory_review_routes, skill_review_routes
 
 
 def register_chat_routers(app: FastAPI) -> FastAPI:
+    # health is always available for liveness probes.
     app.include_router(health_routes.router)
-    # In router mode, chat requests are forwarded by the proxy layer instead of
-    # being served directly, so chat_routes must not be mounted here.
+    # plugin routes must always be registered: Go backend calls /api/plugin/slot-binding
+    # and /api/plugin/driver regardless of whether router mode is enabled.
+    app.include_router(plugin_routes.router)
+
     if not config['enable_router']:
         app.include_router(chat_routes.router)
-    app.include_router(rewrite_routes.router)
-    app.include_router(skill_review_routes.router)
-    app.include_router(model_features_routes.router)
-    app.include_router(model_check_routes.router)
+        app.include_router(subagent_routes.router)
+
+    if not config['router_child_proxied_only']:
+        app.include_router(rewrite_routes.router)
+        app.include_router(memory_review_routes.router)
+        app.include_router(skill_review_routes.router)
+        app.include_router(model_features_routes.router)
+        app.include_router(model_check_routes.router)
     return app
 
 

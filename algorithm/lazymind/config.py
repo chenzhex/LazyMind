@@ -57,6 +57,13 @@ config.add('video_frame_interval', int, 20, 'VIDEO_FRAME_INTERVAL',
 config.add('audio_segment_interval', int, 15, 'AUDIO_SEGMENT_INTERVAL',
            description='Audio transcript segment merge interval in seconds.')
 config.add('default_chat_dataset', str, 'algo', 'DEFAULT_CHAT_DATASET', description='Default chat dataset.')
+config.add(
+    'plugins_dir',
+    str,
+    str(Path(__file__).resolve().parent.parent.parent / 'plugins'),
+    'PLUGINS_DIR',
+    description='Directory containing plugin packages. Each sub-directory is one plugin.',
+)
 config.add('model_config_path', str, 'dynamic', 'MODEL_CONFIG_PATH',
            description='Runtime model config YAML path. Shorthand aliases are auto-resolved to absolute paths.',
            alias={
@@ -66,6 +73,15 @@ config.add('model_config_path', str, 'dynamic', 'MODEL_CONFIG_PATH',
            },
            post_action=_model_config_path_post_action)
 config.add('algo_id', str, 'general_algo', 'ALGO_ID', description='LazyMind algorithm ID.')
+# Global router toggle. Registered here (not in router/config.py) so that both the chat
+# entrypoint and the router entrypoint can read it without cross-importing router config.
+config.add('enable_router', bool, False, 'ENABLE_ROUTER',
+           description='Enable router mode. When false, app.py falls back to the original chat service.')
+# Marks a process as a router-spawned child that only serves proxied request types
+# (chat / subagent). Set automatically by ProcessManager when spawning children.
+config.add('router_child_proxied_only', bool, False, 'ROUTER_CHILD_PROXIED_ONLY',
+           description='When true, skip stateless shared endpoints (rewrite/review/model_*) that the '
+                       'main router process serves directly. Set on router-spawned child processes.')
 
 # ---------------------------------------------------------------------------
 # Tracing / observability

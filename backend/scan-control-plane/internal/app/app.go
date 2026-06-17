@@ -21,6 +21,7 @@ import (
 	"github.com/lazymind/scan_control_plane/internal/sourceengine/connector"
 	"github.com/lazymind/scan_control_plane/internal/sourceengine/connector/feishu"
 	"github.com/lazymind/scan_control_plane/internal/sourceengine/connector/localfs"
+	"github.com/lazymind/scan_control_plane/internal/sourceengine/connector/notion"
 	"github.com/lazymind/scan_control_plane/internal/sourceengine/crawl"
 	"github.com/lazymind/scan_control_plane/internal/sourceengine/schedule"
 	sourceengine "github.com/lazymind/scan_control_plane/internal/sourceengine/source"
@@ -385,13 +386,17 @@ func connectorForType(connectorType connector.ConnectorType, agent localfs.Agent
 		conn := feishu.NewFeishuConnector(auth, feishuClient)
 		conn.UseTempObjectStore(temp)
 		return conn, nil
+	case notion.ConnectorType:
+		conn := notion.NewNotionConnector(auth, nil)
+		conn.UseTempObjectStore(temp)
+		return conn, nil
 	default:
 		return nil, fmt.Errorf("unsupported connector type %q", connectorType)
 	}
 }
 
 func enabledConnectorTypes() []connector.ConnectorType {
-	return []connector.ConnectorType{localfs.ConnectorType, feishu.ConnectorType}
+	return []connector.ConnectorType{localfs.ConnectorType, feishu.ConnectorType, notion.ConnectorType}
 }
 
 func buildCoreClients(cfg config.Config) (coreclient.ResourceClient, coreclient.Client, error) {

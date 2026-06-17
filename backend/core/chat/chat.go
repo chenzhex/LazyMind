@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,10 +22,22 @@ const (
 	chatPath       = "/api/chat"
 	streamChatPath = "/api/chat/stream"
 
-	defaultDialTimeout  = 10 * time.Second
-	defaultTotalTimeout = 10 * time.Minute
+	defaultDialTimeout = 10 * time.Second
+	// defaultTotalTimeout bounds the whole upstream stream. auto-mode SubAgents block the
+	// main SSE (with heartbeats) for long periods, so this must comfortably exceed the
+	// longest expected SubAgent runtime. Override via LAZYMIND_CHAT_UPSTREAM_TIMEOUT_SEC.
+	defaultTotalTimeout = 2 * time.Hour
 	defaultTTFB         = 3 * time.Minute
 )
+
+func upstreamTotalTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("LAZYMIND_CHAT_UPSTREAM_TIMEOUT_SEC")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return defaultTotalTimeout
+}
 
 type ChatMessage struct {
 	Role    string `json:"role"`
@@ -55,16 +69,37 @@ type LazyChatRequest struct {
 	EnvironmentContext map[string]any  `json:"environment_context,omitempty"`
 	LLMConfig          map[string]any  `json:"llm_config,omitempty"`
 	ToolConfig         map[string]any  `json:"tool_config,omitempty"`
+	Mode               string          `json:"mode,omitempty"`
+	HasSubagents       bool            `json:"has_subagents"`
+	ConversationID     string          `json:"conversation_id,omitempty"`
 	MCPConfig          []any           `json:"mcp_config,omitempty"`
+	PluginContext      map[string]any  `json:"plugin_context,omitempty"`
 }
 
 // LazyChatData text data text。
 type LazyChatData struct {
-	Text          string `json:"text"`
-	Sources       []any  `json:"sources"`
-	Status        string `json:"status"`
-	ReasoningText string `json:"think"`
-	ToolCallTurns int64  `json:"tool_call_turns"`
+	Text          string            `json:"text"`
+	Sources       []any             `json:"sources"`
+	Status        string            `json:"status"`
+	ReasoningText string            `json:"think"`
+	TaskCreated   *TaskCreatedEvent `json:"task_created,omitempty"`
+	Heartbeat     bool              `json:"heartbeat,omitempty"`
+	ToolCallTurns int64             `json:"tool_call_turns"`
+}
+
+// TaskCreatedEvent is emitted by create_subagent (via translator) on the main SSE.
+// seq_in_conversation is NOT included; Go allocates it when creating the record.
+type TaskCreatedEvent struct {
+	TaskID             string         `json:"task_id"`
+	Title              string         `json:"title"`
+	AgentType          string         `json:"agent_type"`
+	Mode               string         `json:"mode"`
+	Objective          string         `json:"objective"`
+	Params             map[string]any `json:"params,omitempty"`
+	InputArtifactKeys  []string       `json:"input_artifact_keys"`
+	OutputArtifactKeys []string       `json:"output_artifact_keys"`
+	Tools              []string       `json:"tools,omitempty"`
+	Resume             bool           `json:"resume,omitempty"`
 }
 
 // LazyChatResponse text /api/chat textResponse。
@@ -95,7 +130,7 @@ func NewChatServiceWithEndpoint(endpoint string) *ChatService {
 		panic("invalid chat endpoint")
 	}
 	dialTimeout := defaultDialTimeout
-	totalTimeout := defaultTotalTimeout
+	totalTimeout := upstreamTotalTimeout()
 	ttfb := defaultTTFB
 
 	client := &http.Client{
@@ -216,12 +251,14 @@ func lazyStreamHandler(ctx context.Context, resp *http.Response) <-chan *LazyStr
 
 // UpstreamStreamChunk text ChatConversations text，text LazyChatResponse.Data。
 type UpstreamStreamChunk struct {
-	Text          string `json:"text"`
-	Think         string `json:"think"`
-	Status        string `json:"status"`
-	Sources       []any  `json:"sources"`
-	ReasoningText string `json:"reasoning_text"` // text think
-	ToolCallTurns int64  `json:"tool_call_turns"`
+	Text          string            `json:"text"`
+	Think         string            `json:"think"`
+	Status        string            `json:"status"`
+	Sources       []any             `json:"sources"`
+	ReasoningText string            `json:"reasoning_text"` // text think
+	TaskCreated   *TaskCreatedEvent `json:"task_created,omitempty"`
+	Heartbeat     bool              `json:"heartbeat,omitempty"`
+	ToolCallTurns int64             `json:"tool_call_turns"`
 }
 
 type upstreamStreamLine struct {
@@ -269,6 +306,15 @@ func buildLazyChatRequest(body map[string]any) *LazyChatRequest {
 	if userID, ok := body["user_id"].(string); ok {
 		req.UserID = strings.TrimSpace(userID)
 	}
+	if mode, ok := body["mode"].(string); ok {
+		req.Mode = strings.TrimSpace(mode)
+	}
+	if hasSubagents, ok := body["has_subagents"].(bool); ok {
+		req.HasSubagents = hasSubagents
+	}
+	if convID, ok := body["conversation_id"].(string); ok {
+		req.ConversationID = strings.TrimSpace(convID)
+	}
 	if llmConfig, ok := body["llm_config"].(map[string]any); ok {
 		req.LLMConfig = llmConfig
 	}
@@ -310,6 +356,9 @@ func buildLazyChatRequest(body map[string]any) *LazyChatRequest {
 		for _, item := range mcpConfigAny {
 			req.MCPConfig = append(req.MCPConfig, item)
 		}
+	}
+	if pluginContext, ok := body["plugin_context"].(map[string]any); ok && len(pluginContext) > 0 {
+		req.PluginContext = pluginContext
 	}
 	return req
 }
@@ -386,11 +435,64 @@ func stringSlice(v any) []string {
 }
 
 func debugJSON(v any) string {
-	b, err := json.Marshal(v)
+	safe := redactForLog(v)
+	b, err := json.Marshal(safe)
 	if err != nil {
-		return fmt.Sprintf("%+v", v)
+		return fmt.Sprintf("<%T>", v)
 	}
 	return string(b)
+}
+
+func redactForLog(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("<%T>", v)
+	}
+	var decoded any
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		return fmt.Sprintf("<%T>", v)
+	}
+	return redactDecodedForLog(decoded)
+}
+
+func redactDecodedForLog(v any) any {
+	switch value := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(value))
+		for k, item := range value {
+			if strings.EqualFold(k, "tool_config") {
+				out[k] = summarizeSecretMapForLog(item)
+				continue
+			}
+			out[k] = redactDecodedForLog(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(value))
+		for i, item := range value {
+			out[i] = redactDecodedForLog(item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func summarizeSecretMapForLog(v any) map[string]string {
+	result := map[string]string{}
+	if values, ok := v.(map[string]any); ok {
+		for k, item := range values {
+			if secret, ok := item.(string); ok {
+				result[k] = fmt.Sprintf("<redacted len=%d>", len(strings.TrimSpace(secret)))
+			} else {
+				result[k] = "<redacted>"
+			}
+		}
+	}
+	if len(result) == 0 {
+		result["_"] = "<redacted>"
+	}
+	return result
 }
 
 // StreamChatUpstream text：text ChatConversations text，text ChatService.StreamChat text。
@@ -424,6 +526,8 @@ func StreamChatUpstream(ctx context.Context, baseURL string, body map[string]any
 				Status:        d.Resp.Data.Status,
 				Sources:       d.Resp.Data.Sources,
 				ReasoningText: d.Resp.Data.ReasoningText,
+				TaskCreated:   d.Resp.Data.TaskCreated,
+				Heartbeat:     d.Resp.Data.Heartbeat,
 				ToolCallTurns: d.Resp.Data.ToolCallTurns,
 			}
 			select {
