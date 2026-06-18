@@ -1078,6 +1078,82 @@ func TestSourceTreeListChildrenUsesIndexedRepoWhenUseCache(t *testing.T) {
 	}
 }
 
+func TestSourceTreeListChildrenFiltersUnsupportedDocuments(t *testing.T) {
+	t.Parallel()
+
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{{
+		BindingID:         "binding-1",
+		SourceID:          "source-1",
+		TreeKey:           "tree-root",
+		IncludeExtensions: store.JSON{"items": []any{"pdf"}},
+		Status:            "ACTIVE",
+	}}
+	pdf := indexedObject("source-1", "binding-1", "tree-root", "pdf-1", "", "Guide.pdf", true, false)
+	pdf.Object.FileExtension = ".pdf"
+	script := indexedObject("source-1", "binding-1", "tree-root", "script-1", "", "script.py", true, false)
+	script.Object.FileExtension = ".py"
+	repo.objects = []ObjectWithState{
+		indexedObject("source-1", "binding-1", "tree-root", "folder-1", "", "Folder", false, true),
+		pdf,
+		script,
+	}
+	engine := NewDBSourceTreeQueryEngine(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10, MaxAllCurrentLevelItems: 10})
+
+	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
+		SourceID:  "source-1",
+		BindingID: "binding-1",
+		TreeKey:   "tree-root",
+		ParentKey: "",
+		PageSize:  10,
+	})
+	if err != nil {
+		t.Fatalf("list indexed children: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("expected folder and supported pdf only, got %+v", page.Items)
+	}
+	for _, item := range page.Items {
+		if item.ObjectKey == "script-1" {
+			t.Fatalf("unsupported file should not be returned: %+v", page.Items)
+		}
+	}
+}
+
+func TestSourceTreeListChildrenUsesSourceIncludeExtensions(t *testing.T) {
+	t.Parallel()
+
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1", IncludeExtensions: store.JSON{"items": []any{"pdf"}}}
+	repo.bindings["source-1"] = []store.Binding{{
+		BindingID: "binding-1",
+		SourceID:  "source-1",
+		TreeKey:   "tree-root",
+		Status:    "ACTIVE",
+	}}
+	pdf := indexedObject("source-1", "binding-1", "tree-root", "pdf-1", "", "Guide.pdf", true, false)
+	pdf.Object.FileExtension = ".pdf"
+	script := indexedObject("source-1", "binding-1", "tree-root", "script-1", "", "script.py", true, false)
+	script.Object.FileExtension = ".py"
+	repo.objects = []ObjectWithState{pdf, script}
+	engine := NewDBSourceTreeQueryEngine(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10, MaxAllCurrentLevelItems: 10})
+
+	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
+		SourceID:  "source-1",
+		BindingID: "binding-1",
+		TreeKey:   "tree-root",
+		ParentKey: "",
+		PageSize:  10,
+	})
+	if err != nil {
+		t.Fatalf("list indexed children: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ObjectKey != "pdf-1" {
+		t.Fatalf("expected only source-supported pdf, got %+v", page.Items)
+	}
+}
+
 func TestSourceTreeBindingRootRequestReturnsAllBindingRootsForMultiBindingSource(t *testing.T) {
 	t.Parallel()
 
@@ -1483,6 +1559,36 @@ func TestSourceDocumentQueryReadsIndexedDocumentsOnly(t *testing.T) {
 	}
 	if resp.Summary["storage_bytes"] != int64(42) {
 		t.Fatalf("document summary storage_bytes was not mapped: %+v", resp.Summary)
+	}
+}
+
+func TestSourceDocumentQueryFiltersUnsupportedDocuments(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 31, 16, 0, 0, 0, time.UTC)
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{{
+		BindingID:         "binding-1",
+		SourceID:          "source-1",
+		IncludeExtensions: store.JSON{"items": []any{"pdf"}},
+	}}
+	pdf := indexedObject("source-1", "binding-1", "tree-root", "pdf-1", "", "Guide.pdf", true, false).Object
+	pdf.FileExtension = ".pdf"
+	script := indexedObject("source-1", "binding-1", "tree-root", "script-1", "", "script.py", true, false).Object
+	script.FileExtension = ".py"
+	repo.documents = []DocumentWithState{
+		{Object: pdf, State: store.DocumentState{SourceID: "source-1", BindingID: "binding-1", ObjectKey: "pdf-1", SourceState: "NEW", SyncState: "IDLE", Selectable: true, SourceVersion: "v1", CreatedAt: now, UpdatedAt: now}},
+		{Object: script, State: store.DocumentState{SourceID: "source-1", BindingID: "binding-1", ObjectKey: "script-1", SourceState: "NEW", SyncState: "IDLE", Selectable: true, SourceVersion: "v1", CreatedAt: now, UpdatedAt: now}},
+	}
+	query := NewDBSourceDocumentQuery(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10})
+
+	resp, err := query.ListDocuments(context.Background(), SourceDocumentListRequest{SourceID: "source-1", BindingID: "binding-1"})
+	if err != nil {
+		t.Fatalf("list documents: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ObjectKey != "pdf-1" {
+		t.Fatalf("expected only supported pdf document, got %+v", resp.Items)
 	}
 }
 

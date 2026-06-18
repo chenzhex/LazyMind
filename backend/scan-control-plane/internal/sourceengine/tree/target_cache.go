@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lazymind/scan_control_plane/internal/sourceengine/connector"
+	"github.com/lazymind/scan_control_plane/internal/sourceengine/filefilter"
 )
 
 const (
@@ -309,7 +310,7 @@ func stableProviderOptions(options map[string]any) string {
 	return string(data)
 }
 
-func paginateCachedTargetNodes(nodes []TreeNode, keyword string, includeFiles bool, pageSize int, cursor string) (TreeNodePage, error) {
+func paginateCachedTargetNodes(nodes []TreeNode, keyword string, includeFiles bool, policy filefilter.Policy, pageSize int, cursor string) (TreeNodePage, error) {
 	offset, err := cursorOffset(cursor)
 	if err != nil {
 		return TreeNodePage{}, err
@@ -318,6 +319,9 @@ func paginateCachedTargetNodes(nodes []TreeNode, keyword string, includeFiles bo
 	seen := 0
 	for _, node := range nodes {
 		if !includeFiles && !node.IsContainer {
+			continue
+		}
+		if !targetAllowsTreeNode(policy, node) {
 			continue
 		}
 		if !treeNodeSearchMatches(node, keyword) {

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/lazymind/scan_control_plane/internal/sourceengine/connector"
+	"github.com/lazymind/scan_control_plane/internal/sourceengine/filefilter"
 )
 
 func (e *DefaultTargetTreeEngine) Search(ctx context.Context, req TargetTreeSearchRequest) (TreeNodePage, error) {
@@ -113,7 +114,7 @@ func (e *DefaultTargetTreeEngine) searchLocalFSRootCaches(ctx context.Context, c
 			appendUniqueTargetNode(&nodes, seen, node)
 		}
 	}
-	page, err := paginateCachedTargetNodes(nodes, req.Keyword, req.IncludeFiles, pageSize, req.Cursor)
+	page, err := paginateCachedTargetNodes(nodes, req.Keyword, req.IncludeFiles, filefilter.FromProviderOptions(req.ProviderOptions), pageSize, req.Cursor)
 	if err != nil {
 		return TreeNodePage{}, err
 	}
@@ -179,10 +180,14 @@ func appendUniqueTargetNode(nodes *[]TreeNode, seen map[string]struct{}, node Tr
 
 func (e *DefaultTargetTreeEngine) mapTargetSearchPage(ctx context.Context, conn connector.SourceConnector, req TargetTreeSearchRequest, rawPage connector.RawObjectPage) (TreeNodePage, error) {
 	nodes := make([]TreeNode, 0, len(rawPage.Items))
+	policy := filefilter.FromProviderOptions(req.ProviderOptions)
 	for _, raw := range rawPage.Items {
 		normalized, err := conn.MapObject(ctx, raw)
 		if err != nil {
 			return TreeNodePage{}, mapConnectorError(err)
+		}
+		if !targetAllowsNormalized(policy, normalized) {
+			continue
 		}
 		if !req.IncludeFiles && !isTargetDirectoryNode(raw, normalized) {
 			continue

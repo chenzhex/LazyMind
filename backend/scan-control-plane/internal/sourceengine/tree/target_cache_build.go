@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lazymind/scan_control_plane/internal/sourceengine/connector"
+	"github.com/lazymind/scan_control_plane/internal/sourceengine/filefilter"
 )
 
 const (
@@ -28,7 +29,7 @@ func (e *DefaultTargetTreeEngine) searchCachedTargets(ctx context.Context, conn 
 	if err := ctx.Err(); err != nil {
 		return TreeNodePage{}, err
 	}
-	page, err := paginateCachedTargetNodes(snapshot.nodes, req.Keyword, req.IncludeFiles, pageSize, req.Cursor)
+	page, err := paginateCachedTargetNodes(snapshot.nodes, req.Keyword, req.IncludeFiles, filefilter.FromProviderOptions(req.ProviderOptions), pageSize, req.Cursor)
 	if err != nil {
 		return TreeNodePage{}, err
 	}
@@ -46,7 +47,7 @@ func (e *DefaultTargetTreeEngine) buildAndSearchCachedTargets(ctx context.Contex
 	if snapshot.status == targetSearchCacheStatusFailed && strings.TrimSpace(snapshot.lastError) != "" {
 		return TreeNodePage{}, NewError(ErrCodeInternal, "target search cache build failed: "+snapshot.lastError)
 	}
-	page, err := paginateCachedTargetNodes(snapshot.nodes, req.Keyword, req.IncludeFiles, pageSize, req.Cursor)
+	page, err := paginateCachedTargetNodes(snapshot.nodes, req.Keyword, req.IncludeFiles, filefilter.FromProviderOptions(req.ProviderOptions), pageSize, req.Cursor)
 	if err != nil {
 		return TreeNodePage{}, err
 	}
@@ -100,6 +101,7 @@ func (e *DefaultTargetTreeEngine) buildTargetSearchCache(ctx context.Context, co
 	seenScopes := map[string]struct{}{}
 	seenNodes := map[string]struct{}{}
 	nodes := make([]TreeNode, 0)
+	policy := filefilter.FromProviderOptions(req.ProviderOptions)
 	truncated := false
 	pageSize := e.limitForConnector(conn.Spec()).MaxPageSize
 	listCalls := 0
@@ -150,6 +152,9 @@ func (e *DefaultTargetTreeEngine) buildTargetSearchCache(ctx context.Context, co
 					return nodes, truncated, mapConnectorError(err)
 				}
 				node := targetNode(req.ConnectorType, raw, normalized)
+				if !targetAllowsTreeNode(policy, node) {
+					continue
+				}
 				if _, ok := seenNodes[node.ObjectKey]; ok {
 					continue
 				}
