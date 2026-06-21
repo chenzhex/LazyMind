@@ -803,6 +803,10 @@ const enUS = {
     selectAll: "Select All",
     cancelSelectAll: "Deselect All",
     loadingWait: "Loading, please wait...",
+    // PreferenceConfigNotice
+    preferenceNotConfigured: "User profile is not configured. Default style will be used in conversations.",
+    goToConfigure: "Configure",
+    dontShowAgain: "Don't show again",
     noData: "No data",
     docSettings: "Document Settings",
     enabled: "Enabled",
@@ -1985,9 +1989,9 @@ const enUS = {
       "Describe the assistant identity, responsibilities, and boundaries.",
     memoryProfileAgentPersonaPlaceholder:
       "For example: professional, careful, and proactive in clarifying context",
-    memoryProfileUserAddress: "User Address",
-    memoryProfileUserAddressDesc: "Set how replies should address the user.",
-    memoryProfileUserAddressPlaceholder:
+    memoryProfilePreferredName: "User Address",
+    memoryProfilePreferredNameDesc: "Set how replies should address the user.",
+    memoryProfilePreferredNamePlaceholder:
       "For example: address the user formally, or use a specified nickname",
     memoryProfileResponseStyle: "Response Style",
     memoryProfileResponseStyleDesc:
@@ -2161,6 +2165,8 @@ const enUS = {
     memoryDiffKeepOriginal: "Keep Original and Close",
     memoryDiffStepChooseTitle: "Select Suggestions",
     memoryDiffStepPreviewTitle: "Preview Result",
+    memoryDiffPreferenceYamlSection: "YAML Configuration Changes",
+    memoryDiffPreferenceBodySection: "Body Content Changes",
     memoryDiffStepChooseHint:
       "The current content is on the left and the suggestions are on the right. Select the suggestions to apply, then preview the result.",
     memoryDiffStepPreviewHint:
