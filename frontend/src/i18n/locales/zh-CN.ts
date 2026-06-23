@@ -1668,6 +1668,8 @@ const zhCN = {
     dataSourceParseReindexing: "解析中",
     dataSourceParseDuplicate: "重复文档",
     dataSourceParseDeleted: "待删除",
+    dataSourceParseDownloadFailed: "下载失败",
+    dataSourceParseParseFailed: "解析失败",
     dataSourceParseFailed: "同步失败",
     dataSourceFileUpdateNewDetail: "新文件待入库",
     dataSourceFileUpdateChangedDetailTitle: "内容变更",

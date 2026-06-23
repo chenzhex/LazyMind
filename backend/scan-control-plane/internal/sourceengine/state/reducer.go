@@ -387,6 +387,9 @@ func (r *DBStateReducer) ApplyTaskFailure(ctx context.Context, input TaskFailure
 		}
 		current.ParseQueueState = ParseQueueStateFailed
 		current.LastError = store.JSON{"code": input.ErrorCode, "message": input.Message}
+		if input.Phase != "" {
+			current.LastError["phase"] = input.Phase
+		}
 		current.UpdatedAt = now
 		if err := r.store.SaveDocumentState(ctx, current); err != nil {
 			return err

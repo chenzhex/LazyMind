@@ -269,6 +269,20 @@ function getParseStatusMeta(status: DocumentStatusRow["parseStatus"], t: TFuncti
       icon: <DeleteOutlined />,
     };
   }
+  if (status === "download_failed") {
+    return {
+      color: "#f04438",
+      text: t("admin.dataSourceParseDownloadFailed"),
+      icon: <ExclamationCircleFilled />,
+    };
+  }
+  if (status === "parse_failed") {
+    return {
+      color: "#f04438",
+      text: t("admin.dataSourceParseParseFailed"),
+      icon: <ExclamationCircleFilled />,
+    };
+  }
   return {
     color: "#f04438",
     text: t("admin.dataSourceParseFailed"),
@@ -359,7 +373,7 @@ function mapScanDocumentToDetail(item: ScanV2Document, t: TFunction): DocumentSt
     tags: item.tags || [],
     updateState,
     syncDetail: item.update_desc || mapScanSyncDetail(updateState, t),
-    parseStatus: normalizeDataSourceParseStatus(parseState),
+    parseStatus: normalizeDataSourceParseStatus(parseState, item.last_error),
     sourceUpdatedAt: lastSyncedAt || "-",
     updatedAt: lastSyncedAt || "-",
     sourceState,
@@ -1437,7 +1451,7 @@ export default function DataSourceDetail() {
                     ? "warning"
                     : "error"
             }
-            title={record.syncDetail}
+            title={record.lastError || record.syncDetail}
           >
             {meta.text}
           </Tag>

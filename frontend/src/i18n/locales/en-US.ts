@@ -1746,6 +1746,8 @@ const enUS = {
     dataSourceParseReindexing: "Reindexing",
     dataSourceParseDuplicate: "Duplicate",
     dataSourceParseDeleted: "Pending deletion",
+    dataSourceParseDownloadFailed: "Download failed",
+    dataSourceParseParseFailed: "Parse failed",
     dataSourceParseFailed: "Sync failed",
     dataSourceFileUpdateNewDetail: "New file waiting for ingestion",
     dataSourceFileUpdateChangedDetailTitle: "Content changed",

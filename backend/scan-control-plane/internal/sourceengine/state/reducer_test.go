@@ -265,12 +265,13 @@ func TestApplyTaskFailureMarksDocumentFailed(t *testing.T) {
 		},
 		ErrorCode: "PARSE_FAILED",
 		Message:   "bad file",
+		Phase:     "parse",
 		FailedAt:  now,
 	})
 	if err != nil {
 		t.Fatalf("apply task failure: %v", err)
 	}
-	if got := repo.states["doc"]; got.ParseQueueState != ParseQueueStateFailed || got.LastError["code"] != "PARSE_FAILED" {
+	if got := repo.states["doc"]; got.ParseQueueState != ParseQueueStateFailed || got.LastError["code"] != "PARSE_FAILED" || got.LastError["phase"] != "parse" {
 		t.Fatalf("document state did not record failure: %+v", got)
 	}
 	if got := repo.documents["doc"]; got.ParseStatus != "FAILED" {

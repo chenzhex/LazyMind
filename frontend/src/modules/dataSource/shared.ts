@@ -17,6 +17,8 @@ export type DetailParseStatus =
   | "reindexing"
   | "duplicate"
   | "deleted"
+  | "download_failed"
+  | "parse_failed"
   | "failed";
 export type DataSourceKind = "local" | "feishu" | "notion";
 export type DataSourceFileType =
@@ -531,7 +533,95 @@ export function normalizeDataSourceFileUpdateState(
   return hasUpdate ? "changed" : "unchanged";
 }
 
-export function normalizeDataSourceParseStatus(parseState?: string): DetailParseStatus {
+function statusField(value: unknown, key: string) {
+  if (typeof value !== "object" || value === null) {
+    return "";
+  }
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" ? field : "";
+}
+
+function dataSourceFailureText(parseState?: string, lastError?: unknown) {
+  if (!lastError) {
+    return parseState || "";
+  }
+  if (typeof lastError === "string") {
+    return [parseState, lastError].filter(Boolean).join(" ");
+  }
+  if (typeof lastError !== "object") {
+    return [parseState, `${lastError}`].filter(Boolean).join(" ");
+  }
+  return [
+    parseState,
+    statusField(lastError, "phase"),
+    statusField(lastError, "stage"),
+    statusField(lastError, "code"),
+    statusField(lastError, "reason"),
+    statusField(lastError, "message"),
+    statusField(lastError, "error"),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function normalizeDataSourceFailureStatus(
+  parseState?: string,
+  lastError?: unknown,
+): DetailParseStatus | undefined {
+  const phase = statusField(lastError, "phase");
+  if (hasStatusToken(phase, ["download", "export", "fetch", "source"])) {
+    return "download_failed";
+  }
+  if (hasStatusToken(phase, ["parse", "index", "ingest", "core", "knowledge"])) {
+    return "parse_failed";
+  }
+
+  const code = statusField(lastError, "code") || statusField(lastError, "reason");
+  const text = dataSourceFailureText(parseState, lastError);
+  if (
+    hasStatusText(text, [
+      "download_failed",
+      "download failed",
+      "export_failed",
+      "export failed",
+      "fetch_failed",
+      "fetch failed",
+      "transient_source_error",
+      "unsupported_export",
+      "auth_connection_invalid",
+      "permission_denied",
+    ]) ||
+    hasStatusToken(text, ["download", "export"])
+  ) {
+    return "download_failed";
+  }
+  if (
+    hasStatusText(text, [
+      "parse_failed",
+      "parse failed",
+      "core_task_failed",
+      "core_submit_failed",
+      "core_task_not_found",
+      "index_failed",
+      "index failed",
+      "ingest_failed",
+      "ingest failed",
+    ]) ||
+    hasStatusToken(code, ["parse", "core", "index", "ingest"])
+  ) {
+    return "parse_failed";
+  }
+  return undefined;
+}
+
+export function normalizeDataSourceParseStatus(
+  parseState?: string,
+  lastError?: unknown,
+): DetailParseStatus {
+  const failureStatus = normalizeDataSourceFailureStatus(parseState, lastError);
+  if (failureStatus) {
+    return failureStatus;
+  }
   if (
     hasStatusText(parseState, [
       "not_parsed",

@@ -278,12 +278,12 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/inner/word_group:apply", nil, wordgroup.ApplyWordGroupAction)
 
 	// ----- Model provider -----
-	handleAPI(r, "GET", "/model_providers/features", nil, modelprovider.GetModelFeatures)
+	handleAPI(r, "GET", "/model_providers/features", []string{"model.read"}, modelprovider.GetModelFeatures)
 	handleAPI(r, "GET", "/model_providers", []string{"model.read"}, modelprovider.ListUserProviders)
 	handleAPI(r, "GET", "/model_providers:with_groups", []string{"model.read"}, modelprovider.ListUserProvidersWithGroups)
 	handleAPI(r, "POST", "/model_providers/{model_provider_id}/groups/{group_id}:check", []string{"model.write"}, modelprovider.CheckGroup)
 	handleAPI(r, "GET", "/model_providers/models", []string{"model.read"}, modelprovider.ListUserModelsByModelType)
-	handleAPI(r, "GET", "/model_providers/models/ready", nil, modelprovider.GetModelReady)
+	handleAPI(r, "GET", "/model_providers/models/ready", []string{"model.read"}, modelprovider.GetModelReady)
 	handleAPI(r, "GET", "/model_providers/selected_models", []string{"model.read"}, modelprovider.GetSelectedModels)
 	handleAPI(r, "PUT", "/model_providers/selected_models", []string{"model.write"}, modelprovider.SetSelectedModels)
 	handleAPI(r, "PUT", "/model_providers/selected_models/share", []string{"model.write"}, modelprovider.SetSharedModel)

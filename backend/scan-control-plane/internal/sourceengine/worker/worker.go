@@ -118,10 +118,10 @@ func (w *DefaultParseWorker) runClaimed(ctx context.Context, task store.ParseTas
 	if task.CoreTaskID != "" || task.CoreDocumentID != "" || task.Status == TaskStatusSubmitted {
 		response, err := w.recoverCoreTask(ctx, task, exec.source)
 		if err != nil {
-			return w.handleFailure(ctx, task, err)
+			return w.handleFailureWithPhase(ctx, task, err, "parse")
 		}
 		if response.Status == coreclient.ResultStatusNotFound {
-			return w.handleFailure(ctx, task, fmt.Errorf("CORE_TASK_NOT_FOUND"))
+			return w.handleFailureWithPhase(ctx, task, fmt.Errorf("CORE_TASK_NOT_FOUND"), "parse")
 		}
 		return w.finalize(ctx, task, response)
 	}
@@ -136,7 +136,7 @@ func (w *DefaultParseWorker) runClaimed(ctx context.Context, task store.ParseTas
 			Action:           task.TaskAction,
 		})
 		if err != nil {
-			return w.handleFailure(ctx, task, err)
+			return w.handleFailureWithPhase(ctx, task, err, "parse")
 		}
 		return w.finalize(ctx, task, response)
 	}
@@ -148,7 +148,7 @@ func (w *DefaultParseWorker) runClaimed(ctx context.Context, task store.ParseTas
 		if isSupersedeError(err) {
 			return w.supersede(ctx, task, err.Error())
 		}
-		return w.handleFailure(ctx, task, err)
+		return w.handleFailureWithPhase(ctx, task, err, "download")
 	}
 	if exported.CleanupToken != "" {
 		defer func() {
@@ -160,7 +160,7 @@ func (w *DefaultParseWorker) runClaimed(ctx context.Context, task store.ParseTas
 	}
 	response, err := w.submitToCore(ctx, exec, exported)
 	if err != nil {
-		return w.handleFailure(ctx, task, err)
+		return w.handleFailureWithPhase(ctx, task, err, "parse")
 	}
 	return w.finalize(ctx, task, response)
 }
@@ -338,6 +338,7 @@ func (w *DefaultParseWorker) finalize(ctx context.Context, task store.ParseTask,
 			Task:      task,
 			ErrorCode: reason,
 			Message:   reason,
+			Phase:     "parse",
 			FailedAt:  now,
 		})
 	}
@@ -362,6 +363,10 @@ func (w *DefaultParseWorker) supersede(ctx context.Context, task store.ParseTask
 }
 
 func (w *DefaultParseWorker) handleFailure(ctx context.Context, task store.ParseTask, err error) error {
+	return w.handleFailureWithPhase(ctx, task, err, "")
+}
+
+func (w *DefaultParseWorker) handleFailureWithPhase(ctx context.Context, task store.ParseTask, err error, phase string) error {
 	reason := errorCode(err)
 	now := w.clock().UTC()
 	failed, deadLettered, storeErr := w.store.RetryOrDeadLetterTask(ctx, task.TaskID, reason, now, w.deadLetterAfter, w.backoff(task.RetryCount+1))
@@ -375,6 +380,7 @@ func (w *DefaultParseWorker) handleFailure(ctx context.Context, task store.Parse
 		Task:      failed,
 		ErrorCode: reason,
 		Message:   err.Error(),
+		Phase:     phase,
 		FailedAt:  now,
 	})
 }

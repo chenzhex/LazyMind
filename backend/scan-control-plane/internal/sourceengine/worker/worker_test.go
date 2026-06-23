@@ -173,7 +173,7 @@ func TestWorkerUsesCoreClientIdempotencyAndSupersede(t *testing.T) {
 		if state.BaselineVersion != "" || state.ParseQueueState != statepkg.ParseQueueStateFailed {
 			t.Fatalf("failed core task should not advance baseline and should mark state failed: %+v", state)
 		}
-		if state.LastError["code"] != "CORE_TASK_FAILED" {
+		if state.LastError["code"] != "CORE_TASK_FAILED" || state.LastError["phase"] != "parse" {
 			t.Fatalf("state should record core failure: %+v", state.LastError)
 		}
 		document := repo.documents[workerIdempotencyKey("source-1", "binding-1", "doc-canceled")]
@@ -362,6 +362,9 @@ func TestWorkerRetriesTransientFailureThenDeadLetters(t *testing.T) {
 	state := repo.states[workerIdempotencyKey("source-1", "binding-1", "doc-transient")]
 	if state.ParseQueueState != statepkg.ParseQueueStateFailed {
 		t.Fatalf("dead-lettered task should record state failure: %+v", state)
+	}
+	if state.LastError["phase"] != "download" {
+		t.Fatalf("download failure should record phase: %+v", state.LastError)
 	}
 }
 

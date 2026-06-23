@@ -192,6 +192,7 @@ func (r *CoreResultReconciler) fail(ctx context.Context, task store.ParseTask, r
 		Task:      task,
 		ErrorCode: code,
 		Message:   result.ErrorMessage,
+		Phase:     "parse",
 		FailedAt:  now,
 	})
 }
