@@ -539,8 +539,6 @@ services:
     volumes:
       - ./data/core/uploads:/var/lib/lazymind/uploads
       - ./data/traces:/var/lib/lazymind/traces
-      - *lazyllm-src-mount
-      - *algorithm-src-mount
       - sqlite-data:/data/sqlite
     environment:
       LAZYMIND_DOCUMENT_PROCESSOR_PORT: "8000"
@@ -578,8 +576,6 @@ services:
     volumes:
       - ./data/core/uploads:/var/lib/lazymind/uploads
       - ./data/traces:/var/lib/lazymind/traces
-      - *lazyllm-src-mount
-      - *algorithm-src-mount
       - sqlite-data:/data/sqlite
     environment:
       LAZYMIND_DOCUMENT_WORKER_PORT: "8001"
@@ -626,8 +622,6 @@ services:
     volumes:
       - ./data/core/uploads:/var/lib/lazymind/uploads
       - ./data/traces:/var/lib/lazymind/traces
-      - *lazyllm-src-mount
-      - *algorithm-src-mount
       - sqlite-data:/data/sqlite
     healthcheck:
       test: ['CMD-SHELL', 'python -m lazymind.parsing.service.healthcheck']
@@ -746,11 +740,6 @@ services:
       LAZYMIND_EVO_BASE_DIR: /var/lib/lazymind/evo
       LAZYMIND_EVO_CHAT_SOURCE: /app/algorithm/lazymind/chat
       LAZYMIND_EVO_CODE_BINARY: /usr/local/bin/opencode
-      LAZYMIND_EVO_CODE_PROVIDER: ${LAZYMIND_EVO_CODE_PROVIDER:-qwen}
-      LAZYMIND_EVO_CODE_MODEL: ${LAZYMIND_EVO_CODE_MODEL:-qwen3-max}
-      LAZYMIND_EVO_CODE_API_KEY: ${LAZYMIND_EVO_CODE_API_KEY:-}
-      LAZYMIND_EVO_CODE_BASE_URL: ${LAZYMIND_EVO_CODE_BASE_URL:-}
-      LAZYMIND_EVO_CODE_LABEL: ${LAZYMIND_EVO_CODE_LABEL:-qwen}
       LAZYMIND_EVO_CODE_TIMEOUT_S: "900"
       LAZYMIND_EVO_LLM_ROLE: evo_llm
       LAZYMIND_EVO_KB_BASE_URL: http://doc-server:8000

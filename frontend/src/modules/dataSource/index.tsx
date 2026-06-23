@@ -31,7 +31,7 @@ import {
 } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import {
   type CloudConnectionResponse,
   type CloudOAuthAppCredentialBody,
@@ -49,9 +49,6 @@ import {
 
 import "./index.scss";
 import DataSourceWizardModal from "./components/DataSourceWizardModal";
-import ExternalServiceConfigModal, {
-  type ExternalServiceConfigModalService,
-} from "@/modules/modelProvider/components/ExternalServiceConfigModal";
 import {
   clearFeishuAppSetup,
   createFeishuAccountId,
@@ -278,30 +275,6 @@ const sourceTypeOptions: Array<{
 const providerAuthOptions = sourceTypeOptions.filter(
   (item) => item.type === "feishu" || item.type === "notion",
 );
-
-const datasourceConnectors: Array<{
-  key: string;
-  providerName: string;
-  titleKey: string;
-  descriptionKey: string;
-  summaryKey: string;
-  icon: ReactNode;
-  logoUrl?: string;
-}> = [
-  {
-    key: "sciverse",
-    providerName: "Sciverse",
-    titleKey: "modelProvider.external.sciverseTitle",
-    descriptionKey: "modelProvider.external.sciverseDesc",
-    summaryKey: "modelProvider.external.sciverseSummary",
-    icon: <SearchOutlined />,
-    logoUrl: "https://www.google.com/s2/favicons?domain=sciverse.space&sz=96",
-  },
-];
-
-function normalizeProviderName(value: string) {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
 
 function isAdminRole(role?: string) {
   const normalizedRole = (role || "").trim().toLowerCase();
@@ -977,7 +950,6 @@ function parseFeishuOAuthCallbackInput(value: string) {
 export default function DataSourceManagement() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const location = useLocation();
   const [form] = Form.useForm<SourceFormValues>();
   const [sources, setSources] = useState<DataSourceItem[]>([]);
   const [activeView, setActiveView] = useState<DataSourceView>(() =>
@@ -997,9 +969,6 @@ export default function DataSourceManagement() {
   const [selectedType, setSelectedType] = useState<SourceType | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [createProviderModalOpen, setCreateProviderModalOpen] = useState(false);
-  const [externalServiceModalOpen, setExternalServiceModalOpen] = useState(false);
-  const [activeExternalService, setActiveExternalService] =
-    useState<ExternalServiceConfigModalService | null>(null);
   const [authSelectModalOpen, setAuthSelectModalOpen] = useState(false);
   const [oauthState, setOauthState] = useState<OAuthState>("pending");
   const [connectionVerified, setConnectionVerified] = useState(false);
@@ -1403,6 +1372,47 @@ export default function DataSourceManagement() {
     isLeaf: true,
   });
 
+  const buildManualFeishuTargetNode = (
+    targetRef: string,
+  ): FeishuTargetTreeNode => {
+    const normalizedTargetRef = targetRef.trim();
+    return {
+      key: normalizedTargetRef,
+      value: normalizedTargetRef,
+      title: t("admin.dataSourceUseCurrentInput", { value: normalizedTargetRef }),
+      isLeaf: true,
+      targetRef: normalizedTargetRef,
+      targetType:
+        normalizeFeishuTargetType(undefined, normalizedTargetRef) ||
+        feishuTargetType,
+    };
+  };
+
+  const hasFeishuTargetRef = (
+    nodes: FeishuTargetTreeNode[],
+    targetRef: string,
+  ): boolean =>
+    nodes.some((node) => {
+      const refs = [node.value, node.targetRef, node.nodeRef]
+        .map((item) => `${item || ""}`.trim())
+        .filter(Boolean);
+
+      return refs.includes(targetRef) || Boolean(
+        node.children && hasFeishuTargetRef(node.children, targetRef),
+      );
+    });
+
+  const prependManualFeishuTargetOption = (
+    targetRef: string,
+    nodes: FeishuTargetTreeNode[],
+  ): FeishuTargetTreeNode[] => {
+    const normalizedTargetRef = targetRef.trim();
+    if (!normalizedTargetRef || hasFeishuTargetRef(nodes, normalizedTargetRef)) {
+      return nodes;
+    }
+    return [buildManualFeishuTargetNode(normalizedTargetRef), ...nodes];
+  };
+
   const mapFeishuTargetNodes = (
     nodes: ScanV2TreeNode[],
     inheritedTargetType?: FeishuTargetType,
@@ -1512,24 +1522,32 @@ export default function DataSourceManagement() {
       }
 
       const nodes = mapFeishuTargetNodes(response.data.items || []);
-      const nextNodes =
+      const baseNodes =
         nodes.length > 0
           ? nodes
           : [buildFeishuHelperNode(t("admin.dataSourceNoFeishuTargets"))];
+      const nextNodes = normalizedKeyword
+        ? prependManualFeishuTargetOption(normalizedKeyword, baseNodes)
+        : baseNodes;
       feishuTargetOptionsCacheRef.current.set(cacheKey, nextNodes);
       setFeishuTargetTreeData(nextNodes);
     } catch (error) {
       if (feishuTargetRequestSeqRef.current !== requestSeq) {
         return;
       }
-      setFeishuTargetTreeData([
+      const fallbackNodes = [
         buildFeishuHelperNode(
           getLocalizedErrorMessage(
             error,
             t("admin.dataSourceFeishuDirectoryListFailedManual"),
           ) || t("admin.dataSourceFeishuDirectoryListFailedManual"),
         ),
-      ]);
+      ];
+      setFeishuTargetTreeData(
+        normalizedKeyword
+          ? prependManualFeishuTargetOption(normalizedKeyword, fallbackNodes)
+          : fallbackNodes,
+      );
     } finally {
       if (feishuTargetRequestSeqRef.current === requestSeq) {
         setFeishuTargetLoading(false);
@@ -2854,76 +2872,6 @@ export default function DataSourceManagement() {
     navigate("/data-sources/providers/feishu");
   };
 
-  const handleManageDatasourceConnector = async (connector: typeof datasourceConnectors[number]) => {
-    if (connector.key !== "sciverse") {
-      return;
-    }
-    try {
-      const response = await dataSourceModelProvidersApi.apiCoreModelProvidersGet({
-        category: "datasource",
-        keyword: connector.providerName,
-      });
-      const providers = unwrapDataSourceApiData<{
-        providers?: Array<{
-          id: string;
-          name: string;
-          description?: string;
-          is_configured?: boolean;
-        }>;
-      }>(response.data).providers || [];
-      const provider = providers.find(
-        (item) =>
-          normalizeProviderName(item.name) ===
-          normalizeProviderName(connector.providerName),
-      );
-      if (!provider) {
-        message.error(t("modelProvider.external.loadFailed"));
-        return;
-      }
-      setActiveExternalService({
-        key: provider.id,
-        name: provider.name || t(connector.titleKey),
-        description: t(connector.descriptionKey, {
-          defaultValue: provider.description || "",
-        }),
-        fields: ["apiKey"],
-        logo: connector.icon,
-        logoUrl: connector.logoUrl || "",
-        tone: "violet",
-        status: provider.is_configured ? "configured" : "missing",
-        category: "tools",
-        providerCategory: "datasource",
-        baseUrl: "https://api.sciverse.space",
-      });
-      setExternalServiceModalOpen(true);
-    } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.external.loadFailed")));
-    }
-  };
-
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    if (params.get("provider") !== "sciverse") {
-      return;
-    }
-    const connector = datasourceConnectors.find((item) => item.key === "sciverse");
-    if (!connector) {
-      return;
-    }
-    setActiveView("connectors");
-    void handleManageDatasourceConnector(connector);
-
-    params.delete("provider");
-    params.set("view", "connectors");
-    navigate(
-      {
-        pathname: "/data-sources",
-        search: `?${params.toString()}`,
-      },
-      { replace: true },
-    );
-  }, [location.search]);
-
   const handleOpenFeishuGuideFromAuthSelect = () => {
     saveFeishuDataSourceWizardDraft({
       activeView,
@@ -3894,43 +3842,6 @@ export default function DataSourceManagement() {
                   </button>
                 );
               })}
-              {datasourceConnectors.map((connector) => (
-                <button
-                  key={connector.key}
-                  type="button"
-                  className="data-source-provider-card"
-                  onClick={() => {
-                    void handleManageDatasourceConnector(connector);
-                  }}
-                >
-                  <span className={`data-source-provider-logo data-source-icon-${connector.key}`}>
-                    {connector.logoUrl ? (
-                      <img
-                        alt=""
-                        aria-hidden="true"
-                        loading="lazy"
-                        src={connector.logoUrl}
-                        onError={(event) => {
-                          event.currentTarget.style.display = "none";
-                        }}
-                      />
-                    ) : (
-                      connector.icon
-                    )}
-                  </span>
-                  <span className="data-source-provider-card-copy">
-                    <span className="data-source-provider-title-row">
-                      <span className="data-source-provider-name">{t(connector.titleKey)}</span>
-                    </span>
-                    <span className="data-source-provider-desc">
-                      {t(connector.summaryKey)}
-                    </span>
-                  </span>
-                  <span className="data-source-provider-card-arrow" aria-hidden="true">
-                    <ArrowRightOutlined />
-                  </span>
-                </button>
-              ))}
             </div>
           </main>
         )}
@@ -4176,25 +4087,11 @@ export default function DataSourceManagement() {
               >
                 {t("admin.dataSourceNotionSetupGuideAction")}
               </a>
-              ：查看详细的 Notion OAuth 配置步骤、所需凭证和 Redirect URI 说明。
+              {t("admin.dataSourceNotionSetupGuideHint")}
             </Paragraph>
           )}
         </Form>
       </Modal>
-
-      <ExternalServiceConfigModal
-        open={externalServiceModalOpen}
-        service={activeExternalService}
-        onClose={() => setExternalServiceModalOpen(false)}
-        onChanged={() => {
-          if (activeExternalService) {
-            setActiveExternalService({
-              ...activeExternalService,
-              status: "configured",
-            });
-          }
-        }}
-      />
 
       <DataSourceWizardModal
         t={t}
@@ -4205,7 +4102,6 @@ export default function DataSourceManagement() {
         selectedType={selectedType}
         isFeishuSetupReady={isFeishuSetupReady}
         isNotionSetupReady={isNotionSetupReady}
-        connectionVerified={connectionVerified}
         syncMode={syncMode}
         saving={wizardSaving}
         savingMode={wizardSavingMode || undefined}
@@ -4223,13 +4119,6 @@ export default function DataSourceManagement() {
         onSelectType={handleSelectType}
         onResetFeishuSetup={handleResetFeishuSetup}
         onResetNotionSetup={handleResetNotionSetup}
-        onTestConnection={() => {
-          void handleTestConnection();
-        }}
-        onInvalidateConnection={() => {
-          setConnectionVerified(false);
-          setValidatedAgentId(null);
-        }}
         onLoadLocalPathOptions={(path) => {
           void loadLocalPathOptions(path);
         }}
