@@ -469,13 +469,13 @@ type agentTraceCompareQueryParams struct {
 	B string `query:"b" required:"true"`
 }
 
+type agentThreadPathParams struct {
+	ThreadID string `path:"thread_id"`
+}
+
 type agentThreadListQueryParams struct {
 	PageSize  int32  `query:"page_size"`
 	PageToken string `query:"page_token"`
-}
-
-type agentThreadPathParams struct {
-	ThreadID string `path:"thread_id"`
 }
 
 type agentThreadOpenAPIResponse struct {

@@ -217,6 +217,7 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
     filters = dict(filters or {})
     resolved_files = validate_and_resolve_files(files)
     filters['kb_id'] = _normalize_kb_id_filter(filters.get('kb_id'))
+    LOG.info(f'[KBToolGroup_DEBUG] filters={filters!r} kb_id={filters.get("kb_id")!r}')
 
     raw_history = list(history) if isinstance(history, list) else []
     agent_history = normalize_history_for_agent(raw_history)
@@ -247,7 +248,7 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
 
     from lazymind.chat.plugin.plugin_manager import resolve_plugin_injection
     plugin_tools, plugin_system_prompt, plugin_stop_tools, agentic_config_patch = \
-        resolve_plugin_injection(plugin_context)
+        resolve_plugin_injection(plugin_context, conversation_id=(conversation_id or '').strip())
     agentic_config.update(agentic_config_patch)
 
     lazyllm.globals._init_sid(sid=session_id)
@@ -268,6 +269,11 @@ async def handle_chat(query: str, history: Optional[List[Dict[str, Any]]],
         lazyllm.globals['active_tool_names'] |= set(plugin_stop_tools)
     agent_tools = build_agent_tools(active_configs)
     subagent_tools = _build_subagent_chat_tools(bool(has_subagents))
+    # SubAgent chat tools (create_subagent, list_subagents, …) are always active;
+    # add their names to the allowlist so the ToolGuard does not block them.
+    lazyllm.globals['active_tool_names'] |= {
+        getattr(fn, '__name__', '') for fn in subagent_tools if callable(fn)
+    }
     mcp_tools = _build_mcp_tools(mcp_config) if mcp_config else []
     all_tools = agent_tools + subagent_tools + plugin_tools + mcp_tools
     set_trace_context({
