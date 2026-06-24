@@ -106,6 +106,7 @@ import {
   getSyncModeLabel,
   normalizeDataSourceConnectionState,
   normalizeDataSourceStatus,
+  resolveParsedDocumentCount,
   resolveStorageUsed,
 } from "./shared";
 import {
@@ -1773,6 +1774,10 @@ export default function DataSourceManagement() {
     const addCount = summary?.new_count ?? fallback?.addCount ?? 0;
     const deleteCount = summary?.deleted_count ?? fallback?.deleteCount ?? 0;
     const changeCount = summary?.modified_count ?? fallback?.changeCount ?? 0;
+    const parsedDocumentCount = resolveParsedDocumentCount(
+      summary,
+      fallback?.parsedDocumentCount ?? 0,
+    );
     const storageUsed = resolveStorageUsed(summary, fallback?.storageUsed);
     const fileTypes = getBindingFileTypes(binding, fallback?.fileTypes);
 
@@ -1796,6 +1801,7 @@ export default function DataSourceManagement() {
         lastSync: currentTime,
         nextSync: buildFeishuNextSyncLabel(binding, t),
         documentCount,
+        parsedDocumentCount,
         addCount,
         deleteCount,
         changeCount,
@@ -1867,6 +1873,7 @@ export default function DataSourceManagement() {
         lastSync: currentTime,
         nextSync: buildScanNextSyncLabel(binding),
         documentCount,
+        parsedDocumentCount,
         addCount,
         deleteCount,
         changeCount,
@@ -1935,6 +1942,7 @@ export default function DataSourceManagement() {
       lastSync: currentTime,
       nextSync: buildScanNextSyncLabel(binding),
       documentCount,
+      parsedDocumentCount,
       addCount,
       deleteCount,
       changeCount,
@@ -3010,6 +3018,7 @@ export default function DataSourceManagement() {
           targetTypes: record.targetTypes,
           sourceType: record.type,
           documentCount: record.documentCount,
+          parsedDocumentCount: record.parsedDocumentCount,
           status: record.status,
           lastSync: record.lastSync,
           addCount: record.addCount,
