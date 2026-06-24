@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from evo.artifact_runtime.utils import canonical_json
+
 from .intervention import AutoIntervention
 from .models import AutoAction, AutoAgentConfig, AutoAgentState, AutoDecision, AutoObservation
 
@@ -86,14 +88,14 @@ class AutoPolicy:
         case_id = str(failure.get('case_id') or '').strip()
         reason = ' '.join(str(failure.get('reason') or 'unknown').split()) or 'unknown'
         ref = observation.latest_refs.get('eval.summary') or observation.hash
-        key = f'rerun_case:{case_id}:{reason}'
+        intervention = AutoIntervention(kind='rerun_case', case_id=case_id, source_ref=ref)
+        key = _intervention_key(intervention)
         if config.rerun_case_enabled and state.intervention_counts.get(key, 0) < config.rerun_case_max_per_ref:
             return AutoAction(
-                kind='send_message',
+                kind='execute_intervention',
                 reason='case execution failure detected',
                 target=key,
-                message=f'{case_id} 执行失败，请重跑这个 case。失败原因：{reason}',
-                intervention=AutoIntervention(kind='rerun_case', case_id=case_id, source_ref=ref),
+                intervention=intervention,
             )
         return AutoAction(kind='pause_flow', reason='case rerun budget exhausted', target=case_id)
 
@@ -109,30 +111,31 @@ class AutoPolicy:
         field = str(suspicious.get('field') or '').strip()
         value = suspicious.get('suggested')
         ref = observation.latest_refs.get('eval.summary') or observation.hash
-        key = f'patch_score:{case_id}:{field}:{value}:{ref}'
+        intervention = AutoIntervention(
+            kind='patch_judge_score',
+            case_id=case_id,
+            field=field,
+            value=value,
+            source_ref=ref,
+        )
+        key = _intervention_key(intervention)
         if (
             config.patch_artifact_enabled
             and config.patch_judge_score_enabled
             and state.intervention_counts.get(key, 0) < 1
         ):
             return AutoAction(
-                kind='send_message',
+                kind='execute_intervention',
                 reason='suspicious judge score detected',
                 target=key,
-                message=(
-                    f'{case_id} 的 {field} 评分不合理，请将 {field} 修改为 {value}。'
-                    f'理由：{suspicious.get("reason") or "auto score consistency check"}'
-                ),
-                intervention=AutoIntervention(
-                    kind='patch_judge_score',
-                    case_id=case_id,
-                    field=field,
-                    value=value,
-                    source_ref=ref,
-                ),
+                intervention=intervention,
             )
         if config.auto_continue:
             if state.continue_count >= config.max_continue_actions:
                 return AutoAction(kind='pause_flow', reason='auto continue budget exhausted')
             return AutoAction(kind='continue_flow', reason='score intervention already proposed; continue flow')
         return AutoAction(kind='noop', reason='score intervention already proposed')
+
+
+def _intervention_key(intervention: AutoIntervention) -> str:
+    return canonical_json(intervention.model_dump(mode='json'))

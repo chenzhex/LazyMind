@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,18 @@ AutoActionKind = Literal[
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
+
+
+class CommandStatus(str, Enum):
+    OK = 'ok'
+    RUNNING = 'running'
+    ERROR = 'error'
+
+
+class PortCommandResult(StrictModel):
+    status: CommandStatus
+    raw: dict[str, Any] = Field(default_factory=dict)
+    error: str = ''
 
 
 class AutoAgentConfig(StrictModel):

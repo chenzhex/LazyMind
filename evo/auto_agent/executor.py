@@ -68,8 +68,8 @@ class AutoActionExecutor:
                 response_status not in {'failed', 'error', 'clarification'}
                 and (
                     (action.kind in self._APPROVAL_ACTIONS and response_status == 'done')
-                    or (action.kind == 'send_message' and response_status in {'done', 'accepted', 'active', 'blocked'})
-                    or action.kind not in {*self._APPROVAL_ACTIONS, 'send_message'}
+                    or (action.kind == 'execute_intervention' and response_status in {'done', 'accepted', 'active', 'blocked'})
+                    or action.kind not in {*self._APPROVAL_ACTIONS, 'execute_intervention'}
                 )
                 and 'error' not in response
             )
@@ -95,7 +95,7 @@ class AutoActionExecutor:
             elif action.kind == 'retry_failed':
                 target = action.target or 'flow'
                 patch['retry_counts'] = {**state.retry_counts, target: state.retry_counts.get(target, 0) + 1}
-            elif action.kind == 'send_message' and action.target:
+            elif action.kind == 'execute_intervention' and action.target:
                 pending = response.get('pending_approval') if isinstance(
                     response.get('pending_approval'), dict) else None
                 patch['auto_pending_approvals'] = (
@@ -150,12 +150,12 @@ class AutoActionExecutor:
         }
         if action.kind in flow_actions:
             return flow_actions[action.kind](thread_id, command_id=command_id)
-        if action.kind == 'send_message':
-            return self.ports.send_message(
+        if action.kind == 'execute_intervention':
+            if action.intervention is None:
+                raise ValueError('execute_intervention action requires typed intervention')
+            return self.ports.execute_intervention(
                 thread_id,
-                content=action.message,
-                message_id=f'msg_{action_id[:24]}',
-                metadata={'source': 'auto_agent', **action.metadata},
+                command_id=command_id,
                 intervention=action.intervention,
             )
         if action.kind in self._APPROVAL_ACTIONS:

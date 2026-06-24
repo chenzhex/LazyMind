@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any, Protocol
 
 from .intervention import AutoIntervention
@@ -35,14 +34,12 @@ class AutoAgentPorts(Protocol):
     def retry_failed(self, thread_id: str, *, command_id: str) -> dict[str, Any]:
         ...
 
-    def send_message(
+    def execute_intervention(
         self,
         thread_id: str,
         *,
-        content: str,
-        message_id: str,
-        metadata: Mapping[str, Any],
-        intervention: AutoIntervention | None = None,
+        command_id: str,
+        intervention: AutoIntervention,
     ) -> dict[str, Any]:
         ...
 

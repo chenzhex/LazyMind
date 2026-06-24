@@ -166,25 +166,40 @@ class MessageSessionStore:
             ).fetchall()
         return [_event_from_row(row) for row in rows]
 
-    def events_as_history(self, thread_id: str) -> list[dict[str, Any]]:
+    def turn_events(self, thread_id: str, turn_id: str, message_id: str) -> list[MessageEvent]:
         with self._lock:
             rows = self._connection.execute(
                 """
                 SELECT * FROM message_events
-                WHERE thread_id = ? AND event_type IN ('message_received', 'assistant_response')
+                WHERE thread_id = ? AND turn_id = ? AND message_id = ?
                 ORDER BY seq ASC
                 """,
-                (thread_id,),
+                (thread_id, turn_id, message_id),
             ).fetchall()
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            payload = json.loads(str(row['payload_json']))
-            role = 'user' if row['event_type'] == 'message_received' else 'assistant'
-            content = str(payload.get('content') or payload.get('message') or '').strip()
-            if content:
-                out.append({'id': str(row['message_id'] or f"msg-{row['seq']}"),
-                           'role': role, 'content': content, 'ts': row['created_at']})
-        return out
+        return [_event_from_row(row) for row in rows]
+
+    def recent_events(self, thread_id: str, event_types: tuple[str, ...], *, limit: int = 8) -> list[dict[str, Any]]:
+        if not event_types:
+            return []
+        placeholders = ','.join('?' for _ in event_types)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT event_type, payload_json, turn_id, message_id, created_at
+                FROM message_events
+                WHERE thread_id = ? AND event_type IN ({placeholders})
+                ORDER BY seq DESC
+                LIMIT ?
+                """,
+                (thread_id, *event_types, limit),
+            ).fetchall()
+        return [{
+            'type': str(row['event_type']),
+            'payload': _json_object(json.loads(str(row['payload_json'])), reject_reserved_envelope=False),
+            'turn_id': str(row['turn_id']),
+            'message_id': str(row['message_id']),
+            'created_at': float(row['created_at']),
+        } for row in reversed(rows)]
 
     def last_turn_for_message(self, thread_id: str, message_id: str) -> dict[str, Any] | None:
         validate_nonempty(message_id, 'message_id')
@@ -202,34 +217,6 @@ class MessageSessionStore:
                 LIMIT 1
                 """,
                 (thread_id, message_id),
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            'turn_id': str(row['turn_id']),
-            'status': str(row['status']),
-            'message_id': str(row['message_id']),
-            'message_event_cursor': int(row['seq']),
-        }
-
-    def last_turn_for_message_family(self, thread_id: str, message_id_prefix: str) -> dict[str, Any] | None:
-        validate_nonempty(message_id_prefix, 'message_id_prefix')
-        repair_prefix = f'{message_id_prefix}:repair:'
-        with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT t.turn_id, t.status, e.message_id, e.seq
-                FROM turns AS t
-                JOIN message_events AS e
-                    ON e.thread_id = t.thread_id
-                    AND e.turn_id = t.turn_id
-                    AND e.event_type = 'message_received'
-                WHERE t.thread_id = ?
-                  AND (e.message_id = ? OR substr(e.message_id, 1, ?) = ?)
-                ORDER BY e.seq DESC
-                LIMIT 1
-                """,
-                (thread_id, message_id_prefix, len(repair_prefix), repair_prefix),
             ).fetchone()
         if row is None:
             return None
@@ -268,23 +255,6 @@ class MessageSessionStore:
                 (thread_id, turn_id, message_id),
             ).fetchone()
         return None if row is None else _event_from_row(row)
-
-    def message_turn_count(self, thread_id: str, message_id_prefix: str) -> int:
-        validate_nonempty(message_id_prefix, 'message_id_prefix')
-        repair_prefix = f'{message_id_prefix}:repair:'
-        with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT COUNT(*) AS count
-                FROM turns AS t
-                JOIN message_events AS e ON e.thread_id = t.thread_id AND e.turn_id = t.turn_id
-                WHERE t.thread_id = ?
-                  AND (e.message_id = ? OR substr(e.message_id, 1, ?) = ?)
-                  AND e.event_type = 'message_received'
-                """,
-                (thread_id, message_id_prefix, len(repair_prefix), repair_prefix),
-            ).fetchone()
-        return 0 if row is None else int(row['count'])
 
     def begin_turn(self, lease: MessageLease, message_id: str, content: str) -> tuple[str, MessageEvent]:
         validate_nonempty(message_id, 'message_id')
@@ -368,18 +338,20 @@ class MessageSessionStore:
             )
         return current
 
-    def reminder(self, thread_id: str) -> str:
-        return str(self.working_set(thread_id).get('reminder') or '')
+    def active_agenda(self, thread_id: str) -> str:
+        return str(self.working_set(thread_id).get('active_agenda') or '')
 
-    def set_reminder(self, lease: MessageLease, reminder: str) -> dict[str, Any]:
-        return self.update_working_set(lease, {'reminder': str(reminder or '').strip()})
-
-    def set_blocked_next_ops(self, lease: MessageLease, blocked: Mapping[str, Any]) -> dict[str, Any]:
-        return self.update_working_set(lease, {'blocked_next_ops': _json_object(blocked)})
-
-    def clear_blocked_next_ops(self, lease: MessageLease) -> dict[str, Any]:
+    def set_active_agenda(self, lease: MessageLease, active_agenda: str) -> dict[str, Any]:
         current = self.working_set(lease.thread_id)
-        current.pop('blocked_next_ops', None)
+        current['active_agenda'] = str(active_agenda or '').strip()
+        return self._write_working_set(lease, current)
+
+    def set_blocked_intent(self, lease: MessageLease, blocked: Mapping[str, Any]) -> dict[str, Any]:
+        return self.update_working_set(lease, {'blocked_current_intent': _json_object(blocked)})
+
+    def clear_blocked_intent(self, lease: MessageLease) -> dict[str, Any]:
+        current = self.working_set(lease.thread_id)
+        current.pop('blocked_current_intent', None)
         return self._write_working_set(lease, current)
 
     def active_approval(self, thread_id: str) -> PendingApproval | None:
