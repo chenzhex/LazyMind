@@ -40,11 +40,8 @@ import { AgentAppsAuth } from "@/components/auth";
 import { getLocalizedErrorMessage } from "@/components/request";
 import {
   dataSourceCloudOauthApi,
-  dataSourceDatasetsApi,
-  dataSourceModelProvidersApi,
   getLocalFSChatSetting,
   updateLocalFSChatSetting,
-  unwrapDataSourceApiData,
 } from "./api";
 
 import "./index.scss";
@@ -402,32 +399,6 @@ function mapCloudConnectionToDataSourceConnection(
     openId: connection.provider_account_id,
     avatarUrl: providerMeta.avatar_url || providerMeta.icon_url,
   };
-}
-
-async function listKnowledgeBaseNames(client = dataSourceDatasetsApi) {
-  const names: string[] = [];
-  let pageToken: string | undefined;
-
-  for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
-    const response = await client.apiCoreDatasetsGet({
-      pageToken,
-      pageSize: 200,
-    });
-    names.push(
-      ...(response.data.datasets || [])
-        .filter((dataset) => !isDataSourceManagedDataset(dataset))
-        .map(getDatasetDisplayName)
-        .filter(Boolean),
-    );
-
-    const nextPageToken = response.data.next_page_token || "";
-    if (!nextPageToken || nextPageToken === pageToken) {
-      break;
-    }
-    pageToken = nextPageToken;
-  }
-
-  return names;
 }
 
 function sleep(ms: number) {
