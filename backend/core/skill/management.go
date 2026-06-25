@@ -1265,7 +1265,7 @@ func updateParentSkill(ctx context.Context, db *gorm.DB, userID, userName string
 	if pendingDraft {
 		return errors.New("parent skill has pending_confirm draft")
 	}
-	if req.ParentSkillName != nil && (req.ParentSkillID == nil || strings.TrimSpace(*req.ParentSkillID) == "") {
+	if req.ParentSkillName != nil {
 		return errors.New("parent_skill_name cannot be updated")
 	}
 	currentContent, err := storedSkillContent(*row)

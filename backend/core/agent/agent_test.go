@@ -1656,13 +1656,11 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 func TestStreamUpstreamThreadEventsStopsAfterDoneType(t *testing.T) {
 	db := newAgentTestDB(t)
 	rec := httptest.NewRecorder()
-	runCompleted := `{"type":"artifact.run.completed","event_type":"run.completed","payload":{"event_type":"run.completed","raw_event":{"event_type":"run.completed"}}}`
 	done := `{"type":"done","status":"success"}`
 	body := strings.NewReader(strings.Join([]string{
 		"id: 41\nevent: message\ndata: {\"kind\":\"task.running\",\"task_id\":\"task_1\"}\n\n",
-		"id: 42\nevent: message\ndata: " + runCompleted + "\n\n",
-		"id: 43\nevent: message\ndata: " + done + "\n\n",
-		"id: 44\nevent: message\ndata: {\"kind\":\"task.after\",\"task_id\":\"task_1\"}\n\n",
+		"id: 42\nevent: message\ndata: " + done + "\n\n",
+		"id: 43\nevent: message\ndata: {\"kind\":\"task.after\",\"task_id\":\"task_1\"}\n\n",
 	}, ""))
 
 	var lastUpstreamEventID string
@@ -1672,7 +1670,6 @@ func TestStreamUpstreamThreadEventsStopsAfterDoneType(t *testing.T) {
 	}
 
 	want := "data: {\"kind\":\"task.running\",\"task_id\":\"task_1\"}\n\n" +
-		"data: " + runCompleted + "\n\n" +
 		"data: " + done + "\n\n"
 	if got := rec.Body.String(); got != want {
 		t.Fatalf("unexpected forwarded stream:\nwant: %q\ngot:  %q", want, got)
@@ -1680,7 +1677,36 @@ func TestStreamUpstreamThreadEventsStopsAfterDoneType(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "task.after") {
 		t.Fatalf("expected stream to stop before later frames, got %q", rec.Body.String())
 	}
-	if lastUpstreamEventID != "43" {
+	if lastUpstreamEventID != "42" {
+		t.Fatalf("unexpected last upstream event id: %q", lastUpstreamEventID)
+	}
+}
+
+func TestStreamUpstreamThreadEventsStopsAfterRunCompleted(t *testing.T) {
+	db := newAgentTestDB(t)
+	rec := httptest.NewRecorder()
+	completed := `{"type":"artifact.run.completed","event_type":"run.completed","payload":{"event_type":"run.completed","raw_event":{"event_type":"run.completed"}}}`
+	body := strings.NewReader(strings.Join([]string{
+		"id: 41\nevent: message\ndata: {\"kind\":\"task.running\",\"task_id\":\"task_1\"}\n\n",
+		"id: 42\nevent: message\ndata: " + completed + "\n\n",
+		"id: 43\nevent: message\ndata: {\"kind\":\"task.after\",\"task_id\":\"task_1\"}\n\n",
+	}, ""))
+
+	var lastUpstreamEventID string
+	err := streamUpstreamThreadEvents(context.Background(), rec, rec, db.DB, "thr_1", "step_1", body, &lastUpstreamEventID, nil)
+	if !errors.Is(err, errThreadEventsRunCompleted) {
+		t.Fatalf("expected run completed stop error, got %v", err)
+	}
+
+	want := "data: {\"kind\":\"task.running\",\"task_id\":\"task_1\"}\n\n" +
+		"data: " + completed + "\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Fatalf("unexpected forwarded stream:\nwant: %q\ngot:  %q", want, got)
+	}
+	if strings.Contains(rec.Body.String(), "task.after") {
+		t.Fatalf("expected stream to stop before later frames, got %q", rec.Body.String())
+	}
+	if lastUpstreamEventID != "42" {
 		t.Fatalf("unexpected last upstream event id: %q", lastUpstreamEventID)
 	}
 }

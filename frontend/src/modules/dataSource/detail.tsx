@@ -1394,9 +1394,9 @@ export default function DataSourceDetail() {
     () => syncKnownSelectableFileKeys,
     [syncKnownSelectableFileKeys],
   );
-  const hasFilteredSelected = filteredSyncNodeKeys.some((id) =>
-    syncSelectedDocIds.includes(id),
-  );
+  const hasFilteredSelected =
+    filteredSyncNodeKeys.length > 0 &&
+    filteredSyncNodeKeys.every((id) => syncSelectedDocIds.includes(id));
 
   const columns: ColumnsType<DocumentStatusRow> = [
     {

@@ -86,6 +86,7 @@ type threadStatusesResponse struct {
 var (
 	threadEventsKeepaliveInterval = time.Second
 	errThreadEventsDone           = errors.New("thread events done")
+	errThreadEventsRunCompleted   = errors.New("thread events run completed")
 )
 
 func ListThreads(w http.ResponseWriter, r *http.Request) {
@@ -548,6 +549,13 @@ func streamThreadEvents(w http.ResponseWriter, r *http.Request, stepID string) {
 				Msg("agent thread events stopping after done")
 			return
 		}
+		if errors.Is(streamErr, errThreadEventsRunCompleted) {
+			log.Logger.Info().
+				Str("thread_id", threadID).
+				Str("step_id", stepID).
+				Msg("agent thread events stopping after run.completed")
+			return
+		}
 		if streamErr != nil {
 			log.Logger.Warn().Err(streamErr).Str("thread_id", threadID).Msg("consume upstream thread events stream failed")
 		}
@@ -970,8 +978,11 @@ func streamUpstreamThreadEvents(
 				if result.LastEventID != "" && lastUpstreamEventID != nil {
 					*lastUpstreamEventID = result.LastEventID
 				}
-				if result.StopReason == "done" {
+				switch result.StopReason {
+				case "done":
 					return errThreadEventsDone
+				case "run_completed":
+					return errThreadEventsRunCompleted
 				}
 				return result.Err
 			}
@@ -1266,6 +1277,17 @@ func readUpstreamThreadEvents(
 					Msg("agent thread events upstream done received")
 				return
 			}
+			if isRunCompletedThreadEvent(event) {
+				result.StopReason = "run_completed"
+				log.Logger.Info().
+					Str("thread_id", threadID).
+					Str("task_id", event.TaskID).
+					Str("event_name", event.EventName).
+					Str("upstream_event_id", frame.ID).
+					Int("frame_index", frameIndex).
+					Msg("agent thread events upstream run.completed received")
+				return
+			}
 		}
 	}()
 
@@ -1357,9 +1379,43 @@ func isDoneThreadEvent(event fetchedThreadEvent) bool {
 	return ok && strings.EqualFold(strings.TrimSpace(rawType), "done")
 }
 
+func isRunCompletedThreadEvent(event fetchedThreadEvent) bool {
+	if strings.EqualFold(strings.TrimSpace(event.EventName), "run.completed") {
+		return true
+	}
+	payload, ok := parseJSONValue(event.RawFrame).(map[string]any)
+	if !ok {
+		return false
+	}
+	return hasRunCompletedEventType(payload)
+}
+
 func threadEventStepID(event fetchedThreadEvent) string {
 	payload := parseJSONValue(event.RawFrame)
 	return extractStringByExactKeys(payload, "step_run_id")
+}
+
+func hasRunCompletedEventType(payload map[string]any) bool {
+	if eventTypeMatches(payload["event_type"], "run.completed") {
+		return true
+	}
+	child, ok := payload["payload"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if eventTypeMatches(child["event_type"], "run.completed") {
+		return true
+	}
+	rawEvent, ok := child["raw_event"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return eventTypeMatches(rawEvent["event_type"], "run.completed")
+}
+
+func eventTypeMatches(value any, want string) bool {
+	raw, ok := value.(string)
+	return ok && strings.EqualFold(strings.TrimSpace(raw), want)
 }
 
 func firstNonNil(errs ...error) error {
