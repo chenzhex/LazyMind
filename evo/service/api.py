@@ -1493,12 +1493,29 @@ def _case_details_from_eval_rows(rows: list[dict], existing: Any) -> list[dict]:
 
 
 def _case_details_from_abtest_deltas(case_deltas: list[dict], existing: Any) -> list[dict]:
+    trace_fields = ('trace_id', 'baseline_trace_id', 'candidate_trace_id')
+    def case_id(row: dict) -> str:
+        return str(row.get('case_id') or row.get('case_key') or row.get('caseId') or row.get('id') or '')
+
     if isinstance(existing, list):
-        return [dict(item) for item in existing if isinstance(item, dict)]
+        traces_by_case = {
+            case_id(row): {
+                key: row[key] for key in trace_fields if row.get(key)
+            }
+            for row in case_deltas
+            if case_id(row) and any(key in row for key in trace_fields)
+        }
+        return [
+            item | {key: value for key, value in traces_by_case.get(case_id(item), {}).items() if not item.get(key)}
+            for item in existing if isinstance(item, dict)
+        ]
     return [
         {
-            'case_id': row.get('case_id') or row.get('case_key') or row.get('id'),
+            'case_id': case_id(row),
             'outcome': row.get('outcome'),
+            'trace_id': row.get('trace_id') or '',
+            'baseline_trace_id': row.get('baseline_trace_id') or '',
+            'candidate_trace_id': row.get('candidate_trace_id') or '',
             **{f'baseline_{metric}': value for metric, value in _dict_items(row.get('before'))},
             **{f'candidate_{metric}': value for metric, value in _dict_items(row.get('after'))},
             **{metric: value for metric, value in _dict_items(row.get('delta'))},
