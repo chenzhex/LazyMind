@@ -1693,7 +1693,7 @@ func TestStreamUpstreamThreadEventsStopsAfterRunCompleted(t *testing.T) {
 	}, ""))
 
 	var lastUpstreamEventID string
-	err := streamUpstreamThreadEvents(context.Background(), rec, rec, db.DB, "thr_1", "step_1", body, &lastUpstreamEventID, nil)
+	err := streamUpstreamThreadEvents(context.Background(), rec, rec, db.DB, "thr_1", "", body, &lastUpstreamEventID, nil)
 	if !errors.Is(err, errThreadEventsRunCompleted) {
 		t.Fatalf("expected run completed stop error, got %v", err)
 	}

@@ -647,7 +647,7 @@ func updateThreadStepFromEvent(db *gorm.DB, threadID, stepID string, event fetch
 	updates := map[string]any{
 		"status":      status,
 		"active":      active,
-		"event_count": gorm.Expr("event_count + ?", 1),
+		"event_count": gorm.Expr("agent_thread_steps.event_count + ?", 1),
 		"ended_at":    endedAt,
 		"updated_at":  now,
 	}
