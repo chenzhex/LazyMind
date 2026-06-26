@@ -556,6 +556,8 @@ class EvoMessageHub:
                 seen_step_event = bool(step_run_id) or seen_step_event
                 yield _sse('message', _frontend_event_payload(event, flow), str(event.seq))
             status = self.flow_status(thread_id)['status']
+            if step_run_id and cursor < flow.runtime.controller.event_log.max_seq():
+                continue
             if step_run_id and _step_run_stream_done(flow, step_run_id, status, seen_step_event):
                 yield _sse('done', _step_run_done_payload(thread_id, status, flow, step_run_id), str(cursor + 1))
                 return
