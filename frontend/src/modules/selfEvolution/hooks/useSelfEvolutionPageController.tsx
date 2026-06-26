@@ -100,6 +100,7 @@ import {
   getDownloadFileName,
   triggerBrowserDownload,
   getNestedStringField,
+  getNestedArrayField,
   getNestedRecordField,
   formatThreadTime,
   getThreadTimeSortValue,
@@ -215,6 +216,24 @@ type EvalReportBadCasesState = {
   nextPageToken?: string;
 };
 
+type ThreadStepSummary = {
+  stepId: string;
+  title?: string;
+  status?: string;
+  active: boolean;
+  orderIndex?: number;
+  eventCount?: number;
+  currentTaskId?: string;
+  startedAt?: string;
+  endedAt?: string;
+};
+
+type ThreadStepListState = {
+  steps: ThreadStepSummary[];
+  activeStepId?: string;
+};
+
+const INITIAL_THREAD_STEP_ID = "00000000-0000-0000-0000-000000000001";
 const stageArtifactKindMap: Record<string, WorkflowResultKind> = {
   dataset: "datasets",
   eval: "eval-reports",
@@ -272,6 +291,196 @@ function humanizeFinalResultReason(reason: string, primaryMetricLabel: string) {
     .replace(/target/gi, "门槛")
     .replace(/limit/gi, "上限")
     .replace(/_/g, " ");
+}
+
+function getBooleanishField(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value !== 0;
+    }
+    if (typeof value === "string") {
+      const normalizedValue = value.trim().toLowerCase();
+      if (["true", "1", "yes", "active"].includes(normalizedValue)) {
+        return true;
+      }
+      if (["false", "0", "no", "inactive"].includes(normalizedValue)) {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+function normalizeThreadStepStatus(status?: string): StepStatus | undefined {
+  const normalizedStatus = status?.trim().toLowerCase();
+  if (!normalizedStatus) {
+    return undefined;
+  }
+  if (["running", "active", "in_progress", "processing", "started", "进行中", "运行中", "执行中"].includes(normalizedStatus)) {
+    return "running";
+  }
+  if (["done", "complete", "completed", "success", "succeeded", "finished", "ended", "已完成", "完成"].includes(normalizedStatus)) {
+    return "done";
+  }
+  if (["cancel", "cancelled", "canceled", "stop", "stopped", "已取消", "取消", "已停止", "停止"].includes(normalizedStatus)) {
+    return "canceled";
+  }
+  if (["failed", "failure", "error", "errored", "已失败", "失败"].includes(normalizedStatus)) {
+    return "failed";
+  }
+  if (["pause", "paused", "waiting_checkpoint", "checkpoint_wait", "已暂停", "暂停"].includes(normalizedStatus)) {
+    return "paused";
+  }
+  if (["pending", "created", "queued", "waiting", "待执行", "等待中"].includes(normalizedStatus)) {
+    return "pending";
+  }
+  return undefined;
+}
+
+function isThreadStepRunning(step: ThreadStepSummary) {
+  const normalizedStatus = normalizeThreadStepStatus(step.status);
+  return normalizedStatus ? normalizedStatus === "running" : step.active;
+}
+
+function normalizeThreadStepListPayload(payload: ThreadRestorePayload): ThreadStepListState {
+  const payloadRecord = isRecord(payload) ? payload : undefined;
+  const activeStepId = getNestedStringField(payloadRecord, ["active_step_id", "activeStepId"]);
+  const stepRecords = getNestedArrayField(payload, ["steps", "items", "records", "data"]);
+  const steps = stepRecords
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .flatMap<ThreadStepSummary>((item) => {
+      const stepId = getStringField(item, ["step_id", "stepId", "id"]);
+      if (!stepId) {
+        return [];
+      }
+      return [{
+        stepId,
+        title: getStringField(item, ["title", "name"]),
+        status: getStringField(item, ["status", "state"]),
+        active: activeStepId ? activeStepId === stepId : getBooleanishField(item, ["active", "is_active", "isActive"]),
+        orderIndex: getNumberField(item, ["order_index", "orderIndex"]),
+        eventCount: getNumberField(item, ["event_count", "eventCount"]),
+        currentTaskId: getStringField(item, ["current_task_id", "currentTaskId", "task_id", "taskId"]),
+        startedAt: getStringField(item, ["started_at", "startedAt", "start_time", "startTime"]),
+        endedAt: getStringField(item, ["ended_at", "endedAt", "end_time", "endTime"]),
+      }];
+    });
+  return { steps, activeStepId };
+}
+
+function getDefaultThreadStep(stepList: ThreadStepListState): ThreadStepSummary | undefined {
+  const activeStep = stepList.activeStepId
+    ? stepList.steps.find((step) => step.stepId === stepList.activeStepId)
+    : undefined;
+  return activeStep ||
+    stepList.steps[stepList.steps.length - 1] ||
+    (stepList.activeStepId ? { stepId: stepList.activeStepId, active: true, status: "running" } : undefined);
+}
+
+function getNextStepRunId(event: NormalizedThreadEvent) {
+  const payload = event.payload;
+  const eventPayload = getNestedRecordField(payload, ["payload"]);
+  const dataPayload = getNestedRecordField(payload, ["data"]);
+  const eventDataPayload = getNestedRecordField(eventPayload, ["data"]);
+  const rawEvent = getNestedRecordField(payload, ["raw_event", "rawEvent"]);
+  const rawEventDataPayload = getNestedRecordField(rawEvent, ["data"]);
+
+  return (
+    getStringField(payload, ["next_step_run_id", "nextStepRunId"]) ||
+    getStringField(eventPayload, ["next_step_run_id", "nextStepRunId"]) ||
+    getStringField(dataPayload, ["next_step_run_id", "nextStepRunId"]) ||
+    getStringField(eventDataPayload, ["next_step_run_id", "nextStepRunId"]) ||
+    getStringField(rawEvent, ["next_step_run_id", "nextStepRunId"]) ||
+    getStringField(rawEventDataPayload, ["next_step_run_id", "nextStepRunId"])
+  );
+}
+
+function getRunCompletedStepRunId(event: NormalizedThreadEvent) {
+  const payload = event.payload;
+  const eventPayload = getNestedRecordField(payload, ["payload"]);
+  const rawEvent = getNestedRecordField(payload, ["raw_event", "rawEvent"]);
+  const eventTypes = [
+    event.type,
+    getStringField(payload, ["event_type", "eventType", "type"]),
+    getStringField(eventPayload, ["event_type", "eventType", "type"]),
+    getStringField(rawEvent, ["event_type", "eventType", "type"]),
+  ].filter(Boolean);
+  const isRunCompleted = eventTypes.some(
+    (eventType) => eventType === "run.completed" || Boolean(eventType && eventType.endsWith(".run.completed")),
+  );
+
+  if (!isRunCompleted) {
+    return undefined;
+  }
+
+  return (
+    getStringField(payload, ["step_run_id", "stepRunId"]) ||
+    getStringField(eventPayload, ["step_run_id", "stepRunId"]) ||
+    getStringField(rawEvent, ["step_run_id", "stepRunId"])
+  );
+}
+
+function parseThreadRecordFrames(rawData: string, fallbackId?: string, fallbackEventName = "message") {
+  const text = rawData.trim();
+  if (!text) {
+    return [];
+  }
+
+  const parsedFrames = text
+    .split(/\r?\n\r?\n/)
+    .map((rawFrame) => parseSSEFrame(rawFrame.trim()))
+    .filter((frame): frame is NonNullable<ReturnType<typeof parseSSEFrame>> => Boolean(frame));
+  if (parsedFrames.length > 0) {
+    return parsedFrames.map((frame) => ({
+      ...frame,
+      id: frame.id || fallbackId,
+      eventName: frame.eventName || fallbackEventName,
+    }));
+  }
+
+  return [{
+    id: fallbackId,
+    eventName: fallbackEventName,
+    data: text,
+  }];
+}
+
+function normalizeThreadRecordEvents(payload: ThreadRestorePayload): NormalizedThreadEvent[] {
+  const records = getNestedArrayField(payload, ["records", "events", "items", "data"]);
+  const sourceRecords = records.length > 0 ? records : isRecord(payload) ? [payload] : [];
+
+  return sourceRecords.flatMap((record, index) => {
+    if (typeof record === "string") {
+      return parseThreadRecordFrames(record).map((frame) => normalizeThreadEvent(frame));
+    }
+    if (!isRecord(record)) {
+      return [];
+    }
+
+    const rawFrame = getStringField(record, ["raw_frame", "rawFrame", "frame", "sse", "raw"]);
+    const fallbackId = getStringField(record, ["id", "event_id", "eventId", "record_id", "recordId"]) || `record-${index}`;
+    const fallbackEventName = getStringField(record, ["event_name", "eventName", "event", "type"]) || "message";
+    if (rawFrame) {
+      return parseThreadRecordFrames(rawFrame, fallbackId, fallbackEventName)
+        .map((frame) => normalizeThreadEvent(frame));
+    }
+
+    const dataValue =
+      record.data ??
+      record.payload ??
+      record.event_payload ??
+      record.body ??
+      record.message ??
+      record.content ??
+      record;
+    const data = typeof dataValue === "string" ? dataValue : JSON.stringify(dataValue);
+    return parseThreadRecordFrames(data, fallbackId, fallbackEventName)
+      .map((frame) => normalizeThreadEvent(frame));
+  });
 }
 
 function getEvalReportSourceRecord(resultData: unknown) {
@@ -474,6 +683,7 @@ export function SelfEvolutionPageController({
     content: "",
   });
   const [threadEvents, setThreadEvents] = useState<NormalizedThreadEvent[]>([]);
+  const [threadStepList, setThreadStepList] = useState<ThreadStepListState>({ steps: [] });
   const threadEventsRef = useRef<NormalizedThreadEvent[]>([]);
   const [remoteThreadHistory, setRemoteThreadHistory] = useState<ThreadHistoryEntry[]>([]);
   const isThreadHistoryListFetchingRef = useRef(false);
@@ -488,9 +698,11 @@ export function SelfEvolutionPageController({
   ]);
   const [activeSessionId, setActiveSessionId] = useState("session-1");
   const chatStreamRef = useRef<HTMLDivElement | null>(null);
-  const threadEventsAbortRef = useRef<{ threadId: string; controller: AbortController } | null>(null);
+  const threadEventsAbortRef = useRef<{ threadId: string; stepId: string; controller: AbortController } | null>(null);
   const processedThreadEventIdsRef = useRef<Set<string>>(new Set());
   const processedWorkflowEventKeysRef = useRef<Set<string>>(new Set());
+  const pendingNextStepRunIdRef = useRef<string>();
+  const continuedThreadStepIdsRef = useRef<Set<string>>(new Set());
   const restoreRequestIdRef = useRef(0);
   const [activeDiffFileId, setActiveDiffFileId] = useState("");
   const [collapsedDiffDirs, setCollapsedDiffDirs] = useState<Record<string, boolean>>({});
@@ -1983,13 +2195,64 @@ export function SelfEvolutionPageController({
     }
   };
 
+  const rememberNextStepRunId = (event: NormalizedThreadEvent) => {
+    const nextStepRunId = getNextStepRunId(event);
+    if (nextStepRunId) {
+      pendingNextStepRunIdRef.current = nextStepRunId;
+    }
+    return nextStepRunId;
+  };
+
+  const subscribePendingNextStepRun = (threadId: string | undefined, sessionId: string) => {
+    const nextStepRunId = pendingNextStepRunIdRef.current;
+    if (!threadId || !nextStepRunId) {
+      return false;
+    }
+
+    pendingNextStepRunIdRef.current = undefined;
+    void refreshThreadStepList(threadId).catch(() => undefined);
+    void subscribeThreadEvents(threadId, nextStepRunId, sessionId);
+    return true;
+  };
+
+  const subscribePendingNextStepRunOrRestoreLatest = (threadId: string, sessionId: string) => {
+    if (subscribePendingNextStepRun(threadId, sessionId)) {
+      return;
+    }
+    void restoreLatestThreadStep(threadId, sessionId);
+  };
+
+  const continueThreadEventsFromRunCompleted = (
+    threadId: string | undefined,
+    event: NormalizedThreadEvent,
+    sessionId: string,
+    currentStepId?: string,
+  ) => {
+    const nextStepId = getRunCompletedStepRunId(event);
+    if (!threadId || !nextStepId || nextStepId === currentStepId) {
+      return false;
+    }
+
+    const continuationKey = `${threadId}:${nextStepId}`;
+    if (continuedThreadStepIdsRef.current.has(continuationKey)) {
+      return false;
+    }
+
+    continuedThreadStepIdsRef.current.add(continuationKey);
+    pendingNextStepRunIdRef.current = undefined;
+    void refreshThreadStepList(threadId).catch(() => undefined);
+    void subscribeThreadEvents(threadId, nextStepId, sessionId);
+    return true;
+  };
+
   const consumeThreadMessageStream = async (
     response: Response,
     sessionId: string,
     signal?: AbortSignal,
-  ) => {
+    threadId?: string,
+  ): Promise<boolean> => {
     if (!response.body) {
-      return;
+      return false;
     }
 
     const reader = response.body.getReader();
@@ -2013,6 +2276,7 @@ export function SelfEvolutionPageController({
         }
 
         const event = normalizeThreadEvent(frame);
+        rememberNextStepRunId(event);
         syncPlanningStateFromMessageEvent(event);
         const chatStreamDeltaKind = getChatStreamDeltaKind(event.type);
         if (chatStreamDeltaKind) {
@@ -2027,8 +2291,13 @@ export function SelfEvolutionPageController({
             time: formatThreadTime(event.timestamp),
           }, { dedupeLast: true });
         }
+        if (continueThreadEventsFromRunCompleted(threadId, event, sessionId)) {
+          await reader.cancel().catch(() => undefined);
+          return true;
+        }
         if (isTerminalThreadEvent(event.type) || isFailedThreadEvent(event.type)) {
-          return;
+          await reader.cancel().catch(() => undefined);
+          return false;
         }
       }
     }
@@ -2038,6 +2307,7 @@ export function SelfEvolutionPageController({
       const frame = parseSSEFrame(trailingText);
       if (frame) {
         const event = normalizeThreadEvent(frame);
+        rememberNextStepRunId(event);
         syncPlanningStateFromMessageEvent(event);
         const chatStreamDeltaKind = getChatStreamDeltaKind(event.type);
         if (chatStreamDeltaKind) {
@@ -2052,16 +2322,19 @@ export function SelfEvolutionPageController({
             time: formatThreadTime(event.timestamp),
           }, { dedupeLast: true });
         }
+        return continueThreadEventsFromRunCompleted(threadId, event, sessionId);
       }
     }
+    return false;
   };
 
-  const openThreadEventsResponse = async (
+  const openStepEventsResponse = async (
     threadId: string,
+    stepId: string,
     signal: AbortSignal,
     allowRefresh = true,
   ): Promise<Response> => {
-    const response = await fetch(`${AGENT_API_BASE}/threads/${encodeURIComponent(threadId)}:events`, {
+    const response = await fetch(`${AGENT_API_BASE}/threads/${encodeURIComponent(threadId)}/events/${encodeURIComponent(stepId)}`, {
       method: "GET",
       headers: {
         Accept: "text/event-stream",
@@ -2072,117 +2345,91 @@ export function SelfEvolutionPageController({
 
     if (response.status === 401 && allowRefresh && !signal.aborted) {
       await AgentAppsAuth.refreshAccessToken();
-      return openThreadEventsResponse(threadId, signal, false);
+      return openStepEventsResponse(threadId, stepId, signal, false);
     }
 
     return response;
   };
 
-  const openThreadEventsSnapshotResponse = async (
-    threadId: string,
-    signal: AbortSignal,
-    allowRefresh = true,
-    since = 0,
-  ): Promise<Response> => {
-    const response = await fetch(`${AGENT_API_BASE}/threads/${encodeURIComponent(threadId)}:events?since=${since}`, {
-      method: "GET",
-      headers: {
-        Accept: "text/event-stream",
-        ...AgentAppsAuth.getAuthHeaders(),
-      },
-      signal,
-    });
-
-    if (response.status === 401 && allowRefresh && !signal.aborted) {
-      await AgentAppsAuth.refreshAccessToken();
-      return openThreadEventsSnapshotResponse(threadId, signal, false, since);
-    }
-
-    return response;
-  };
-
-  const restoreThreadEventsSnapshot = async (
+  const fetchThreadStepList = async (
     threadId: string,
     signal?: AbortSignal,
   ) => {
-    const controller = new AbortController();
-    const abortSnapshot = () => controller.abort();
-    const timeoutId = window.setTimeout(abortSnapshot, 3500);
-    signal?.addEventListener("abort", abortSnapshot, { once: true });
-    const restoredEvents: NormalizedThreadEvent[] = [];
-    const restoredEventKeys = new Set<string>();
-    const flushRestoredEvents = () => {
-      const pendingEvents = restoredEvents.filter((event) => !processedWorkflowEventKeysRef.current.has(event.key));
-      if (signal?.aborted || pendingEvents.length === 0) {
-        return;
-      }
-      pendingEvents.forEach((event) => processedWorkflowEventKeysRef.current.add(event.key));
-      const mergedEvents = mergeThreadEvents(pendingEvents);
-      setWorkflowRuntimeState((prev) => reduceWorkflowRuntimeStateFromEvents(prev, pendingEvents));
-      setLiveCheckpointWaitPrompt(getPendingCheckpointWaitPrompt(mergedEvents));
-    };
-
-    try {
-      const response = await openThreadEventsSnapshotResponse(threadId, controller.signal, true, 0);
-      if (!response.ok || !response.body) {
-        return;
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-
-      const collectFrame = (rawFrame: string) => {
-        const frame = parseSSEFrame(rawFrame.trim());
-        if (!frame) {
-          return true;
-        }
-        const event = normalizeThreadEvent(frame);
-        if (!processedWorkflowEventKeysRef.current.has(event.key) && !restoredEventKeys.has(event.key)) {
-          restoredEventKeys.add(event.key);
-          restoredEvents.push(event);
-        }
-        return !isTerminalThreadEvent(event.type);
-      };
-
-      while (!controller.signal.aborted) {
-        const { value, done } = await reader.read();
-        if (done) {
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        const frames = buffer.split(/\r?\n\r?\n/);
-        buffer = frames.pop() || "";
-
-        for (const rawFrame of frames) {
-          if (!collectFrame(rawFrame)) {
-            flushRestoredEvents();
-            return;
-          }
-        }
-      }
-
-      const trailingText = buffer.trim();
-      if (trailingText) {
-        collectFrame(trailingText);
-      }
-      flushRestoredEvents();
-    } catch (error) {
-      if (controller.signal.aborted) {
-        flushRestoredEvents();
-      } else {
-        throw error;
-      }
-    } finally {
-      window.clearTimeout(timeoutId);
-      signal?.removeEventListener("abort", abortSnapshot);
-    }
+    const response = await axiosInstance.get(`${AGENT_API_BASE}/threads/${encodeURIComponent(threadId)}/steps`, { signal });
+    return normalizeThreadStepListPayload(response.data as ThreadRestorePayload);
   };
 
-  const subscribeThreadEvents = async (threadId: string, sessionId = activeSessionId) => {
+  const refreshThreadStepList = async (
+    threadId: string,
+    signal?: AbortSignal,
+  ) => {
+    const stepList = await fetchThreadStepList(threadId, signal);
+    if (!signal?.aborted) {
+      setThreadStepList(stepList);
+    }
+    return stepList;
+  };
+
+  const restoreThreadStepRecords = async (
+    threadId: string,
+    stepId: string,
+    signal?: AbortSignal,
+  ) => {
+    const response = await axiosInstance.get(
+      `${AGENT_API_BASE}/threads/${encodeURIComponent(threadId)}/steps/${encodeURIComponent(stepId)}/records`,
+      { signal },
+    );
+    if (signal?.aborted) {
+      return [];
+    }
+
+    const restoredEvents = normalizeThreadRecordEvents(response.data as ThreadRestorePayload);
+    const pendingEvents = restoredEvents.filter((event) => !processedWorkflowEventKeysRef.current.has(event.key));
+    if (pendingEvents.length === 0) {
+      return [];
+    }
+
+    pendingEvents.forEach((event) => processedWorkflowEventKeysRef.current.add(event.key));
+    const mergedEvents = mergeThreadEvents(pendingEvents);
+    setWorkflowRuntimeState((prev) => reduceWorkflowRuntimeStateFromEvents(prev, pendingEvents));
+    setLiveCheckpointWaitPrompt(getPendingCheckpointWaitPrompt(mergedEvents));
+    return pendingEvents;
+  };
+
+  const restoreLatestThreadStep = async (
+    threadId: string,
+    sessionId = activeSessionId,
+    signal?: AbortSignal,
+    preloadedStepList?: ThreadStepListState,
+  ) => {
+    const stepList = preloadedStepList || await refreshThreadStepList(threadId, signal);
+    if (signal?.aborted) {
+      return;
+    }
+    if (preloadedStepList) {
+      setThreadStepList(preloadedStepList);
+    }
+
+    const latestStep = getDefaultThreadStep(stepList);
+    if (!latestStep) {
+      return;
+    }
+
+    if (isThreadStepRunning(latestStep)) {
+      void subscribeThreadEvents(threadId, latestStep.stepId, sessionId);
+      return;
+    }
+
+    await restoreThreadStepRecords(threadId, latestStep.stepId, signal);
+  };
+
+  const subscribeThreadEvents = async (threadId: string, stepId: string, sessionId = activeSessionId) => {
     const activeSubscription = threadEventsAbortRef.current;
-    if (activeSubscription?.threadId === threadId && !activeSubscription.controller.signal.aborted) {
+    if (
+      activeSubscription?.threadId === threadId &&
+      activeSubscription.stepId === stepId &&
+      !activeSubscription.controller.signal.aborted
+    ) {
       return;
     }
 
@@ -2192,12 +2439,12 @@ export function SelfEvolutionPageController({
     processedThreadEventIdsRef.current = new Set();
 
     const controller = new AbortController();
-    const subscription = { threadId, controller };
+    const subscription = { threadId, stepId, controller };
     threadEventsAbortRef.current = subscription;
     const shouldAppendEventChat = mode === "auto";
 
     try {
-      const response = await openThreadEventsResponse(threadId, controller.signal);
+      const response = await openStepEventsResponse(threadId, stepId, controller.signal);
 
       if (!response.ok) {
         throw new Error(`事件流连接失败：HTTP ${response.status}`);
@@ -2234,10 +2481,15 @@ export function SelfEvolutionPageController({
           }
 
           const event = normalizeThreadEvent(frame);
+          rememberNextStepRunId(event);
           applyWorkflowEvent(event, sessionId, { appendChat: shouldAppendEventChat });
+          if (continueThreadEventsFromRunCompleted(threadId, event, sessionId, stepId)) {
+            return;
+          }
           if (isTerminalThreadEvent(event.type)) {
+            await reader.cancel().catch(() => undefined);
             controller.abort();
-            break;
+            return;
           }
         }
       }
@@ -2246,7 +2498,15 @@ export function SelfEvolutionPageController({
       if (!controller.signal.aborted && trailingText) {
         const frame = parseSSEFrame(trailingText);
         if (frame) {
-          applyWorkflowEvent(normalizeThreadEvent(frame), sessionId, { appendChat: shouldAppendEventChat });
+          const event = normalizeThreadEvent(frame);
+          rememberNextStepRunId(event);
+          applyWorkflowEvent(event, sessionId, { appendChat: shouldAppendEventChat });
+          if (continueThreadEventsFromRunCompleted(threadId, event, sessionId, stepId)) {
+            return;
+          }
+          if (isTerminalThreadEvent(event.type)) {
+            controller.abort();
+          }
         }
       }
     } catch (error) {
@@ -2269,7 +2529,10 @@ export function SelfEvolutionPageController({
     setIsWorkbenchVisible(true);
     setWorkflowRuntimeState(createThreadRestoreWorkflowRuntimeState());
     replaceThreadEvents([]);
+    setThreadStepList({ steps: [] });
     processedWorkflowEventKeysRef.current = new Set();
+    pendingNextStepRunIdRef.current = undefined;
+    continuedThreadStepIdsRef.current = new Set();
     setLiveCheckpointWaitPrompt(undefined);
     if (threadEventsAbortRef.current && !threadEventsAbortRef.current.controller.signal.aborted) {
       threadEventsAbortRef.current.controller.abort();
@@ -2297,9 +2560,14 @@ export function SelfEvolutionPageController({
 
     try {
       const encodedThreadId = encodeURIComponent(threadId);
+      const restoredStepList = await fetchThreadStepList(threadId, signal);
+      if (signal?.aborted || restoreRequestIdRef.current !== requestId) {
+        return;
+      }
+      setThreadStepList(restoredStepList);
+
       let historyTitle: string | undefined;
       let historyMessages: ChatMessage[] = [];
-      void restoreThreadEventsSnapshot(threadId, signal).catch(() => undefined);
 
       try {
         const historyPayload = (
@@ -2412,9 +2680,7 @@ export function SelfEvolutionPageController({
           setWorkflowRuntimeState(createCheckpointRestoreWorkflowRuntimeState(checkpointEvent.checkpointWait));
         }
       }
-      if (restoredFlowStatus === "running") {
-        subscribeThreadEvents(threadId, restoredSessionId);
-      }
+      await restoreLatestThreadStep(threadId, restoredSessionId, signal, restoredStepList);
     } catch (error) {
       if (signal?.aborted || isCanceledRequest(error)) {
         return;
@@ -2518,9 +2784,15 @@ export function SelfEvolutionPageController({
 
         const contentType = response.headers.get("content-type") || "";
         if (contentType.includes("text/event-stream")) {
-          await consumeThreadMessageStream(response, activeSessionId, controller.signal);
-          void restoreThreadEventsSnapshot(activeThreadId);
-          subscribeThreadEvents(activeThreadId, activeSessionId);
+          const continuedFromRunCompleted = await consumeThreadMessageStream(
+            response,
+            activeSessionId,
+            controller.signal,
+            activeThreadId,
+          );
+          if (!continuedFromRunCompleted) {
+            subscribePendingNextStepRunOrRestoreLatest(activeThreadId, activeSessionId);
+          }
           return;
         }
 
@@ -2539,8 +2811,7 @@ export function SelfEvolutionPageController({
             { dedupeLast: true },
           );
         }
-        void restoreThreadEventsSnapshot(activeThreadId);
-        subscribeThreadEvents(activeThreadId, activeSessionId);
+        subscribePendingNextStepRunOrRestoreLatest(activeThreadId, activeSessionId);
       } catch (error) {
         appendSystemMessage(
           getLocalizedErrorMessage(error, "消息发送失败，请检查 message 接口。") ||
@@ -2599,8 +2870,7 @@ export function SelfEvolutionPageController({
         },
         { dedupeLast: true },
       );
-      void restoreThreadEventsSnapshot(activeThreadId);
-      subscribeThreadEvents(activeThreadId, activeSessionId);
+      subscribePendingNextStepRunOrRestoreLatest(activeThreadId, activeSessionId);
     } catch (error) {
       appendSystemMessage(
         getLocalizedErrorMessage(error, "继续执行失败，请稍后重试。") ||
@@ -2648,7 +2918,10 @@ export function SelfEvolutionPageController({
       const threadId = await createAndStartThread();
       setWorkflowRuntimeState(createWorkflowRuntimeStateForMode(mode));
       replaceThreadEvents([]);
+      setThreadStepList({ steps: [] });
       processedWorkflowEventKeysRef.current = new Set();
+      pendingNextStepRunIdRef.current = undefined;
+      continuedThreadStepIdsRef.current = new Set();
       setIsWorkbenchVisible(true);
       window.localStorage.setItem(SELF_EVOLUTION_LAST_THREAD_STORAGE_KEY, threadId);
       const nowLabel = getTimeLabel();
@@ -2680,7 +2953,7 @@ export function SelfEvolutionPageController({
             : session,
         ),
       );
-      subscribeThreadEvents(threadId, activeSessionId);
+      void subscribeThreadEvents(threadId, INITIAL_THREAD_STEP_ID, activeSessionId);
       navigate(`/self-evolution/detail/${encodeURIComponent(threadId)}`);
       message.success("已调用接口并启动自进化流程。", 1.2);
     } catch (error) {
@@ -2778,7 +3051,10 @@ export function SelfEvolutionPageController({
       setHasLaunchValidationTriggered(false);
       setWorkflowRuntimeState(createWorkflowRuntimeStateForMode(nextMode));
       replaceThreadEvents([]);
+      setThreadStepList({ steps: [] });
       processedWorkflowEventKeysRef.current = new Set();
+      pendingNextStepRunIdRef.current = undefined;
+      continuedThreadStepIdsRef.current = new Set();
       setChatSessions((prev) => [...prev, newSession]);
       setActiveSessionId(newSessionId);
       setPrompt("");
@@ -2786,7 +3062,7 @@ export function SelfEvolutionPageController({
       setIsNewSessionConfigOpen(false);
       setHasNewSessionValidationTriggered(false);
       window.localStorage.setItem(SELF_EVOLUTION_LAST_THREAD_STORAGE_KEY, threadId);
-      subscribeThreadEvents(threadId, newSessionId);
+      void subscribeThreadEvents(threadId, INITIAL_THREAD_STEP_ID, newSessionId);
       navigate(`/self-evolution/detail/${encodeURIComponent(threadId)}`);
       message.success("已调用接口并启动新会话流程。", 1.2);
     } catch (error) {
@@ -2902,7 +3178,10 @@ export function SelfEvolutionPageController({
     setWorkflowResults(createInitialWorkflowResultsState());
     setCaseArtifact(undefined);
     replaceThreadEvents([]);
+    setThreadStepList({ steps: [] });
     processedWorkflowEventKeysRef.current = new Set();
+    pendingNextStepRunIdRef.current = undefined;
+    continuedThreadStepIdsRef.current = new Set();
     setThreadRestoreError("");
     setPrompt("");
     navigate("/self-evolution");
@@ -4435,11 +4714,32 @@ export function SelfEvolutionPageController({
   const visibleArtifactItems = artifactItems.filter((item) =>
     workflowSteps.some((step) => step.id === item.stepId),
   );
+  const isOpaqueStepTitle = (title: string | undefined, stepId: string) => {
+    const normalizedTitle = title?.trim();
+    if (!normalizedTitle || normalizedTitle === stepId) {
+      return true;
+    }
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalizedTitle);
+  };
+  const threadStepNavigationItems = threadStepList.steps.map((step, index) => ({
+    step,
+    index,
+    item: artifactItems[index],
+  }));
   const getArtifactStep = (item: ArtifactPanelItem) =>
     workflowSteps.find((step) => step.id === item.stepId);
-  const getArtifactStatusLabel = (item: ArtifactPanelItem) => {
+  const getNavigationStepStatus = (item?: ArtifactPanelItem, step?: ThreadStepSummary): StepStatus => {
+    const threadStatus = normalizeThreadStepStatus(step?.status);
+    if (threadStatus) {
+      return threadStatus;
+    }
+    if (item) {
+      return getArtifactStep(item)?.status || "pending";
+    }
+    return "pending";
+  };
+  const getArtifactStatusLabel = (item: ArtifactPanelItem, stepSummary?: ThreadStepSummary) => {
     const state = workflowResults[item.kind];
-    const step = getArtifactStep(item);
     if (state.loading) {
       return "加载中";
     }
@@ -4449,59 +4749,68 @@ export function SelfEvolutionPageController({
     if (state.loaded) {
       return isEmptyResultPayload(state.data) ? "暂无结果" : "已加载";
     }
-    return localizedGetStepStatusLabel(step?.status || "pending");
+    return localizedGetStepStatusLabel(getNavigationStepStatus(item, stepSummary));
   };
-  const observationEntryItems = artifactItems.filter((item): item is ArtifactPanelItem & { kind: "eval-reports" | "abtests" } =>
-    item.kind === "eval-reports" || item.kind === "abtests",
-  );
+  const getStepNavigationTitle = (item: ArtifactPanelItem | undefined, step: ThreadStepSummary | undefined, index: number) => {
+    if (step && !isOpaqueStepTitle(step.title, step.stepId)) {
+      return step.title;
+    }
+    return item?.sectionTitle || `Step ${index + 1}`;
+  };
+  const getStepNavigationDesc = (item: ArtifactPanelItem | undefined, step: ThreadStepSummary | undefined) => {
+    if (item) {
+      return item.sectionDesc;
+    }
+    return step?.stepId ? `步骤 ID：${getShortLabel(step.stepId)}` : "等待步骤信息";
+  };
   const renderArtifactNavigationPanel = () => (
     <>
-      <section className="self-evolution-observation-entry-panel" aria-label="观测查看入口">
-        <div className="self-evolution-observation-entry-head">
-          <Text>观测入口</Text>
-          <span>Trace / A-B</span>
-        </div>
-        <div className="self-evolution-observation-entry-list">
-          {observationEntryItems.map((item) => {
-            const isActive = item.kind === activeArtifactItem?.kind;
-            const resultState = workflowResults[item.kind];
-            const stateLabel = resultState.loading
-              ? "加载中"
-              : resultState.error
-                ? "可重试"
-                : resultState.loaded
-                  ? isEmptyResultPayload(resultState.data)
-                    ? "暂无数据"
-                    : "已加载"
-                  : "点击查看";
-            return (
-              <button
-                key={`observation-${item.kind}`}
-                type="button"
-                className={`self-evolution-observation-entry${isActive ? " is-active" : ""}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openObservationPage(item.kind === "eval-reports" ? "eval" : "abtest");
-                }}
-              >
-                <span>
-                  <strong>{item.kind === "eval-reports" ? "Step 2 · 观测详情" : "Step 5 · A/B 观测"}</strong>
-                  <em>{item.kind === "eval-reports" ? "Agentic RAG Trace 链路" : "Case A/B Trace 对比"}</em>
-                </span>
-                <i>{stateLabel}</i>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-      {visibleArtifactItems.length === 0 ? (
+      {threadStepNavigationItems.length > 0 ? (
+        threadStepNavigationItems.map(({ item, step, index }) => {
+          const stepStatus = getNavigationStepStatus(item, step);
+          const isActive = step.active || Boolean(item && item.kind === activeArtifactItem?.kind);
+          const resultState = item ? workflowResults[item.kind] : undefined;
+          const hasLoadedArtifact = Boolean(resultState?.loaded && !isEmptyResultPayload(resultState.data));
+          const canOpenArtifact = Boolean(item && (stepStatus === "done" || hasLoadedArtifact));
+
+          return (
+            <button
+              key={step.stepId}
+              type="button"
+              className={`self-evolution-artifact-item${isActive ? " is-active" : ""}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (!item) {
+                  message.info("该步骤暂无关联产物。", 2);
+                  return;
+                }
+                if (!canOpenArtifact) {
+                  message.info(`${item.title}尚未生成完整产物。`, 2);
+                  return;
+                }
+                openWorkflowArtifact(item.kind);
+              }}
+            >
+              <span className="self-evolution-artifact-item-title">
+                {getStepNavigationTitle(item, step, index)}
+              </span>
+              <span className="self-evolution-artifact-item-desc">
+                {getStepNavigationDesc(item, step)}
+              </span>
+              <span className={`self-evolution-artifact-item-status is-${stepStatus}`}>
+                {item ? getArtifactStatusLabel(item, step) : localizedGetStepStatusLabel(stepStatus)}
+              </span>
+            </button>
+          );
+        })
+      ) : visibleArtifactItems.length === 0 ? (
         <Paragraph className="self-evolution-artifact-empty">
           启动后会按执行进度显示产物。
         </Paragraph>
       ) : (
         visibleArtifactItems.map((item) => {
           const step = getArtifactStep(item);
-          const stepStatus = step?.status || "pending";
+          const stepStatus = getNavigationStepStatus(item);
           const isActive = item.kind === activeArtifactItem?.kind;
           const resultState = workflowResults[item.kind];
           const hasLoadedArtifact = resultState.loaded && !isEmptyResultPayload(resultState.data);

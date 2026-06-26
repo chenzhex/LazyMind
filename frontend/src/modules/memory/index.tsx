@@ -40,6 +40,7 @@ import ShareModal from "./components/ShareModal";
 import SkillShareCenterModal from "./components/SkillShareCenterModal";
 import {
   acceptSkillShare,
+  buildSkillUpdatePayload,
   confirmSkillDraft,
   createSkillAsset,
   discardSkillDraft,
@@ -50,12 +51,14 @@ import {
   listOutgoingSkillShares,
   listSkillShareTargets,
   listSkillAssetsPage,
+  listSkillCategories,
   listSkillTags,
   patchSkillAsset,
   previewSkillDraft,
   rejectSkillShare,
   removeSkillAsset,
   shareSkillAsset,
+  type SkillAssetRecord,
   type SkillShareRecord,
   type SkillShareStatus,
 } from "./skillApi";
@@ -122,7 +125,7 @@ import {
   GLOSSARY_CONTENT_MAX_LENGTH,
   GLOSSARY_TERM_MAX_LENGTH,
   MEMORY_BASE_PATH,
-  buildDiffLines,
+  buildDiffLinesWithInline,
   buildUnifiedDiffLines,
   canUploadSkillFile,
   cloneExperienceAsset,
@@ -161,6 +164,7 @@ import "./index.scss";
 
 const backendSuggestionPageSize = 20;
 const defaultSkillListPageSize = 6;
+const parentSkillOptionPageSize = 200;
 const defaultGlossaryListPageSize = 4;
 const showGlossaryInboxUi = true;
 const MERGED_GLOSSARY_GROUP_OPTION_ID = "__merged_glossary_group__";
@@ -195,6 +199,38 @@ const getAutoEvoStatusMeta = (status?: string) => {
     textKey: "admin.memoryAutoEvoStatusWaiting",
   };
 };
+
+const mapSkillAssetRecordToStructuredAsset = (
+  item: SkillAssetRecord,
+): StructuredAsset => ({
+  id: item.id,
+  name: item.name,
+  description: item.description,
+  category: item.category,
+  tags: item.tags,
+  content: item.content,
+  parentId: item.parentId,
+  parentSkillName: item.parentSkillName,
+  protect: item.protect,
+  autoEvo: item.autoEvo,
+  autoEvoApplyStatus: item.autoEvoApplyStatus,
+  autoEvoGeneration: item.autoEvoGeneration,
+  autoEvoError: item.autoEvoError,
+  fileExt: item.fileExt,
+  isEnabled: item.isEnabled,
+  hasPendingReviewSuggestions: item.hasPendingReviewSuggestions,
+  hasPendingReviewResult: item.hasPendingReviewResult,
+  hasPendingRemoveSuggestion: item.hasPendingRemoveSuggestion,
+  reviewStatus: item.reviewStatus,
+  suggestionStatus: item.suggestionStatus,
+  nodeType: item.nodeType,
+  updateStatus: item.updateStatus,
+  builtinSkillUid: item.builtinSkillUid,
+  originBuiltinSkillUid: item.originBuiltinSkillUid,
+  isBuiltinTemplate: item.isBuiltinTemplate,
+  activationStatus: item.activationStatus,
+  readonly: item.readonly,
+});
 const hasDraftPreviewStatus = (record: ExperienceAsset) =>
   isPendingReviewStatus(record.reviewStatus);
 const hasSkillDraftPreviewStatus = (record: StructuredAsset) =>
@@ -293,7 +329,13 @@ export default function MemoryManagement() {
   })();
   const [activeTab, setActiveTab] = useState<MemoryTab>(routeMemoryTab);
   const [skillAssets, setSkillAssets] = useState<StructuredAsset[]>(initialSkills);
+  const [parentSkillAssets, setParentSkillAssets] =
+    useState<StructuredAsset[]>(initialSkills);
+  const [parentSkillOptionsLoading, setParentSkillOptionsLoading] = useState(false);
   const [skillLoading, setSkillLoading] = useState(false);
+  const [skillCategories, setSkillCategories] = useState<string[]>([]);
+  const [skillCategoriesLoaded, setSkillCategoriesLoaded] = useState(false);
+  const [skillCategoriesLoading, setSkillCategoriesLoading] = useState(false);
   const [skillTags, setSkillTags] = useState<string[]>([]);
   const [skillTagsLoaded, setSkillTagsLoaded] = useState(false);
   const [skillTagsLoading, setSkillTagsLoading] = useState(false);
@@ -301,6 +343,7 @@ export default function MemoryManagement() {
   const [builtinSkillEnableLoading, setBuiltinSkillEnableLoading] = useState<Set<string>>(new Set());
   const [skillsInitialized, setSkillsInitialized] = useState(false);
   const skillListRequestIdRef = useRef(0);
+  const parentSkillListRequestIdRef = useRef(0);
   const skillListRouteLocationKeyRef = useRef("");
   const skillListRefreshKeyRef = useRef("");
   const experienceSectionRefreshKeyRef = useRef("");
@@ -466,10 +509,12 @@ export default function MemoryManagement() {
 
   const currentTabMeta = tabMeta[activeTab];
   const currentStructuredItems = activeTab === "skills" ? skillAssets : [];
+  const parentSkillCandidateAssets =
+    parentSkillAssets.length > 0 ? parentSkillAssets : skillAssets;
 
   const topLevelSkills = useMemo(
-    () => skillAssets.filter((item) => !item.parentId),
-    [skillAssets],
+    () => parentSkillCandidateAssets.filter((item) => !item.parentId),
+    [parentSkillCandidateAssets],
   );
   const parentSkillOptions = useMemo(
     () =>
@@ -481,10 +526,37 @@ export default function MemoryManagement() {
         })),
     [draft.id, topLevelSkills],
   );
+  const resolveSkillParentName = useCallback(
+    (item: StructuredAsset) =>
+      item.parentSkillName ||
+      (item.parentId
+        ? parentSkillCandidateAssets.find((candidate) => candidate.id === item.parentId)?.name || ""
+        : ""),
+    [parentSkillCandidateAssets],
+  );
+  const buildSkillPatchPayload = useCallback(
+    (item: StructuredAsset, overrides: Record<string, unknown> = {}) =>
+      buildSkillUpdatePayload(
+        {
+          ...item,
+          content: item.parentId ? item.content : getSkillBodyContentForDisplay(item.content || ""),
+          parentSkillName: resolveSkillParentName(item),
+        },
+        {
+          is_locked: Boolean(item.protect),
+          ...overrides,
+        },
+      ),
+    [resolveSkillParentName],
+  );
 
-  const availableCategories = [...new Set(currentStructuredItems.map((item) => item.category))]
+  const localAvailableCategories = [...new Set(currentStructuredItems.map((item) => item.category))]
     .filter(Boolean)
     .sort((left, right) => left.localeCompare(right));
+  const availableCategories =
+    activeTab === "skills" && skillCategoriesLoaded
+      ? skillCategories
+      : localAvailableCategories;
   const localAvailableTags = [
     ...new Set(currentStructuredItems.flatMap((item) => item.tags)),
   ].sort((left, right) => left.localeCompare(right));
@@ -698,36 +770,7 @@ export default function MemoryManagement() {
       setSkillListTotal(result.total);
       setSkillListPage(result.page);
       setSkillListPageSize(result.pageSize);
-      setSkillAssets(
-        records.map((item) => ({
-          id: item.id,
-          name: item.name,
-          description: item.description,
-          category: item.category,
-          tags: item.tags,
-          content: item.content,
-          parentId: item.parentId,
-          protect: item.protect,
-          autoEvo: item.autoEvo,
-          autoEvoApplyStatus: item.autoEvoApplyStatus,
-          autoEvoGeneration: item.autoEvoGeneration,
-          autoEvoError: item.autoEvoError,
-          fileExt: item.fileExt,
-          isEnabled: item.isEnabled,
-          hasPendingReviewSuggestions: item.hasPendingReviewSuggestions,
-          hasPendingReviewResult: item.hasPendingReviewResult,
-          hasPendingRemoveSuggestion: item.hasPendingRemoveSuggestion,
-          reviewStatus: item.reviewStatus,
-          suggestionStatus: item.suggestionStatus,
-          nodeType: item.nodeType,
-          updateStatus: item.updateStatus,
-          builtinSkillUid: item.builtinSkillUid,
-          originBuiltinSkillUid: item.originBuiltinSkillUid,
-          isBuiltinTemplate: item.isBuiltinTemplate,
-          activationStatus: item.activationStatus,
-          readonly: item.readonly,
-        })),
-      );
+      setSkillAssets(records.map(mapSkillAssetRecordToStructuredAsset));
       if (!options.preserveChangeProposals) {
         setChangeProposals((previous) =>
           previous.filter((proposal) => proposal.tab !== "skills"),
@@ -745,6 +788,52 @@ export default function MemoryManagement() {
       }
     }
   }, [category, skillKeyword, skillListPage, skillListPageSize, tag]);
+
+  const refreshParentSkillAssets = useCallback(async () => {
+    const requestId = parentSkillListRequestIdRef.current + 1;
+    parentSkillListRequestIdRef.current = requestId;
+    setParentSkillOptionsLoading(true);
+
+    try {
+      const firstResult = await listSkillAssetsPage({
+        page: 1,
+        pageSize: parentSkillOptionPageSize,
+      });
+      if (parentSkillListRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      const records = [...firstResult.records];
+      const pageSize = Math.max(1, firstResult.pageSize || parentSkillOptionPageSize);
+      const totalPages = Math.ceil(firstResult.total / pageSize);
+
+      for (let page = 2; page <= totalPages; page += 1) {
+        const pageResult = await listSkillAssetsPage({ page, pageSize });
+        if (parentSkillListRequestIdRef.current !== requestId) {
+          return;
+        }
+        records.push(...pageResult.records);
+      }
+
+      const deduped = new Map<string, SkillAssetRecord>();
+      records.forEach((item) => {
+        deduped.set(item.id, item);
+      });
+      setParentSkillAssets(
+        Array.from(deduped.values()).map(mapSkillAssetRecordToStructuredAsset),
+      );
+    } catch (error) {
+      if (parentSkillListRequestIdRef.current !== requestId) {
+        return;
+      }
+      console.error("Load parent skill options failed:", error);
+      setParentSkillAssets(skillAssets);
+    } finally {
+      if (parentSkillListRequestIdRef.current === requestId) {
+        setParentSkillOptionsLoading(false);
+      }
+    }
+  }, [skillAssets]);
 
   const refreshGlossaryAssets = useCallback(
     async (options?: {
@@ -1116,6 +1205,45 @@ export default function MemoryManagement() {
       .finally(() => {
         if (!ignore) {
           setSkillTagsLoading(false);
+        }
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [reviewRouteTab, routeMemoryTab, skillRouteItemId]);
+
+  useEffect(() => {
+    const shouldLoadSkillCategories =
+      Boolean(skillRouteItemId) ||
+      reviewRouteTab === "skills" ||
+      routeMemoryTab === "skills";
+
+    if (!shouldLoadSkillCategories) {
+      return undefined;
+    }
+
+    let ignore = false;
+    setSkillCategoriesLoading(true);
+
+    void listSkillCategories()
+      .then((categories) => {
+        if (ignore) {
+          return;
+        }
+        setSkillCategories(categories);
+        setSkillCategoriesLoaded(true);
+      })
+      .catch((error) => {
+        if (ignore) {
+          return;
+        }
+        console.error("Load skill categories failed:", error);
+        setSkillCategoriesLoaded(false);
+      })
+      .finally(() => {
+        if (!ignore) {
+          setSkillCategoriesLoading(false);
         }
       });
 
@@ -1877,16 +2005,16 @@ export default function MemoryManagement() {
       const afterExp = effectiveProposalMerged as ExperienceAsset;
       const beforeYaml = serializePreferenceYaml(beforeExp);
       const afterYaml = serializePreferenceYaml(afterExp);
-      prefYamlDiffLines = buildDiffLines(beforeYaml, afterYaml);
+      prefYamlDiffLines = buildDiffLinesWithInline(beforeYaml, afterYaml);
       const beforeBody = parsePreferenceYamlAndBody(beforeExp.content).bodyText;
       const afterBody = parsePreferenceYamlAndBody(afterExp.content).bodyText;
-      prefBodyDiffLines = buildDiffLines(beforeBody, afterBody);
+      prefBodyDiffLines = buildDiffLinesWithInline(beforeBody, afterBody);
     }
 
     return {
       beforeText,
       afterText,
-      lines: buildDiffLines(beforeText, afterText),
+      lines: buildDiffLinesWithInline(beforeText, afterText),
       changedFields,
       isPreference,
       prefYamlDiffLines,
@@ -2352,6 +2480,10 @@ export default function MemoryManagement() {
       nextSearchParams.delete("item");
     }
 
+    if (nextSearchParams.toString() === searchParams.toString()) {
+      return;
+    }
+
     setSearchParams(nextSearchParams, { replace: true });
   };
 
@@ -2362,6 +2494,10 @@ export default function MemoryManagement() {
   ) => {
     setPendingGlossaryMergeSourceIds([]);
     setModalMode(mode);
+
+    if (activeTab === "skills" && (mode === "add" || mode === "edit")) {
+      void refreshParentSkillAssets();
+    }
 
     if (!item) {
       setDraft(createDraft());
@@ -4111,10 +4247,12 @@ export default function MemoryManagement() {
         }
 
         if (hasPendingMerge) {
-          const merged = await mergeGlossaryAssets([
-            payload.id,
-            ...pendingGlossaryMergeSourceIds,
-          ]);
+          const merged = await mergeGlossaryAssets({
+            group_ids: [payload.id, ...pendingGlossaryMergeSourceIds],
+            term: payload.term,
+            aliases: payload.aliases,
+            description: payload.content,
+          });
           mergeApplied = true;
           savedGlossary = await updateGlossaryAsset({
             ...payload,
@@ -4263,7 +4401,7 @@ export default function MemoryManagement() {
 
       if (activeTab === "skills") {
         const parentSkill = payload.parentId
-          ? skillAssets.find((item) => item.id === payload.parentId)
+          ? parentSkillCandidateAssets.find((item) => item.id === payload.parentId)
           : undefined;
         if (payload.parentId && payload.parentId === payload.id) {
           message.warning(t("admin.memoryParentSkillSelf"));
@@ -4275,7 +4413,9 @@ export default function MemoryManagement() {
           return;
         }
 
-        const hasChildren = skillAssets.some((item) => item.parentId === payload.id);
+        const hasChildren = parentSkillCandidateAssets.some(
+          (item) => item.parentId === payload.id,
+        );
         if (payload.parentId && hasChildren) {
           message.warning(t("admin.memoryParentSkillHasChildren"));
           return;
@@ -4292,23 +4432,36 @@ export default function MemoryManagement() {
               return;
             }
 
-            const patchPayload: Record<string, unknown> = {
-              name: payload.name,
-              content: payload.content,
-              is_locked: Boolean(payload.protect),
+            const existingSkill = skillAssets.find((item) => item.id === payload.id);
+            const patchFileExt = payload.parentId
+              ? payload.fileExt || existingSkill?.fileExt || inferSkillFileExt(undefined, payload.content)
+              : "md";
+            const patchCategory = payload.parentId
+              ? existingSkill?.category || payload.category
+              : payload.category;
+            const patchParentSkillName = payload.parentId
+              ? parentSkill?.name || existingSkill?.parentSkillName || ""
+              : "";
+            const patchSource: StructuredAsset = {
+              ...(existingSkill || payload),
+              ...payload,
+              category: patchCategory,
+              parentSkillName: patchParentSkillName,
+              autoEvo: existingSkill?.autoEvo ?? payload.autoEvo,
+              isEnabled: existingSkill?.isEnabled ?? payload.isEnabled ?? true,
+              fileExt: patchFileExt,
             };
-
-            if (payload.parentId) {
-              patchPayload.description = payload.description;
-              patchPayload.tags = payload.tags;
-              patchPayload.file_ext = payload.fileExt || inferSkillFileExt(undefined, payload.content);
-            } else {
-              patchPayload.description = payload.description;
-              patchPayload.category = payload.category;
-              patchPayload.tags = payload.tags;
-              patchPayload.is_enabled = true;
-              patchPayload.file_ext = "md";
-            }
+            const patchPayload = buildSkillPatchPayload(patchSource, {
+              name: payload.name,
+              description: payload.description,
+              tags: payload.tags,
+              content: payload.content,
+              category: patchCategory,
+              parent_skill_id: payload.parentId || "",
+              parent_skill_name: patchParentSkillName,
+              file_ext: patchFileExt,
+              is_locked: Boolean(payload.protect),
+            });
 
             await patchSkillAsset(payload.id, patchPayload);
             setChangeProposals((previous) =>
@@ -4919,7 +5072,7 @@ export default function MemoryManagement() {
               void (async () => {
                 setSkillAutoEvoLoading((prev) => new Set(prev).add(record.id));
                 try {
-                  await patchSkillAsset(record.id, { auto_evo: checked });
+                  await patchSkillAsset(record.id, buildSkillPatchPayload(record, { auto_evo: checked }));
                   await refreshSkillAssets({ preserveChangeProposals: true });
                 } catch (error) {
                   console.error("Toggle auto_evo failed:", error);
@@ -5501,6 +5654,7 @@ export default function MemoryManagement() {
     availableGlossarySourceOptions,
     availableCategories,
     availableTags,
+    skillCategoriesLoading,
     skillTagsLoading,
     selectedGlossaryAssets,
     handleBatchMergeGlossary,
@@ -5635,6 +5789,7 @@ export default function MemoryManagement() {
         modalMode={modalMode}
         isChildSkillDraft={isChildSkillDraft}
         parentSkillOptions={parentSkillOptions}
+        parentSkillOptionsLoading={parentSkillOptionsLoading}
         tagOptions={tagOptions}
         normalizeTagValues={normalizeTagValues}
         createSkillUploadProps={createSkillUploadProps}

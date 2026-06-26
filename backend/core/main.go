@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
-	"gopkg.in/yaml.v3"
 	"lazymind/core/acl"
 	"lazymind/core/asyncjob"
 	"lazymind/core/chat"
@@ -28,6 +26,9 @@ import (
 	"lazymind/core/state"
 	"lazymind/core/store"
 	"lazymind/core/subagent"
+
+	"github.com/gorilla/mux"
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed docs.html
