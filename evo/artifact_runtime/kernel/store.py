@@ -297,6 +297,24 @@ class SQLiteArtifactStore:
         records = (self.get(ArtifactRef(key, row['version'])) for row in rows)
         return tuple(record for record in records if record is not None)
 
+    def run_ids(self, key: ArtifactKey | None = None) -> tuple[str, ...]:
+        if key is None:
+            rows = self._conn.execute(
+                'SELECT DISTINCT run_id FROM artifact_heads ORDER BY run_id'
+            ).fetchall()
+        else:
+            _require_key(key)
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT run_id
+                FROM artifact_heads
+                WHERE artifact_id = ? AND partition = ?
+                ORDER BY run_id
+                """,
+                (key.artifact_id, key.partition),
+            ).fetchall()
+        return tuple(str(row['run_id']) for row in rows)
+
     def events_since(self, seq: int, run_id: str | None = None) -> tuple[ArtifactEvent, ...]:
         if run_id is None:
             rows = self._conn.execute(
@@ -346,7 +364,7 @@ class SQLiteArtifactStore:
 
     def delete_artifacts(self, run_id: str, keys: Sequence[ArtifactKey] = (),
                          refs: Sequence[ArtifactRef] = (), *, idempotency_key: str
-                        ) -> tuple[ArtifactRef, ...]:
+                         ) -> tuple[ArtifactRef, ...]:
         _require_text(run_id, 'run_id')
         _require_text(idempotency_key, 'idempotency_key')
         keys, refs = _validated_targets(keys, refs)
@@ -556,7 +574,8 @@ class SQLiteArtifactStore:
             (ref.key.artifact_id, ref.key.partition, ref.version),
         ).fetchone()
 
-    def _head_refs(self, run_id: str, keys: Sequence[ArtifactKey], refs: Sequence[ArtifactRef]) -> tuple[ArtifactRef, ...]:
+    def _head_refs(self, run_id: str, keys: Sequence[ArtifactKey],
+                   refs: Sequence[ArtifactRef]) -> tuple[ArtifactRef, ...]:
         found: dict[ArtifactKey, ArtifactRef] = {}
         for key in keys:
             row = self._conn.execute(

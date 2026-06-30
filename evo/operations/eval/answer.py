@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
-import queue
 import re
-import threading
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -24,8 +23,6 @@ SOURCE_KEYS = ('sources', 'source_documents', 'retrieved_contexts', 'contexts', 
 
 
 def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str) -> dict[str, Any]:
-    result: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
-    closer: dict[str, Any] = {}
     try:
         kb_ids = list(dict.fromkeys(item.strip() for item in str(kb_id or '').split(';') if item.strip()))
         session_id = str(target_config.get('session_id') or uuid4().hex).strip().lower()
@@ -71,20 +68,12 @@ def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], 
     except (TypeError, ValueError) as exc:
         target = {'target_chat_url': str(target_config.get('target_chat_url') or ''), 'kb_id': str(kb_id or '')}
         return failed_rag_answer(case, {}, target, 'chat_config_error', str(exc))
-
-    worker = threading.Thread(
-        target=_run_chat,
-        args=(case, target, payload, timeout, deadline, result, closer),
-        daemon=True,
-    )
-    worker.start()
-    worker.join(max(0.0, deadline - time.monotonic()))
-    if worker.is_alive():
-        response = closer.get('response')
-        if response is not None:
-            response.close()
-        return failed_rag_answer(case, {}, target, 'chat_timeout', 'chat stream exceeded case deadline')
-    return result.get() if not result.empty() else failed_rag_answer(case, {}, target, 'chat_unknown_error', 'no result')
+    try:
+        return asyncio.run(_run_chat(case, target, payload, timeout, deadline))
+    except httpx.HTTPError as exc:
+        return failed_rag_answer(case, {}, target, 'chat_transport_error', str(exc))
+    except Exception as exc:
+        return failed_rag_answer(case, {}, target, 'chat_unknown_error', f'{type(exc).__name__}: {exc}')
 
 
 def failed_rag_answer(
@@ -101,97 +90,87 @@ def failed_rag_answer(
     }
 
 
-def _run_chat(
+async def _run_chat(
     case: Mapping[str, Any],
     target: Mapping[str, Any],
     payload: Mapping[str, Any],
     timeout: httpx.Timeout,
     deadline: float,
-    result: queue.Queue[dict[str, Any]],
-    closer: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     stream: dict[str, Any] = {'frames': [], 'answer': '', 'finished': False, 'natural_end': False}
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            with client.stream('POST', target['target_chat_url'], json=payload, headers={
-                'Accept': 'text/event-stream',
-                'Content-Type': 'application/json',
-            }) as response:
-                closer['response'] = response
-                if response.status_code != 200:
-                    result.put(failed_rag_answer(case, stream, target, 'chat_http_error',
-                                                 f'HTTP {response.status_code}'))
-                    return
-                routed = response.headers.get('X-Algorithm-Id')
-                if routed:
-                    target = dict(target) | {'routed_algorithm_id': routed}
-                routed_instance = response.headers.get('X-Instance-Host')
-                if routed_instance:
-                    target = dict(target) | {'routed_instance_host': routed_instance}
-                data_lines: list[str] = []
-                for line in response.iter_lines():
-                    if time.monotonic() > deadline:
-                        response.close()
-                        result.put(failed_rag_answer(case, stream, target, 'chat_timeout',
-                                                     'chat stream exceeded case deadline'))
-                        return
-                    text = str(line or '').strip()
-                    if text.startswith(':') or text.startswith(('event:', 'id:', 'retry:')):
+    line_task: asyncio.Task[str] | None = None
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream('POST', target['target_chat_url'], json=payload, headers={
+            'Accept': 'text/event-stream',
+            'Content-Type': 'application/json',
+        }) as response:
+            if response.status_code != 200:
+                return failed_rag_answer(case, stream, target, 'chat_http_error', f'HTTP {response.status_code}')
+            routed = response.headers.get('X-Algorithm-Id')
+            if routed:
+                target = dict(target) | {'routed_algorithm_id': routed}
+            routed_instance = response.headers.get('X-Instance-Host')
+            if routed_instance:
+                target = dict(target) | {'routed_instance_host': routed_instance}
+            lines = response.aiter_lines()
+            try:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        await response.aclose()
+                        return failed_rag_answer(case, stream, target, 'chat_timeout',
+                                                 'chat stream exceeded case deadline')
+                    if line_task is None:
+                        line_task = asyncio.create_task(anext(lines))
+                    done, _ = await asyncio.wait({line_task}, timeout=min(1.0, remaining))
+                    if not done:
                         continue
-                    if text.startswith('data:'):
-                        text = text[5:].strip()
-                    if text:
-                        data_lines.append(text)
-                        continue
-                    if data_lines and _accept_frame(case, target, stream, data_lines, result):
-                        return
-                    data_lines = []
-                stream['natural_end'] = True
-                if data_lines:
-                    _accept_frame(case, target, stream, data_lines, result)
-                if result.empty():
-                    result.put(_normalize(case, target, stream))
-    except httpx.HTTPError as exc:
-        result.put(failed_rag_answer(case, stream, target, 'chat_transport_error', str(exc)))
-    except Exception as exc:
-        result.put(failed_rag_answer(case, stream, target, 'chat_unknown_error', f'{type(exc).__name__}: {exc}'))
+                    try:
+                        line = line_task.result()
+                    except StopAsyncIteration:
+                        stream['natural_end'] = True
+                        return _normalize(case, target, stream)
+                    line_task = None
+                    accepted = _accept_frame(case, target, stream, str(line or ''))
+                    if accepted is not None:
+                        return accepted
+            finally:
+                if line_task is not None and not line_task.done():
+                    line_task.cancel()
 
 
 def _accept_frame(
     case: Mapping[str, Any],
     target: Mapping[str, Any],
     stream: dict[str, Any],
-    data_lines: list[str],
-    result: queue.Queue[dict[str, Any]],
-) -> bool:
-    text = '\n'.join(data_lines).strip()
+    line: str,
+) -> dict[str, Any] | None:
+    text = str(line or '').strip()
+    if not text or text.startswith(':') or text.startswith(('event:', 'id:', 'retry:')):
+        return None
+    if text.startswith('data:'):
+        text = text[5:].strip()
     if text == '[DONE]':
         stream['finished'] = True
-        result.put(_normalize(case, target, stream))
-        return True
+        return _normalize(case, target, stream)
     try:
         frame = json.loads(text)
     except json.JSONDecodeError:
-        result.put(failed_rag_answer(case, stream, target, 'chat_protocol_error',
-                                     f'non-json SSE data: {text[:120]}'))
-        return True
+        return failed_rag_answer(case, stream, target, 'chat_protocol_error', f'non-json SSE data: {text[:120]}')
     if not isinstance(frame, Mapping):
-        result.put(failed_rag_answer(case, stream, target, 'chat_protocol_error', 'SSE JSON is not an object'))
-        return True
+        return failed_rag_answer(case, stream, target, 'chat_protocol_error', 'SSE JSON is not an object')
     stream['frames'].append(dict(frame))
     data = frame.get('data') if isinstance(frame.get('data'), Mapping) else frame
-    code = data.get('code', frame.get('code'))
+    codes = [value for value in (frame.get('code'), data.get('code')) if value is not None]
     status = str(data.get('status') or '').upper()
-    if code not in (None, 200, '200') or status == 'FAILED':
+    if any(code not in (200, '200') for code in codes) or status == 'FAILED':
         message = data.get('msg') or frame.get('msg') or data.get('message') or status
-        result.put(failed_rag_answer(case, stream, target, 'chat_business_error', str(message)))
-        return True
-    stream['answer'] += str(next((data[key] for key in DELTA_KEYS if data.get(key)), ''))
+        return failed_rag_answer(case, stream, target, 'chat_business_error', str(message))
+    stream['answer'] += str(next((data[key] for key in (*DELTA_KEYS, 'text') if data.get(key)), ''))
     if status == 'FINISHED':
         stream['finished'] = True
-        result.put(_normalize(case, target, stream))
-        return True
-    return False
+        return _normalize(case, target, stream)
+    return None
 
 
 def _normalize(case: Mapping[str, Any], target: Mapping[str, Any], stream: Mapping[str, Any]) -> dict[str, Any]:

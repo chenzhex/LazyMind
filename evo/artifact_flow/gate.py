@@ -44,6 +44,12 @@ class SQLiteFlowGate:
         with self._transaction() as conn:
             return self._state(conn, run_id, create=True)
 
+    def delete_run_state(self, run_id: str) -> None:
+        _require_text(run_id, 'run_id')
+        with self._transaction() as conn:
+            conn.execute('DELETE FROM flow_gates WHERE run_id = ?', (run_id,))
+            conn.execute('DELETE FROM flow_command_receipts WHERE run_id = ?', (run_id,))
+
     def read_command(self, run_id: str, command_id: str, request_hash: str) -> CommandReceipt:
         _require_command(run_id, command_id, request_hash)
         with self._transaction() as conn:
