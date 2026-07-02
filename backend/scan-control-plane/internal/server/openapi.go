@@ -99,6 +99,9 @@ func openAPIPaths() map[string]any {
 			"put":    pathOperation("updateSourceBinding", "SourceBindingRequest", "BindingMutationResponse", "source_id", "binding_id"),
 			"delete": pathOperation("deleteSourceBinding", "", "DeleteBindingResponse", "source_id", "binding_id"),
 		},
+		"/api/scan/sources/{source_id}/append": map[string]any{
+			"post": createdPathOperation("appendSource", "AppendSourceRequest", "AppendSourceResponse", "source_id"),
+		},
 		"/api/scan/sources/{source_id}/sync": map[string]any{
 			"post": pathOperation("triggerSourceSync", "TriggerSourceSyncRequest", "TriggerSourceSyncResponse", "source_id"),
 		},
@@ -262,6 +265,10 @@ func openAPISchemas() map[string]any {
 		"UpdateSourceResponse":          object([]string{"source", "bindings"}, props("source", schemaRef("SourceResponse"), "bindings", arrayOf("SourceBindingResponse"), "created_binding_ids", stringArray(), "updated_binding_ids", stringArray(), "removed_binding_ids", stringArray(), "job_ids", stringArray())),
 		"DeleteSourceResponse":          object([]string{"deleted", "source_id"}, props("deleted", boolSchema(), "source_id", stringSchema(), "removed_binding_ids", stringArray(), "removed_dataset_id", stringSchema())),
 		"SourceBindingRequest":          sourceBindingRequestSchema(),
+		"AppendSourceRequest":           appendSourceRequestSchema(),
+		"AppendSourceResponse":          appendSourceResponseSchema(),
+		"JobError":                      jobErrorSchema(),
+		"SourceAppendBindingRequest":    sourceAppendBindingRequestSchema(),
 		"SourceBindingResponse":         sourceBindingResponseSchema(),
 		"SchedulePolicy":                schedulePolicySchema(),
 		"ScheduleRule":                  scheduleRuleSchema(),
@@ -306,6 +313,35 @@ func openAPISchemas() map[string]any {
 		"TaskAction":                    enumSchema("CREATE", "REPARSE", "DELETE"),
 		"ParseTaskStatus":               enumSchema("PENDING", "RUNNING", "SUBMITTED", "SUCCEEDED", "FAILED", "SUPERSEDED"),
 	}
+}
+
+func appendSourceRequestSchema() map[string]any {
+	return object([]string{"bindings"}, props(
+		"bindings", arrayOf("SourceAppendBindingRequest"),
+	))
+}
+
+func jobErrorSchema() map[string]any {
+	return object([]string{"code", "message"}, props(
+		"code", stringSchema(),
+		"message", stringSchema(),
+		"details", objectSchema(),
+	))
+}
+
+func sourceAppendBindingRequestSchema() map[string]any {
+	return object([]string{}, props(
+		"target_ref", stringSchema(),
+		"display_name", stringSchema(),
+	))
+}
+
+func appendSourceResponseSchema() map[string]any {
+	return object([]string{"new_binding_ids", "new_bindings"}, props(
+		"new_binding_ids", stringArray(),
+		"new_bindings", arrayOf("SourceBindingResponse"),
+		"sync_job_errors", arrayOf("JobError"),
+	))
 }
 
 func connectorSpecSchema() map[string]any {
