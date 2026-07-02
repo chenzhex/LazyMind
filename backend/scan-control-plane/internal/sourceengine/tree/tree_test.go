@@ -233,8 +233,11 @@ func TestLocalFSTargetSearchWithCurrentLevelBuildsRecursiveCache(t *testing.T) {
 	if page.SearchMode != SearchModeCache || page.CacheStatus != targetSearchCacheStatusComplete || !page.CacheComplete {
 		t.Fatalf("local current-level search should build and read cache, got %+v", page)
 	}
-	if len(page.Items) != 1 || page.Items[0].ObjectKey != "/workspace/docs/guides/test-plan.md" {
-		t.Fatalf("local recursive search should find nested match, got %+v", page.Items)
+	if len(page.Items) != 1 || page.Items[0].ObjectKey != "/workspace/docs/guides" {
+		t.Fatalf("local recursive search should return the matched path root, got %+v", page.Items)
+	}
+	if len(page.Items[0].Children) != 1 || page.Items[0].Children[0].ObjectKey != "/workspace/docs/guides/test-plan.md" {
+		t.Fatalf("local recursive search should nest the matched node under its path, got %+v", page.Items)
 	}
 	if len(spy.searchRequests) != 0 || len(spy.listRequests) != 2 {
 		t.Fatalf("local recursive search should list subtree without connector search, searches=%d lists=%d", len(spy.searchRequests), len(spy.listRequests))
@@ -278,8 +281,12 @@ func TestLocalFSTargetSearchWithoutCurrentLevelBuildsRootCaches(t *testing.T) {
 	if page.SearchMode != SearchModeCache || page.CacheStatus != targetSearchCacheStatusComplete || !page.CacheComplete {
 		t.Fatalf("local search without current level should build root caches, got %+v", page)
 	}
-	if len(page.Items) != 1 || page.Items[0].ObjectKey != "/workspace/docs/guides/test-plan.md" {
-		t.Fatalf("local root cache search should find nested match, got %+v", page.Items)
+	if len(page.Items) != 1 || page.Items[0].ObjectKey != "/workspace/docs" {
+		t.Fatalf("local root cache search should return the matched path root, got %+v", page.Items)
+	}
+	if len(page.Items[0].Children) != 1 || page.Items[0].Children[0].ObjectKey != "/workspace/docs/guides" ||
+		len(page.Items[0].Children[0].Children) != 1 || page.Items[0].Children[0].Children[0].ObjectKey != "/workspace/docs/guides/test-plan.md" {
+		t.Fatalf("local root cache search should nest the matched path, got %+v", page.Items)
 	}
 	if len(spy.searchRequests) != 0 || len(spy.listRequests) != 3 {
 		t.Fatalf("local search without current level should list recommended roots and subtree, searches=%d lists=%d", len(spy.searchRequests), len(spy.listRequests))
@@ -589,11 +596,99 @@ func TestLocalFSRootCachePrewarmBuildsCachesSearchCanReuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search local_fs root cache: %v", err)
 	}
-	if len(page.Items) != 1 || page.Items[0].ObjectKey != "/workspace/docs/guides/test-plan.md" {
-		t.Fatalf("search should reuse prewarmed root cache, got %+v", page)
+	if len(page.Items) != 1 || page.Items[0].ObjectKey != "/workspace/docs" ||
+		len(page.Items[0].Children) != 1 || page.Items[0].Children[0].ObjectKey != "/workspace/docs/guides" ||
+		len(page.Items[0].Children[0].Children) != 1 || page.Items[0].Children[0].Children[0].ObjectKey != "/workspace/docs/guides/test-plan.md" {
+		t.Fatalf("search should reuse prewarmed root cache as a path tree, got %+v", page)
 	}
 	if len(spy.listRequests) != 1 {
 		t.Fatalf("search should only refresh root list and reuse subtree cache, got %d list requests", len(spy.listRequests))
+	}
+}
+
+func TestTargetTreeSearchPathTreeWrapsFeishuOrphansWithVirtualRoots(t *testing.T) {
+	t.Parallel()
+
+	page := TreeNodePage{Items: buildSearchPathTree([]TreeNode{
+		{
+			Key:           "feishu:wiki:space:space-1",
+			NodeRef:       "feishu:wiki:space:space-1",
+			DisplayName:   "Space",
+			ConnectorType: "feishu",
+			TargetType:    "wiki_node",
+			TargetRef:     "feishu:wiki:space:space-1",
+			TreeKey:       "feishu:wiki:space:space-1",
+			ObjectKey:     "feishu:wiki:space:space-1",
+			ParentKey:     "feishu:feishu:wiki:spaces",
+			IsContainer:   true,
+			HasChildren:   true,
+			Selectable:    true,
+			ProviderMeta:  map[string]any{"kind": "wiki_space", "auth_connection_id": "conn-1"},
+		},
+		{
+			Key:           "feishu:drive:folder-1",
+			NodeRef:       "drive:folder-1",
+			DisplayName:   "Drive Folder",
+			ConnectorType: "feishu",
+			TargetType:    "drive_folder",
+			TargetRef:     "drive:folder-1",
+			TreeKey:       "feishu:drive:folder-1",
+			ObjectKey:     "feishu:drive:folder-1",
+			ParentKey:     "feishu:drive:missing-parent",
+			IsContainer:   true,
+			HasChildren:   true,
+			Selectable:    true,
+			ProviderMeta:  map[string]any{"kind": "drive_folder", "auth_connection_id": "conn-1"},
+		},
+	}, []TreeNode{
+		{
+			Key:           "feishu:wiki:space:space-1",
+			NodeRef:       "feishu:wiki:space:space-1",
+			DisplayName:   "Space",
+			ConnectorType: "feishu",
+			TargetType:    "wiki_node",
+			TargetRef:     "feishu:wiki:space:space-1",
+			TreeKey:       "feishu:wiki:space:space-1",
+			ObjectKey:     "feishu:wiki:space:space-1",
+			ParentKey:     "feishu:feishu:wiki:spaces",
+			IsContainer:   true,
+			HasChildren:   true,
+			Selectable:    true,
+			ProviderMeta:  map[string]any{"kind": "wiki_space", "auth_connection_id": "conn-1"},
+		},
+		{
+			Key:           "feishu:drive:folder-1",
+			NodeRef:       "drive:folder-1",
+			DisplayName:   "Drive Folder",
+			ConnectorType: "feishu",
+			TargetType:    "drive_folder",
+			TargetRef:     "drive:folder-1",
+			TreeKey:       "feishu:drive:folder-1",
+			ObjectKey:     "feishu:drive:folder-1",
+			ParentKey:     "feishu:drive:missing-parent",
+			IsContainer:   true,
+			HasChildren:   true,
+			Selectable:    true,
+			ProviderMeta:  map[string]any{"kind": "drive_folder", "auth_connection_id": "conn-1"},
+		},
+	})}
+
+	if len(page.Items) != 2 {
+		t.Fatalf("expected drive and wiki roots, got %+v", page.Items)
+	}
+	if page.Items[0].ObjectKey != "feishu:feishu:drive:root" || len(page.Items[0].Children) != 1 || page.Items[0].Children[0].ObjectKey != "feishu:drive:folder-1" {
+		t.Fatalf("drive orphan should be wrapped with Drive root, got %+v", page.Items)
+	}
+	if page.Items[1].ObjectKey != "feishu:feishu:wiki:spaces" || len(page.Items[1].Children) != 1 || page.Items[1].Children[0].ObjectKey != "feishu:wiki:space:space-1" {
+		t.Fatalf("wiki orphan should be wrapped with Wiki root, got %+v", page.Items)
+	}
+}
+
+func TestTargetTreeSearchPathTreeKeepsEmptyResultsEmpty(t *testing.T) {
+	t.Parallel()
+
+	if got := buildSearchPathTree([]TreeNode{{Key: "feishu:drive:folder-1"}}, nil); len(got) != 0 {
+		t.Fatalf("empty search matches should stay empty, got %+v", got)
 	}
 }
 
@@ -1121,6 +1216,45 @@ func TestSourceTreeListChildrenFiltersUnsupportedDocuments(t *testing.T) {
 	}
 }
 
+func TestSourceTreeListChildrenShowsOutOfScopeDocuments(t *testing.T) {
+	t.Parallel()
+
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{{
+		BindingID:         "binding-1",
+		SourceID:          "source-1",
+		TreeKey:           "tree-root",
+		IncludeExtensions: store.JSON{"items": []any{"pdf"}},
+		Status:            "ACTIVE",
+	}}
+	script := indexedObject("source-1", "binding-1", "tree-root", "script-1", "", "script.py", true, false)
+	script.Object.FileExtension = ".py"
+	script.State.SourceState = "OUT_OF_SCOPE"
+	script.State.PendingAction = "DELETE"
+	script.State.Selectable = true
+	repo.objects = []ObjectWithState{script}
+	engine := NewDBSourceTreeQueryEngine(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10, MaxAllCurrentLevelItems: 10})
+
+	page, err := engine.ListChildren(context.Background(), SourceTreeChildrenRequest{
+		SourceID:  "source-1",
+		BindingID: "binding-1",
+		TreeKey:   "tree-root",
+		ParentKey: "",
+		PageSize:  10,
+	})
+	if err != nil {
+		t.Fatalf("list indexed children: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ObjectKey != "script-1" {
+		t.Fatalf("expected out-of-scope document to remain visible, got %+v", page.Items)
+	}
+	node := page.Items[0]
+	if node.UpdateType != "cleanup" || node.UpdateDesc != "待清理" {
+		t.Fatalf("out-of-scope document should render as cleanup: %+v", node)
+	}
+}
+
 func TestSourceTreeListChildrenUsesSourceIncludeExtensions(t *testing.T) {
 	t.Parallel()
 
@@ -1644,6 +1778,50 @@ func TestSourceDocumentQueryFiltersUnsupportedDocuments(t *testing.T) {
 	}
 	if len(resp.Items) != 1 || resp.Items[0].ObjectKey != "pdf-1" {
 		t.Fatalf("expected only supported pdf document, got %+v", resp.Items)
+	}
+}
+
+func TestSourceDocumentQueryShowsOutOfScopeDocuments(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 31, 16, 0, 0, 0, time.UTC)
+	repo := newTreeReadRepo()
+	repo.sources["source-1"] = store.Source{SourceID: "source-1"}
+	repo.bindings["source-1"] = []store.Binding{{
+		BindingID:         "binding-1",
+		SourceID:          "source-1",
+		IncludeExtensions: store.JSON{"items": []any{"pdf"}},
+	}}
+	script := indexedObject("source-1", "binding-1", "tree-root", "script-1", "", "script.py", true, false).Object
+	script.FileExtension = ".py"
+	repo.documents = []DocumentWithState{{
+		Object: script,
+		State: store.DocumentState{
+			SourceID:            "source-1",
+			BindingID:           "binding-1",
+			ObjectKey:           "script-1",
+			SourceState:         "OUT_OF_SCOPE",
+			SyncState:           "IDLE",
+			PendingAction:       "DELETE",
+			DocumentListVisible: true,
+			Selectable:          true,
+			SourceVersion:       "v1",
+			BaselineVersion:     "v1",
+			CreatedAt:           now,
+			UpdatedAt:           now,
+		},
+	}}
+	query := NewDBSourceDocumentQuery(repo, TreeQueryLimits{DefaultPageSize: 10, MaxPageSize: 10})
+
+	resp, err := query.ListDocuments(context.Background(), SourceDocumentListRequest{SourceID: "source-1", BindingID: "binding-1"})
+	if err != nil {
+		t.Fatalf("list documents: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ObjectKey != "script-1" {
+		t.Fatalf("expected out-of-scope document, got %+v", resp.Items)
+	}
+	if resp.Items[0].UpdateType != "cleanup" || resp.Items[0].UpdateDesc != "待清理" {
+		t.Fatalf("out-of-scope document should render as cleanup: %+v", resp.Items[0])
 	}
 }
 

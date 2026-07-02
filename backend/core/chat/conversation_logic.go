@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"lazymind/core/plugin"
 	"lazymind/core/resourceupdate"
 	"lazymind/core/state"
+	"lazymind/core/store"
 	"lazymind/core/subagent"
 )
 
@@ -173,7 +175,7 @@ func conversationIDFromName(name string) string {
 }
 
 // ensureConversation textCreatetextUsertextConversation，textConversation、text history text seq、error
-func ensureConversation(db *gorm.DB, convID, displayName string, searchConfig json.RawMessage, models json.RawMessage, userID, userName string) (*orm.Conversation, int, error) {
+func ensureConversation(ctx context.Context, db *gorm.DB, convID, displayName string, searchConfig json.RawMessage, models json.RawMessage, userID, userName string, pluginSettings map[string]any) (*orm.Conversation, int, error) {
 	now := time.Now()
 	var c orm.Conversation
 	err := db.Where("id = ? AND create_user_id = ?", convID, userID).First(&c).Error
@@ -214,22 +216,228 @@ func ensureConversation(db *gorm.DB, convID, displayName string, searchConfig js
 			UpdatedAt:      now,
 		},
 	}
+	// Resolve plugin settings for the new conversation.
+	// Priority: caller-supplied pluginSettings > user_chat_settings defaults.
+	// All three fields are always written so conversations.enable_plugin / plugin_mode /
+	// enable_subagent are never NULL — no per-request fallback query needed.
+	resolvedPS := resolveInitialPluginSettings(ctx, db, userID, pluginSettings)
+	c.EnablePlugin = &resolvedPS.enablePlugin
+	c.PluginMode = &resolvedPS.pluginMode
+	c.EnableSubagent = &resolvedPS.enableSubagent
 	if err := db.Create(&c).Error; err != nil {
 		return nil, 0, err
 	}
 	return &c, 1, nil
 }
 
-func buildHistoryMessages(histories []orm.ChatHistory) []map[string]string {
+type resolvedPluginSettings struct {
+	enablePlugin   bool
+	pluginMode     string
+	enableSubagent bool
+}
+
+// resolveInitialPluginSettings merges caller-supplied overrides with the user's
+// global defaults from user_chat_settings. Fields present in pluginSettings take
+// priority; missing fields fall back to the DB defaults (or hardcoded values if
+// the user has no row yet).
+func resolveInitialPluginSettings(ctx context.Context, db *gorm.DB, userID string, pluginSettings map[string]any) resolvedPluginSettings {
+	// Start from hardcoded fallbacks (matches user_chat_settings DB defaults).
+	out := resolvedPluginSettings{
+		enablePlugin:   true,
+		pluginMode:     "dynamic",
+		enableSubagent: true,
+	}
+	// Load user-level defaults.
+	if db != nil {
+		var s orm.UserChatSettings
+		if err := db.WithContext(ctx).Where("user_id = ?", userID).First(&s).Error; err == nil {
+			out.enablePlugin = s.EnablePlugin
+			out.pluginMode = s.PluginMode
+			out.enableSubagent = s.EnableSubagent
+		}
+	}
+	// Apply caller-supplied overrides.
+	if v, ok := pluginSettings["enable_plugin"].(bool); ok {
+		out.enablePlugin = v
+	}
+	if v, ok := pluginSettings["plugin_mode"].(string); ok && (v == "dynamic" || v == "auto") {
+		out.pluginMode = v
+	}
+	if v, ok := pluginSettings["enable_subagent"].(bool); ok {
+		out.enableSubagent = v
+	}
+	return out
+}
+
+// askAnswersStructuredFromRaw extracts the ask_answers_structured map from the raw request body.
+// Returns nil if not present or not a valid map.
+func askAnswersStructuredFromRaw(raw map[string]any) map[string]any {
+	v, ok := raw["ask_answers_structured"]
+	if !ok {
+		return nil
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+// askAnswersStructuredPayload mirrors the JSON sent by the frontend when the user
+// submits an AskCard.
+type askAnswersStructuredPayload struct {
+	AskID     string                    `json:"ask_id"`
+	Questions []askAnsweredQuestionItem `json:"questions"`
+}
+
+type askAnsweredQuestionItem struct {
+	Text          string          `json:"text"`
+	Type          string          `json:"type"`
+	Choices       []string        `json:"choices"`
+	CustomChoices []string        `json:"custom_choices"`
+	Answer        json.RawMessage `json:"answer"` // null or object
+}
+
+// buildAskUserToolResultContent formats the three cases described in the plan.
+// askStructured non-nil → full submission; askSavedAnswers non-nil → partial; both nil → unanswered.
+func buildAskUserToolResultContent(
+	askPendingData map[string]any,
+	askStructured *askAnswersStructuredPayload,
+	askSavedAnswers map[string]any,
+) string {
+	questionsRaw, _ := askPendingData["questions"].([]any)
+
+	if askStructured != nil {
+		lines := []string{"Questions were shown to the user via an interactive card. The user submitted all answers.", ""}
+		for i, sq := range askStructured.Questions {
+			prefix := fmt.Sprintf("Q%d: %s", i+1, sq.Text)
+			if len(sq.Choices) > 0 {
+				opts := make([]string, len(sq.Choices))
+				for ci, ch := range sq.Choices {
+					label := ch
+					if ci < len(sq.CustomChoices) && sq.CustomChoices[ci] != "" {
+						label = sq.CustomChoices[ci]
+					}
+					opts[ci] = fmt.Sprintf("[%c] %s", rune('A'+ci), label)
+				}
+				lines = append(lines, prefix)
+				lines = append(lines, "  Options: "+strings.Join(opts, "  "))
+			} else {
+				lines = append(lines, prefix)
+			}
+			answerStr := "(no answer)"
+			if len(sq.Answer) > 0 && string(sq.Answer) != "null" {
+				var ans map[string]any
+				if json.Unmarshal(sq.Answer, &ans) == nil {
+					if v, ok := ans["value"]; ok {
+						answerStr = fmt.Sprintf("%v", v)
+					}
+				} else {
+					answerStr = string(sq.Answer)
+				}
+			}
+			lines = append(lines, "  Answer: "+answerStr)
+			lines = append(lines, "")
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	if askSavedAnswers != nil && len(questionsRaw) > 0 {
+		lines := []string{
+			"Questions were shown. The user partially filled the form but did NOT submit.",
+			"Treat the user's new message as additional guidance — use available answers and do NOT re-ask.",
+			"",
+		}
+		for i, qRaw := range questionsRaw {
+			qMap, _ := qRaw.(map[string]any)
+			qText, _ := qMap["text"].(string)
+			prefix := fmt.Sprintf("Q%d: %s", i+1, qText)
+			lines = append(lines, prefix)
+			idxKey := fmt.Sprintf("%d", i)
+			if _, hasAns := askSavedAnswers[idxKey]; hasAns {
+				lines = append(lines, "  Answer: [partial answer saved]")
+			} else {
+				lines = append(lines, "  Answer: [未填写]")
+			}
+			lines = append(lines, "")
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	return "Questions were shown but the user ignored them and sent a new message instead.\n" +
+		"Treat the new message as a clarification or modification of the original task.\n" +
+		"Do NOT re-ask these questions unless the user explicitly requests it."
+}
+
+// buildHistoryMessages converts stored chat histories to the format expected by Python.
+// When askAnswersStructured is provided, the last unanswered ask_user tool_result is
+// rewritten to contain the full structured context.
+func buildHistoryMessages(histories []orm.ChatHistory, askAnswersStructured map[string]any) []map[string]string {
 	if len(histories) == 0 {
 		return nil
 	}
+
+	// Find the last history that has an unanswered ask_pending.
+	var askRewriteIdx int = -1
+	for i := len(histories) - 1; i >= 0; i-- {
+		h := &histories[i]
+		if len(h.Ext) == 0 {
+			continue
+		}
+		var ext map[string]any
+		if err := json.Unmarshal(h.Ext, &ext); err != nil {
+			continue
+		}
+		if ext["ask_pending"] == nil {
+			continue
+		}
+		if answered, _ := ext["ask_answered"].(bool); answered {
+			break // already answered, no rewrite needed
+		}
+		askRewriteIdx = i
+		break
+	}
+
 	out := make([]map[string]string, 0, len(histories)*2)
-	for _, h := range histories {
+	for idx, h := range histories {
+		assistantContent := buildAssistantHistoryContent(h)
+
+		// Rewrite the ask_user tool_result for the identified history entry.
+		if idx == askRewriteIdx {
+			var ext map[string]any
+			_ = json.Unmarshal(h.Ext, &ext)
+			askPendingData, _ := ext["ask_pending"].(map[string]any)
+			askSavedAnswersRaw, _ := ext["ask_saved_answers"].(map[string]any)
+
+			var structuredPayload *askAnswersStructuredPayload
+			if askAnswersStructured != nil {
+				bs, _ := json.Marshal(askAnswersStructured)
+				var p askAnswersStructuredPayload
+				if json.Unmarshal(bs, &p) == nil {
+					structuredPayload = &p
+				}
+			}
+
+			newContent := buildAskUserToolResultContent(askPendingData, structuredPayload, askSavedAnswersRaw)
+			// Replace the placeholder tool_result content in the assistant message.
+			assistantContent = replaceAskUserToolResult(assistantContent, newContent)
+		}
+
 		out = append(out, map[string]string{"role": "user", "content": h.RawContent})
-		out = append(out, map[string]string{"role": "assistant", "content": buildAssistantHistoryContent(h)})
+		out = append(out, map[string]string{"role": "assistant", "content": assistantContent})
 	}
 	return out
+}
+
+var askUserToolResultPattern = regexp.MustCompile(`(?s)(<tool_result\b[^>]*>)Question sent to user \(ask_id=[^)]+\)\.(</tool_result>)`)
+
+// replaceAskUserToolResult replaces the placeholder ask_user tool_result content
+// in an assistant message with enriched context so the LLM understands the state.
+func replaceAskUserToolResult(assistantContent, newContent string) string {
+	if !strings.Contains(assistantContent, "Question sent to user") {
+		return assistantContent
+	}
+	return askUserToolResultPattern.ReplaceAllString(assistantContent, "${1}"+newContent+"${2}")
 }
 
 const chatActionRegeneration = "CHAT_ACTION_REGENERATION"
@@ -492,7 +700,7 @@ func buildChatRequestBody(ctx context.Context, db *gorm.DB, convID, sessionID, q
 		"query":            query,
 		"session_id":       sessionID,
 		"conversation_id":  convID,
-		"history":          buildHistoryMessages(histories),
+		"history":          buildHistoryMessages(histories, askAnswersStructuredFromRaw(raw)),
 		"filters":          raw["filters"],
 		"files":            filesMap,
 		"current_turn_seq": currentSeq,
@@ -500,7 +708,6 @@ func buildChatRequestBody(ctx context.Context, db *gorm.DB, convID, sessionID, q
 		"debug":            raw["debug"],
 		"reasoning":        resolveReasoning(raw),
 		"priority":         raw["priority"],
-		"enable_thinking":  raw["enable_thinking"],
 		"use_memory":       useMemory,
 		"user_id":          strings.TrimSpace(userID),
 		"mode":             mode,
@@ -538,23 +745,96 @@ func buildChatRequestBody(ctx context.Context, db *gorm.DB, convID, sessionID, q
 		conv, _ := raw["conversation"].(map[string]any)
 		if conv != nil {
 			if sc, _ := conv["search_config"].(map[string]any); sc != nil {
-				filters := map[string]any{}
-				if kbIDs := datasetIDsFromSearchConfig(sc); len(kbIDs) > 0 {
-					filters["kb_id"] = kbIDs
-				}
-				if creators := stringSliceFromAny(sc["creators"]); len(creators) > 0 {
-					filters["creator"] = creators
-				}
-				if tags := stringSliceFromAny(sc["tags"]); len(tags) > 0 {
-					filters["tags"] = tags
-				}
-				if len(filters) > 0 {
-					body["filters"] = filters
-				}
+				body["filters"] = filtersFromSearchConfig(sc)
+			}
+		}
+	}
+	// Internal/auto-advance requests omit conversation.search_config; fall back to the
+	// persisted conversation row so kb_id scope matches the user's original selection.
+	if body["filters"] == nil && db != nil && convID != "" {
+		var c orm.Conversation
+		if err := db.WithContext(ctx).Select("search_config").Where("id = ?", convID).First(&c).Error; err == nil && len(c.SearchConfig) > 0 {
+			var sc map[string]any
+			if json.Unmarshal(c.SearchConfig, &sc) == nil {
+				body["filters"] = filtersFromSearchConfig(sc)
 			}
 		}
 	}
 	return body
+}
+
+// filtersFromSearchConfig builds upstream dataset filters from a search_config dict.
+func filtersFromSearchConfig(sc map[string]any) map[string]any {
+	if sc == nil {
+		return nil
+	}
+	filters := map[string]any{}
+	if kbIDs := datasetIDsFromSearchConfig(sc); len(kbIDs) > 0 {
+		filters["kb_id"] = kbIDs
+	}
+	if creators := stringSliceFromAny(sc["creators"]); len(creators) > 0 {
+		filters["creator"] = creators
+	}
+	if tags := stringSliceFromAny(sc["tags"]); len(tags) > 0 {
+		filters["tags"] = tags
+	}
+	if len(filters) == 0 {
+		return nil
+	}
+	return filters
+}
+
+// resolvePluginMode determines the effective plugin_mode for this request.
+// Priority: request body > "dynamic" default.
+// Valid values: "auto", "dynamic". Anything else is normalised to "dynamic".
+func resolvePluginMode(raw map[string]any) string {
+	if v, ok := raw["plugin_mode"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v == "auto" || v == "dynamic" {
+			return v
+		}
+	}
+	return "dynamic"
+}
+
+// resolvePluginModeWithFallback determines the effective plugin_mode with full priority chain:
+//
+//	request body > DB-resolved agentic_config (loaded via applyChatRuntimeConfigs) > "dynamic"
+//
+// reqBody must have already been populated by applyChatRuntimeConfigs so that
+// reqBody["agentic_config"]["plugin_mode"] reflects the DB value.
+func resolvePluginModeWithFallback(raw map[string]any, reqBody map[string]any) string {
+	// Highest priority: explicit value in the original request body.
+	if v, ok := raw["plugin_mode"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v == "auto" || v == "dynamic" {
+			return v
+		}
+	}
+	return pluginModeFromReqBody(reqBody)
+}
+
+// pluginModeFromReqBody reads the resolved plugin_mode from a fully-built chat request body.
+// Priority: plugin_context > agentic_config > "dynamic".
+// Used when persisting plugin_step task params so OnSubAgentDone can branch on auto vs dynamic.
+func pluginModeFromReqBody(reqBody map[string]any) string {
+	if pc, ok := reqBody["plugin_context"].(map[string]any); ok {
+		if v, ok := pc["plugin_mode"].(string); ok {
+			v = strings.TrimSpace(v)
+			if v == "auto" || v == "dynamic" {
+				return v
+			}
+		}
+	}
+	if ac, ok := reqBody["agentic_config"].(map[string]any); ok {
+		if v, ok := ac["plugin_mode"].(string); ok {
+			v = strings.TrimSpace(v)
+			if v == "auto" || v == "dynamic" {
+				return v
+			}
+		}
+	}
+	return "dynamic"
 }
 
 func resolveUseMemory(raw map[string]any, resourceContext *evolution.ChatResourceContext) bool {
@@ -834,6 +1114,7 @@ func streamSingleAnswer(
 	var fullResult string
 	var toolCallTurns int
 	var sources []any
+	var pendingAskPending any
 	thinkStart := time.Now()
 	// text：textConversation/text，finish_reason text UNSPECIFIED
 	writeSSEChunk(w, flusher, &ChatChunkResponse{
@@ -851,7 +1132,8 @@ func streamSingleAnswer(
 	for d := range ch {
 		if d.TaskCreated != nil {
 			userIDForTask, _ := reqBody["user_id"].(string)
-			notice := handleTaskCreated(chatCtx, db, stateStore, convID, historyID, userIDForTask, d.TaskCreated, llmConfigFromBody(reqBody), toolConfigFromBody(reqBody))
+			pluginModeForTask := pluginModeFromReqBody(reqBody)
+			notice := handleTaskCreated(chatCtx, db, stateStore, convID, historyID, userIDForTask, d.TaskCreated, llmConfigFromBody(reqBody), toolConfigFromBody(reqBody), pluginModeForTask)
 			if notice != nil {
 				taskChunk := &ChatChunkResponse{
 					ConversationID: convID,
@@ -874,6 +1156,31 @@ func streamSingleAnswer(
 					})
 				}
 			}
+			continue
+		}
+		if d.AskPending != nil {
+			pendingAskPending = d.AskPending
+			askChunk := &ChatChunkResponse{
+				ConversationID: convID,
+				Seq:            int32(seq),
+				HistoryID:      historyID,
+				FinishReason:   "FINISH_REASON_UNSPECIFIED",
+				AskPending:     d.AskPending,
+			}
+			if reqCtx.Err() == nil {
+				writeSSEChunk(w, flusher, askChunk)
+			}
+			if stateStore != nil {
+				_ = appendChatChunk(chatCtx, stateStore, convID, historyID, askChunk)
+				_ = AppendConvEvent(chatCtx, stateStore, convID, &ConvEvent{
+					Type:    "ask_pending",
+					Payload: d.AskPending,
+				})
+			}
+			continue
+		}
+		if d.IntentUpdated != nil {
+			handleIntentUpdated(chatCtx, db, stateStore, convID, d.IntentUpdated)
 			continue
 		}
 		if d.Heartbeat {
@@ -922,6 +1229,10 @@ func streamSingleAnswer(
 	retrievalResult := marshalRetrievalResult(sources)
 	if pendingThink != "" {
 		fullResult += "<think>" + pendingThink + "</think>"
+	}
+	// Persist ask_pending into ext so the ask card survives page reload.
+	if pendingAskPending != nil {
+		historyExt = mergeAskPendingIntoExt(historyExt, pendingAskPending)
 	}
 	persisted := false
 	if target.IsRegeneration && target.Existing != nil {
@@ -1230,6 +1541,7 @@ func handleTaskCreated(
 	ev *TaskCreatedEvent,
 	llmConfig map[string]any,
 	toolConfig map[string]any,
+	pluginMode string,
 ) *TaskCreatedNotice {
 	if ev == nil || strings.TrimSpace(ev.TaskID) == "" {
 		return nil
@@ -1237,7 +1549,7 @@ func handleTaskCreated(
 
 	// Plugin Step path — handled separately.
 	if ev.AgentType == "plugin_step" {
-		return handlePluginStepCreated(chatCtx, db, stateStore, convID, historyID, userID, ev, llmConfig, toolConfig)
+		return handlePluginStepCreated(chatCtx, db, stateStore, convID, historyID, userID, ev, llmConfig, toolConfig, pluginMode)
 	}
 	mode := ev.Mode
 	if mode != "auto" && mode != "manual" {
@@ -1332,6 +1644,7 @@ func handlePluginStepCreated(
 	ev *TaskCreatedEvent,
 	llmConfig map[string]any,
 	toolConfig map[string]any,
+	pluginMode string,
 ) *TaskCreatedNotice {
 	// Parse PluginStepParams from ev.Params.
 	var params plugin.PluginStepParams
@@ -1385,12 +1698,19 @@ func handlePluginStepCreated(
 			params.HistoryFilesPerTurn = parsed
 		}
 	}
+	// Carry the resolved plugin_mode into params so it is persisted with the task
+	// and available when OnSubAgentDone reconstructs PluginChatContext from DB.
+	if pluginMode == "auto" || pluginMode == "dynamic" {
+		params.PluginMode = pluginMode
+	} else {
+		params.PluginMode = "dynamic"
+	}
 	if params.PluginID == "" || params.StepID == "" {
 		fmt.Println("[Core] [PLUGIN_STEP_INVALID_PARAMS] plugin_id or step_id missing")
 		return nil
 	}
 
-	sessionID, taskID, err := plugin.HandlePluginStepCreated(
+	sessionID, taskID, pluginCompleted, err := plugin.HandlePluginStepCreated(
 		ctx, db, stateStore, convID, historyID, userID,
 		ev.TaskID, ev.Title, ev.Objective,
 		params,
@@ -1399,6 +1719,19 @@ func handlePluginStepCreated(
 	)
 	if err != nil {
 		fmt.Printf("[Core] [PLUGIN_STEP_FAILED] err=%v\n", err)
+		return nil
+	}
+
+	// When ChatAgent signals plugin completion via __end__, emit plugin_completed
+	// to the conversation event stream so the frontend can close the plugin panel.
+	if pluginCompleted {
+		_ = AppendConvEvent(ctx, stateStore, convID, &ConvEvent{
+			Type: "plugin_completed",
+			Payload: map[string]any{
+				"session_id": sessionID,
+				"plugin_id":  params.PluginID,
+			},
+		})
 		return nil
 	}
 
@@ -1417,4 +1750,152 @@ func handlePluginStepCreated(
 		SeqInConversation: task.SeqInConversation,
 		PluginSessionID:   sessionID,
 	}
+}
+
+// mergeAskPendingIntoExt merges ask_pending data into the ext JSON field so that
+// the ask card is persisted and can be restored on page reload.
+// handleIntentUpdated writes the intent emitted by the update_intent tool to DB,
+// then pushes an intent_updated convEvent so the frontend can refresh immediately.
+func handleIntentUpdated(ctx context.Context, db *gorm.DB, stateStore state.Store, convID string, ev *IntentUpdatedEvent) {
+	if ev == nil || ev.SessionID == "" {
+		return
+	}
+	if db != nil {
+		now := time.Now().UTC()
+		payload := fmt.Sprintf(`{"text":%q}`, ev.Content)
+		if ev.Scope == "session" {
+			db.WithContext(ctx).Exec(
+				`UPDATE plugin_sessions SET intent_context = ?, updated_at = ? WHERE id = ?`,
+				payload, now, ev.SessionID,
+			)
+		} else if ev.Scope == "step" && ev.StepID != "" {
+			rowID := fmt.Sprintf("psi_%s", common.GenerateID())
+			db.WithContext(ctx).Exec(
+				`INSERT INTO plugin_step_intents (id, session_id, step_id, intent_context, updated_at)
+				 VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT (session_id, step_id) DO UPDATE
+				 SET intent_context = EXCLUDED.intent_context, updated_at = EXCLUDED.updated_at`,
+				rowID, ev.SessionID, ev.StepID, payload, now,
+			)
+		}
+	}
+	if stateStore != nil {
+		_ = AppendConvEvent(ctx, stateStore, convID, &ConvEvent{
+			Type: "intent_updated",
+			Payload: map[string]any{
+				"session_id": ev.SessionID,
+				"scope":      ev.Scope,
+				"step_id":    ev.StepID,
+			},
+		})
+	}
+}
+
+func mergeAskPendingIntoExt(ext json.RawMessage, askPending any) json.RawMessage {
+	m := make(map[string]any)
+	if len(ext) > 0 {
+		_ = json.Unmarshal(ext, &m)
+	}
+	m["ask_pending"] = askPending
+	b, err := json.Marshal(m)
+	if err != nil {
+		return ext
+	}
+	return b
+}
+
+// markLastAskPendingAnswered finds the most recent history entry that has
+// ask_pending in ext, sets ask_answered=true in its ext, and clears
+// ask_saved_answers so the AskCard shows as submitted on next page load.
+func markLastAskPendingAnswered(ctx context.Context, db *gorm.DB, histories []orm.ChatHistory) {
+	if db == nil {
+		return
+	}
+	for i := len(histories) - 1; i >= 0; i-- {
+		h := &histories[i]
+		if len(h.Ext) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(h.Ext, &m); err != nil {
+			continue
+		}
+		if m["ask_pending"] == nil {
+			continue
+		}
+		if answered, _ := m["ask_answered"].(bool); answered {
+			break
+		}
+		m["ask_answered"] = true
+		delete(m, "ask_saved_answers")
+		updated, err := json.Marshal(m)
+		if err != nil {
+			break
+		}
+		db.WithContext(ctx).Model(&orm.ChatHistory{}).
+			Where("id = ?", h.ID).
+			Update("ext", updated)
+		break
+	}
+}
+
+// SaveAskAnswers persists partial ask answers into the history ext so the
+// user can return to the AskCard and continue where they left off.
+func SaveAskAnswers(w http.ResponseWriter, r *http.Request) {
+	db := store.DB()
+	if db == nil {
+		common.ReplyErr(w, "store not initialized", http.StatusInternalServerError)
+		return
+	}
+	userID := store.UserID(r)
+	if userID == "" {
+		userID = "0"
+	}
+	var body struct {
+		HistoryID string         `json:"history_id"`
+		Answers   map[string]any `json:"answers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		common.ReplyErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.HistoryID == "" {
+		common.ReplyErr(w, "history_id required", http.StatusBadRequest)
+		return
+	}
+
+	var h orm.ChatHistory
+	if err := db.WithContext(r.Context()).Where("id = ?", body.HistoryID).First(&h).Error; err != nil {
+		common.ReplyErr(w, "history not found", http.StatusNotFound)
+		return
+	}
+	// Verify the conversation owning this history belongs to the requesting user.
+	if err := db.WithContext(r.Context()).
+		Where("id = ? AND create_user_id = ?", h.ConversationID, userID).
+		First(&orm.Conversation{}).Error; err != nil {
+		common.ReplyErr(w, "history not found", http.StatusNotFound)
+		return
+	}
+	m := make(map[string]any)
+	if len(h.Ext) > 0 {
+		_ = json.Unmarshal(h.Ext, &m)
+	}
+	if answered, _ := m["ask_answered"].(bool); answered {
+		// Already submitted — do not allow overwriting answers.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	m["ask_saved_answers"] = body.Answers
+	updated, err := json.Marshal(m)
+	if err != nil {
+		common.ReplyErr(w, "failed to marshal ext", http.StatusInternalServerError)
+		return
+	}
+	if err := db.WithContext(r.Context()).Model(&orm.ChatHistory{}).
+		Where("id = ?", body.HistoryID).
+		Update("ext", updated).Error; err != nil {
+		common.ReplyErr(w, "failed to update history", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

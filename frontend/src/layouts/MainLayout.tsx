@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Button, Form, Input, Layout, Modal, Popover, message } from "antd";
+import { Button, Form, Input, Layout, Modal, Popover, Tooltip, message } from "antd";
 import {
   CodeOutlined,
   SettingOutlined,
@@ -17,6 +17,7 @@ import {
   PlusOutlined,
   RightOutlined,
   FolderOpenOutlined,
+  UnorderedListOutlined,
 } from "@ant-design/icons";
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import type { UserDetailResponse } from "@/api/generated/auth-client";
@@ -34,13 +35,15 @@ import { useTranslation } from "react-i18next";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import {
   isDeveloperModeActive,
-  setDeveloperModeActive,
+  persistDeveloperModeActive,
+  syncDeveloperModeFromServer,
 } from "@/utils/developerMode";
 import RecordList from "@/modules/chat/components/RecordList";
 import {
   CHAT_RESUME_CONVERSATION_KEY,
   CHAT_SELECT_CONVERSATION_EVENT,
 } from "@/modules/chat/constants/chat";
+import { runtimeFeatures } from "@/runtime/features";
 import "./index.scss";
 
 const { Content, Sider } = Layout;
@@ -122,12 +125,16 @@ export default function MainLayout() {
   const pathname = location.pathname || "/agent/chat";
 
   const settingsMenuItems = [
-    {
-      key: "/admin",
-      label: t("layout.systemManagement"),
-      icon: <TeamOutlined className="settings-popover-icon" />,
-    },
-    ...(isAdminUser
+    ...(!runtimeFeatures.hideCloudAdmin
+      ? [
+          {
+            key: "/admin",
+            label: t("layout.systemManagement"),
+            icon: <TeamOutlined className="settings-popover-icon" />,
+          },
+        ]
+      : []),
+    ...(isAdminUser && !runtimeFeatures.hideEvo
       ? [
           {
             key: "developer-toggle",
@@ -159,23 +166,8 @@ export default function MainLayout() {
       icon: <ApiOutlined />,
     },
   ];
-  const hideEvo = import.meta.env.VITE_HIDE_EVO === "true";
-  const aiEvolutionNavItems = [
-    {
-      key: "/memory-management",
-      label: t("layout.memoryManagement"),
-      icon: <AppstoreOutlined />,
-    },
-    ...(!hideEvo
-      ? [
-          {
-            key: "/self-evolution",
-            label: t("layout.selfEvolution"),
-            icon: <CodeOutlined />,
-          },
-        ]
-      : []),
-  ];
+  const hideEvo = runtimeFeatures.hideEvo;
+  const canAccessSelfEvolution = !hideEvo && developerActive && isAdminUser;
   const logoSrc =
     (import.meta.env as ImportMetaEnv & { VITE_APP_LOGO?: string })
       .VITE_APP_LOGO || "";
@@ -194,10 +186,6 @@ export default function MainLayout() {
     .filter(Boolean)
     .join(" ");
 
-  useEffect(() => {
-    setDeveloperActive(isDeveloperModeActive());
-  }, []);
-
   const refreshLayoutUser = useCallback(async () => {
     if (!AgentAppsAuth.isLoggedIn()) {
       setUserInfo(AgentAppsAuth.getUserInfo());
@@ -206,6 +194,8 @@ export default function MainLayout() {
 
     try {
       await fetchCurrentUser();
+      const devActive = await syncDeveloperModeFromServer();
+      setDeveloperActive(devActive);
     } catch (error) {
       console.error("Failed to refresh current user:", error);
     } finally {
@@ -249,15 +239,15 @@ export default function MainLayout() {
   useEffect(() => {
     if (!isAdminUser && developerActive) {
       setDeveloperActive(false);
-      setDeveloperModeActive(false);
+      void persistDeveloperModeActive(false);
     }
   }, [developerActive, isAdminUser]);
 
   useEffect(() => {
-    if (pathname.startsWith("/self-evolution") && hideEvo) {
+    if (pathname.startsWith("/self-evolution") && !canAccessSelfEvolution) {
       navigate("/agent/chat", { replace: true });
     }
-  }, [pathname, navigate, hideEvo]);
+  }, [pathname, navigate, canAccessSelfEvolution]);
 
   useEffect(() => {
     if (!pathname.startsWith("/agent/chat")) {
@@ -387,11 +377,48 @@ export default function MainLayout() {
     </div>
   );
 
+  const renderAiEvolutionPopover = () => (
+    <div className="sider-module-popover sider-module-popover--grouped">
+      <div className="sider-module-popover-group">
+        <div className="sider-module-popover-group-header">
+          <AppstoreOutlined />
+          <span>{t("layout.memoryManagement")}</span>
+        </div>
+        {[
+          { key: "/memory-management/skills", label: t("admin.memoryTabSkills") },
+          { key: "/memory-management/experience", label: t("admin.memoryTabExperience") },
+          { key: "/memory-management/glossary", label: t("admin.memoryTabGlossary") },
+        ].map((item) => (
+          <Button
+            key={item.key}
+            type="text"
+            className="sider-module-popover-item sider-module-popover-item--sub"
+            onClick={() => handleModuleNavigate(item.key)}
+          >
+            {item.label}
+          </Button>
+        ))}
+      </div>
+      {canAccessSelfEvolution && (
+        <div className="sider-module-popover-group">
+          <Button
+            type="text"
+            className="sider-module-popover-item"
+            icon={<CodeOutlined />}
+            onClick={() => handleModuleNavigate("/self-evolution")}
+          >
+            {t("layout.selfEvolution")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+
   const handleSettingsNavigate = (targetPath: string) => {
     if (targetPath === "developer-toggle") {
       if (developerActive) {
         setDeveloperActive(false);
-        setDeveloperModeActive(false);
+        void persistDeveloperModeActive(false);
         message.success(t("admin.developerDeactivated"));
         if (pathname.startsWith("/self-evolution")) {
           navigate("/agent/chat");
@@ -400,7 +427,7 @@ export default function MainLayout() {
       }
 
       setDeveloperActive(true);
-      setDeveloperModeActive(true);
+      void persistDeveloperModeActive(true);
       message.success(t("admin.developerActivated"));
       return;
     }
@@ -669,7 +696,7 @@ export default function MainLayout() {
                   </button>
                 </Popover>
                 <Popover
-                  content={renderModulePopover(aiEvolutionNavItems)}
+                  content={renderAiEvolutionPopover()}
                   arrow={false}
                   placement="rightTop"
                   trigger="hover"
@@ -685,6 +712,16 @@ export default function MainLayout() {
                     <RightOutlined className="sider-module-arrow" />
                   </button>
                 </Popover>
+                <button
+                  type="button"
+                  className={`sider-module-trigger${pathname.startsWith("/task-center") ? " is-active" : ""}`}
+                  onClick={() => handleModuleNavigate("/task-center")}
+                >
+                  <span className="sider-module-icon">
+                    <UnorderedListOutlined />
+                  </span>
+                  <span className="sider-module-text">{t("layout.taskCenter")}</span>
+                </button>
               </div>
               <div className="sider-history-search">
                 <Input
@@ -722,22 +759,40 @@ export default function MainLayout() {
             <Popover
               content={
                 <div className="settings-popover">
-                  {settingsMenuItems.map((item) => (
-                    <Button
-                      key={item.key}
-                      type="text"
-                      className={`settings-popover-button${
-                        item.key === "developer-toggle" && developerActive ? " is-active" : ""
-                      }`}
-                      onClick={() => handleSettingsNavigate(item.key)}
-                    >
-                      {item.icon}
-                      <span>{item.label}</span>
-                      {item.key === "developer-toggle" && developerActive && (
-                        <span className="settings-active-badge">{t("admin.developerActiveTag")}</span>
-                      )}
-                    </Button>
-                  ))}
+                  {settingsMenuItems.map((item) => {
+                    const btn = (
+                      <Button
+                        key={item.key}
+                        type="text"
+                        className={`settings-popover-button${
+                          item.key === "developer-toggle" && developerActive ? " is-active" : ""
+                        }`}
+                        onClick={() => handleSettingsNavigate(item.key)}
+                      >
+                        {item.icon}
+                        <span>{item.label}</span>
+                        {item.key === "developer-toggle" && developerActive && (
+                          <span className="settings-active-badge">{t("admin.developerActiveTag")}</span>
+                        )}
+                      </Button>
+                    );
+                    if (item.key === "developer-toggle") {
+                      return (
+                        <Tooltip
+                          key={item.key}
+                          placement="right"
+                          title={
+                            <div style={{ whiteSpace: "pre-line", lineHeight: 1.7 }}>
+                              {t("admin.developerModeTooltip")}
+                            </div>
+                          }
+                        >
+                          {btn}
+                        </Tooltip>
+                      );
+                    }
+                    return btn;
+                  })}
                   {isLoggedIn ? (
                     <Button
                       type="text"

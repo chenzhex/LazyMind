@@ -166,12 +166,16 @@ func buildStructParameters(v any, location string, builder *schemaBuilder) []map
 			continue
 		}
 		required := location == "path" || field.Tag.Get("required") == "true"
-		params = append(params, map[string]any{
+		param := map[string]any{
 			"name":     name,
 			"in":       location,
 			"required": required,
 			"schema":   schema,
-		})
+		}
+		if description := strings.TrimSpace(field.Tag.Get("desc")); description != "" {
+			param["description"] = description
+		}
+		params = append(params, param)
 	}
 	return params
 }
@@ -266,7 +270,11 @@ func (b *schemaBuilder) inlineSchemaForType(t reflect.Type) map[string]any {
 			if skip {
 				continue
 			}
-			properties[name] = b.schemaForType(field.Type)
+			propertySchema := b.schemaForType(field.Type)
+			if description := strings.TrimSpace(field.Tag.Get("desc")); description != "" {
+				propertySchema["description"] = description
+			}
+			properties[name] = propertySchema
 			if field.Tag.Get("required") == "true" || (!omitEmpty && !isOptionalField(field.Type)) {
 				required = append(required, name)
 			}
@@ -514,6 +522,39 @@ type agentEvalReportResultOpenAPIResponse struct {
 	ReportID      string                                       `json:"report_id,omitempty"`
 	BadCaseCount  int                                          `json:"bad_case_count,omitempty"`
 	TraceCoverage *agentEvalReportTraceCoverageOpenAPIResponse `json:"trace_coverage,omitempty"`
+}
+
+type agentABTestResultOpenAPIResponse struct {
+	ArtifactID         string                                  `json:"artifact_id"`
+	ArtifactRef        string                                  `json:"artifact_ref"`
+	Schema             string                                  `json:"schema"`
+	CaseCount          int                                     `json:"case_count,omitempty"`
+	Data               map[string]any                          `json:"data"`
+	ABTestID           string                                  `json:"abtest_id,omitempty"`
+	CaseDetailsSummary *agentCaseDetailsSummaryOpenAPIResponse `json:"case_details_summary,omitempty"`
+	FileURL            string                                  `json:"file_url,omitempty"`
+	RuntimeArtifactID  string                                  `json:"runtime_artifact_id,omitempty"`
+	SourceArtifactID   string                                  `json:"source_artifact_id,omitempty"`
+}
+
+type agentCaseDetailsSummaryOpenAPIResponse struct {
+	TotalCount    int                                           `json:"total_count"`
+	QuestionTypes []agentCaseDetailsQuestionTypeOpenAPIResponse `json:"question_types"`
+}
+
+type agentCaseDetailsQuestionTypeOpenAPIResponse struct {
+	QuestionType     int                                           `json:"question_type"`
+	QuestionTypeKey  string                                        `json:"question_type_key"`
+	QuestionTypeName string                                        `json:"question_type_name"`
+	Count            int                                           `json:"count"`
+	Averages         agentCaseDetailsMetricAveragesOpenAPIResponse `json:"averages"`
+}
+
+type agentCaseDetailsMetricAveragesOpenAPIResponse struct {
+	ContextRecall     *float64 `json:"context_recall,omitempty"`
+	DocRecall         *float64 `json:"doc_recall,omitempty"`
+	AnswerCorrectness *float64 `json:"answer_correctness,omitempty"`
+	Faithfulness      *float64 `json:"faithfulness,omitempty"`
 }
 
 type agentEvalReportBadCaseListPathParams struct {
@@ -1036,16 +1077,16 @@ type skillCreateManagedOpenAPIRequest struct {
 }
 
 type skillUpdateManagedOpenAPIRequest struct {
-	Name            *string  `json:"name,omitempty"`
-	Description     *string  `json:"description,omitempty"`
-	Category        *string  `json:"category,omitempty"`
-	ParentSkillID   *string  `json:"parent_skill_id,omitempty"`
-	ParentSkillName *string  `json:"parent_skill_name,omitempty"`
-	Tags            []string `json:"tags,omitempty"`
-	Content         *string  `json:"content,omitempty"`
-	FileExt         *string  `json:"file_ext,omitempty"`
-	AutoEvo         *bool    `json:"auto_evo,omitempty"`
-	IsEnabled       *bool    `json:"is_enabled,omitempty"`
+	Name            *string  `json:"name,omitempty" desc:"Optional. Rename the skill; omit to keep the current name."`
+	Description     *string  `json:"description,omitempty" desc:"Optional. Replace the skill description; omit to keep it unchanged."`
+	Category        *string  `json:"category,omitempty" desc:"Optional for parent skills. Omit for child skills unless moving to another parent."`
+	ParentSkillID   *string  `json:"parent_skill_id,omitempty" desc:"Optional and only valid for child skill updates. Moves the child under this parent skill. Do not send when updating a parent skill."`
+	ParentSkillName *string  `json:"parent_skill_name,omitempty" desc:"Optional and only valid for child skill updates when parent_skill_id is omitted. Do not send when updating a parent skill, even as an empty string."`
+	Tags            []string `json:"tags,omitempty" desc:"Optional. Replace tags; omit to keep tags unchanged."`
+	Content         *string  `json:"content,omitempty" desc:"Optional. If present, replaces stored content; omit to keep content unchanged. Empty string means clear content."`
+	FileExt         *string  `json:"file_ext,omitempty" desc:"Optional for child skills. File extension such as md; omit to keep it unchanged."`
+	AutoEvo         *bool    `json:"auto_evo,omitempty" desc:"Optional. Enable or disable automatic evolution; omit to keep it unchanged."`
+	IsEnabled       *bool    `json:"is_enabled,omitempty" desc:"Optional for parent skills. Enable or disable the skill; omit to keep it unchanged."`
 }
 
 type skillListChildOpenAPIResponse struct {
@@ -1303,6 +1344,18 @@ type personalizationSettingOpenAPIResponse struct {
 	Enabled bool `json:"enabled"`
 }
 
+type userUIPreferencesPatchOpenAPIRequest struct {
+	ChatPreferenceNoticeDismissed *bool `json:"chat_preference_notice_dismissed,omitempty"`
+	DeveloperModeActive           *bool `json:"developer_mode_active,omitempty"`
+}
+
+type userUIPreferencesOpenAPIResponse struct {
+	ChatPreferenceNoticeDismissed bool   `json:"chat_preference_notice_dismissed"`
+	DeveloperModeActive           bool   `json:"developer_mode_active"`
+	UserPreferenceConfigured      bool   `json:"user_preference_configured"`
+	UpdatedAt                     string `json:"updated_at"`
+}
+
 type localFSChatSettingOpenAPIRequest struct {
 	Enabled bool `json:"enabled"`
 }
@@ -1513,6 +1566,15 @@ func registeredCoreOperations() []openAPIOperation {
 			Tags:       []string{"eval-set-items"},
 			PathParams: evalset.EvalSetPathParams{},
 			Responses:  map[int]openAPIResponse{200: resp("Question type options", evalset.QuestionTypeOptionsResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/eval-sets/{eval_set_id}/items:invalidReferences",
+			Summary:     "List eval set items with invalid references",
+			Tags:        []string{"eval-set-items"},
+			PathParams:  evalset.EvalSetPathParams{},
+			QueryParams: evalset.ListEvalSetItemsQuery{},
+			Responses:   map[int]openAPIResponse{200: resp("Invalid reference eval set item list", evalset.ListEvalSetItemsResponse{})},
 		},
 		{
 			Method:      "GET",
@@ -1960,6 +2022,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "PATCH",
 			Path:        "/skills/{skill_id}",
 			Summary:     "Update managed skill",
+			Description: "Partial update. The request body is required, but every field inside it is optional; send only fields that should change. For parent skills, omit parent_skill_id and parent_skill_name entirely. parent_skill_id and parent_skill_name are only for moving child skills to another parent. If content is present, it replaces stored content; omit content to keep it unchanged.",
 			Tags:        []string{"skills"},
 			PathParams:  skillPathParams{},
 			RequestBody: jsonBodyOf(skillUpdateManagedOpenAPIRequest{}, true),
@@ -2221,6 +2284,22 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:   map[int]openAPIResponse{200: resp("Updated personalization setting", personalizationSettingOpenAPIResponse{})},
 		},
 		{
+			Method:    "GET",
+			Path:      "/user/ui-preferences",
+			Summary:   "Get current user's UI preferences",
+			Tags:      []string{"user"},
+			Responses: map[int]openAPIResponse{200: resp("Current user's UI preferences", userUIPreferencesOpenAPIResponse{})},
+		},
+		{
+			Method:      "PATCH",
+			Path:        "/user/ui-preferences",
+			Summary:     "Partially update current user's UI preferences",
+			Description: "Partial update. Every field inside the request body is optional; send only fields that should change.",
+			Tags:        []string{"user"},
+			RequestBody: jsonBodyOf(userUIPreferencesPatchOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Updated current user's UI preferences", userUIPreferencesOpenAPIResponse{})},
+		},
+		{
 			Method:      "PUT",
 			Path:        "/memory",
 			Summary:     "Upsert managed memory",
@@ -2427,6 +2506,15 @@ func registeredCoreOperations() []openAPIOperation {
 			PathParams:  agentEvalReportBadCaseListPathParams{},
 			QueryParams: agentEvalReportBadCaseListQueryParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Eval report bad case list", agentEvalReportBadCaseListOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/agent/threads/{thread_id}/results/abtests",
+			Summary:     "GET /agent/threads/{thread_id}/results/abtests",
+			Description: "Returns ABTest artifact rows from Evo, with normalized abtest_id, case details summary, and CSV file URL when available.",
+			Tags:        []string{"agent"},
+			PathParams:  agentThreadPathParams{},
+			Responses:   map[int]openAPIResponse{200: resp("ABTest result rows", []agentABTestResultOpenAPIResponse{})},
 		},
 		{
 			Method:      "GET",

@@ -58,7 +58,7 @@ func agentServiceEndpoint() string {
 }
 
 func threadCreateURL() string {
-	return common.JoinURL(agentServiceEndpoint(), "/v1/evo/threads")
+	return common.JoinURL(agentServiceEndpoint(), "/threads")
 }
 
 func threadStatusesURL() string {
@@ -66,18 +66,18 @@ func threadStatusesURL() string {
 }
 
 func threadMessagesURL(threadID string) string {
-	return common.JoinURL(agentServiceEndpoint(), "/v1/evo/threads/"+url.PathEscape(threadID)+"/messages")
+	return common.JoinURL(agentServiceEndpoint(), "/threads/"+url.PathEscape(threadID)+"/messages")
 }
 
 func threadActionURL(threadID, action string) string {
 	return common.JoinURL(
 		agentServiceEndpoint(),
-		"/v1/evo/threads/"+url.PathEscape(threadID)+"/"+strings.Trim(strings.TrimSpace(action), "/"),
+		"/threads/"+url.PathEscape(threadID)+"/"+strings.Trim(strings.TrimSpace(action), "/"),
 	)
 }
 
 func threadDeleteURL(threadID string) string {
-	return common.JoinURL(agentServiceEndpoint(), "/v1/evo/threads/"+url.PathEscape(threadID))
+	return common.JoinURL(agentServiceEndpoint(), "/threads/"+url.PathEscape(threadID))
 }
 
 func threadFlowStatusURL(threadID string) string {
@@ -89,7 +89,10 @@ func threadEventsURL(threadID string) string {
 }
 
 func threadStepEventsURL(threadID, stepID string) string {
-	return threadEventsURL(threadID)
+	return common.JoinURL(
+		agentServiceEndpoint(),
+		"/v1/evo/threads/"+url.PathEscape(threadID)+"/events/"+url.PathEscape(stepID),
+	)
 }
 
 func threadArtifactURL(threadID, artifactID string) string {
@@ -156,19 +159,34 @@ func attachThreadModelConfig(ctx context.Context, db *gorm.DB, userID string, pa
 	return nil
 }
 
-func hasThreadEvoLLMConfig(payload map[string]any) bool {
+func hasThreadRequiredLLMConfig(payload map[string]any) bool {
 	llmConfig, ok := payload["llm_config"].(map[string]any)
 	if !ok {
 		return false
 	}
-	for key, value := range llmConfig {
-		if !strings.EqualFold(strings.TrimSpace(key), "evo_llm") {
-			continue
+	for _, key := range []string{"eval_policy", "repair_policy", "candidate_config", "abtest_candidate_config"} {
+		if _, ok := llmConfig[key]; ok {
+			return false
 		}
-		roleConfig, ok := value.(map[string]any)
-		return ok && len(roleConfig) > 0
 	}
-	return false
+	for _, role := range []string{"llm", "evo_llm"} {
+		found := false
+		for key, value := range llmConfig {
+			if !strings.EqualFold(strings.TrimSpace(key), role) {
+				continue
+			}
+			roleConfig, ok := value.(map[string]any)
+			found = ok
+			for _, field := range []string{"source", "model", "base_url", "api_key"} {
+				found = found && strings.TrimSpace(fmt.Sprint(roleConfig[field])) != ""
+			}
+			break
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func parseRecordLimit(raw string) int {
@@ -659,6 +677,14 @@ func updateThreadStepFromEvent(db *gorm.DB, threadID, stepID string, event fetch
 	}
 	if hasOrder {
 		updates["order_index"] = orderIndex
+	}
+	if nextStepRunID := extractStringByExactKeys(payload, "next_step_run_id"); nextStepRunID != "" {
+		step.NextStepRunID = nextStepRunID
+		updates["next_step_run_id"] = gorm.Expr(
+			"CASE WHEN agent_thread_steps.next_step_run_id = ? THEN ? ELSE agent_thread_steps.next_step_run_id END",
+			"",
+			nextStepRunID,
+		)
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		if active {

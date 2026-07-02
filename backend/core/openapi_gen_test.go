@@ -114,6 +114,22 @@ func TestOpenAPISpecIncludesEvalReportResultSchema(t *testing.T) {
 		}
 	}
 
+	abtestsOp := openAPIOperationForTest(t, spec, "get", "/api/core/agent/threads/{thread_id}/results/abtests")
+	abtestsResponseRef := openAPIResponseRefForTest(t, abtestsOp)
+	if abtestsResponseRef != "#/components/schemas/agentABTestResultOpenAPIResponse" {
+		t.Fatalf("unexpected abtest result item schema ref: %q", abtestsResponseRef)
+	}
+	abtestsParams := openAPIParameterNamesForTest(t, abtestsOp)
+	if _, ok := abtestsParams["thread_id"]; !ok {
+		t.Fatalf("abtest result operation missing parameter %q", "thread_id")
+	}
+	abtestsProps := schemaPropertiesForTest(t, schemas, "agentABTestResultOpenAPIResponse")
+	for _, name := range []string{"artifact_id", "artifact_ref", "schema", "case_count", "data", "abtest_id", "case_details_summary", "file_url"} {
+		if _, ok := abtestsProps[name]; !ok {
+			t.Fatalf("abtest result schema missing property %q", name)
+		}
+	}
+
 	abCaseOp := openAPIOperationForTest(t, spec, "get", "/api/core/agent/threads/{thread_id}/results/abtests/{abtest_id}/case-details")
 	abCaseResponseRef := openAPIObjectResponseRefForTest(t, abCaseOp)
 	if abCaseResponseRef != "#/components/schemas/agentABTestCaseDetailListOpenAPIResponse" {
@@ -336,6 +352,8 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 		{"delete", "/api/core/model_providers/{model_provider_id}/groups/{group_id}/models/{model_id}", false, true, true},
 		{"get", "/api/core/personalization-setting", false, false, true},
 		{"put", "/api/core/personalization-setting", true, false, true},
+		{"get", "/api/core/user/ui-preferences", false, false, true},
+		{"patch", "/api/core/user/ui-preferences", true, false, true},
 		{"put", "/api/core/memory", true, false, true},
 		{"get", "/api/core/memory:draft-preview", false, false, true},
 		{"post", "/api/core/memory:generate", true, false, true},
@@ -537,6 +555,46 @@ func TestOpenAPISpecAssignsMetadataFieldsToUserPreference(t *testing.T) {
 
 	assertRequestSchemaRef("/api/core/memory", "put", "#/components/schemas/memoryUpsertOpenAPIRequest")
 	assertRequestSchemaRef("/api/core/user-preference", "put", "#/components/schemas/managedStateUpsertOpenAPIRequest")
+}
+
+func TestOpenAPISpecMarksUIPreferencesPatchFieldsOptional(t *testing.T) {
+	r := mux.NewRouter()
+	registerAllRoutes(r)
+
+	specJSON, err := buildOpenAPISpecFromRouter(r)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+
+	components, ok := spec["components"].(map[string]any)
+	if !ok {
+		t.Fatalf("components missing in openapi spec")
+	}
+	schemas, ok := components["schemas"].(map[string]any)
+	if !ok {
+		t.Fatalf("schemas missing in openapi spec")
+	}
+	schema, ok := schemas["userUIPreferencesPatchOpenAPIRequest"].(map[string]any)
+	if !ok {
+		t.Fatalf("userUIPreferencesPatchOpenAPIRequest missing")
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("userUIPreferencesPatchOpenAPIRequest properties missing")
+	}
+	for _, name := range []string{"chat_preference_notice_dismissed", "developer_mode_active"} {
+		if _, ok := properties[name]; !ok {
+			t.Fatalf("userUIPreferencesPatchOpenAPIRequest expected property %q", name)
+		}
+	}
+	if required, ok := schema["required"].([]any); ok && len(required) > 0 {
+		t.Fatalf("userUIPreferencesPatchOpenAPIRequest fields should all be optional, got required=%v", required)
+	}
 }
 
 func TestOpenAPISpecCoversEvalSetOperations(t *testing.T) {

@@ -143,17 +143,16 @@ export function PluginSessionApi() {
         options,
       );
     },
+    getSteps(sessionId: string, options?: RawAxiosRequestConfig) {
+      return axiosInstance.get(
+        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/steps`,
+        options,
+      );
+    },
     patchSlot(sessionId: string, slotId: string, selectedRevision: number, options?: RawAxiosRequestConfig) {
       return axiosInstance.patch(
         `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}`,
         { selected_revision: selectedRevision },
-        options,
-      );
-    },
-    advanceSession(sessionId: string, action: 'continue' | 'retry' = 'continue', options?: RawAxiosRequestConfig) {
-      return axiosInstance.post(
-        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}:advance`,
-        { action },
         options,
       );
     },
@@ -208,6 +207,26 @@ export function PluginSessionApi() {
       return axiosInstance.patch(
         `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}/caption`,
         { caption },
+        options,
+      );
+    },
+    dismissSession(sessionId: string, options?: RawAxiosRequestConfig) {
+      return axiosInstance.post(
+        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}:dismiss`,
+        {},
+        { headers: { 'Content-Type': 'application/json' }, ...options },
+      );
+    },
+    restoreSession(sessionId: string, options?: RawAxiosRequestConfig) {
+      return axiosInstance.post(
+        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}:restore`,
+        {},
+        { headers: { 'Content-Type': 'application/json' }, ...options },
+      );
+    },
+    listDismissedSessions(conversationId: string, options?: RawAxiosRequestConfig) {
+      return axiosInstance.get(
+        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/dismissed-plugin-sessions`,
         options,
       );
     },
@@ -271,6 +290,19 @@ export function ChatServiceApi() {
       return axiosInstance.post(
         `${coreApiBaseUrl}/conversations:stopChatGeneration`,
         requestParameters.stopChatGenerationRequest,
+        withJsonOptions(options),
+      );
+    },
+    /** Save partial ask-user answers so they survive page reload. */
+    conversationServiceSaveAskAnswers(
+      conversationId: string,
+      historyId: string,
+      answers: Record<string, any>,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.patch(
+        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}:ask-answers`,
+        { history_id: historyId, answers },
         withJsonOptions(options),
       );
     },
@@ -582,6 +614,58 @@ export function TempUploadServiceApi() {
         `${coreApiBaseUrl}/temp/uploads/${encodeURIComponent(uploadId)}:abort`,
         {},
         withJsonOptions(options),
+      );
+    },
+  };
+}
+
+export interface ConversationPluginSettings {
+  plugin_mode?: 'dynamic' | 'auto';
+  enable_subagent?: boolean;
+  enable_plugin?: boolean;
+}
+
+export function parseConversationPluginSettings(
+  conversation?: {
+    enable_plugin?: boolean | null;
+    plugin_mode?: string | null;
+    enable_subagent?: boolean | null;
+  } | null,
+): ConversationPluginSettings | undefined {
+  if (!conversation) {
+    return undefined;
+  }
+  const settings: ConversationPluginSettings = {};
+  if (conversation.enable_plugin != null) {
+    settings.enable_plugin = conversation.enable_plugin;
+  }
+  const rawMode = conversation.plugin_mode;
+  if (rawMode === 'dynamic' || rawMode === 'auto') {
+    settings.plugin_mode = rawMode;
+  }
+  if (conversation.enable_subagent != null) {
+    settings.enable_subagent = conversation.enable_subagent;
+  }
+  return Object.keys(settings).length > 0 ? settings : undefined;
+}
+
+export function ConversationSettingsApi() {
+  return {
+    getChatSettings(options?: RawAxiosRequestConfig) {
+      return axiosInstance.get<ConversationPluginSettings>(
+        `${coreApiBaseUrl}/user/chat-settings`,
+        options,
+      );
+    },
+    patchPluginSettings(
+      conversationId: string,
+      settings: ConversationPluginSettings,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.patch(
+        `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/plugin-settings`,
+        settings,
+        options,
       );
     },
   };

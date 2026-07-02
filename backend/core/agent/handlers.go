@@ -56,6 +56,7 @@ type threadStepResponse struct {
 	OrderIndex    int        `json:"order_index"`
 	EventCount    int64      `json:"event_count"`
 	CurrentTaskID string     `json:"current_task_id,omitempty"`
+	NextStepRunID string     `json:"next_step_run_id"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
 	EndedAt       *time.Time `json:"ended_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -86,7 +87,6 @@ type threadStatusesResponse struct {
 var (
 	threadEventsKeepaliveInterval = time.Second
 	errThreadEventsDone           = errors.New("thread events done")
-	errThreadEventsRunCompleted   = errors.New("thread events run completed")
 )
 
 func ListThreads(w http.ResponseWriter, r *http.Request) {
@@ -163,13 +163,12 @@ func CreateThread(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "load llm config failed", err), http.StatusInternalServerError)
 		return
 	}
-	if !hasThreadEvoLLMConfig(requestPayload) {
-		common.ReplyErr(w, "请先配置 evo_llm 模型后再创建任务", http.StatusUnprocessableEntity)
+	if !hasThreadRequiredLLMConfig(requestPayload) {
+		common.ReplyErr(w, "请先配置 llm 和 evo_llm 模型后再创建任务", http.StatusUnprocessableEntity)
 		return
 	}
 
 	var creationGuard *userActiveThreadCreationGuard
-	// Temporary integration bypass: comment this guard block to disable single-active-thread enforcement.
 	if guard, guardErr := reserveUserActiveThreadCreation(r.Context(), db, r); guardErr != nil {
 		replyUserActiveThreadError(w, guardErr)
 		return
@@ -391,11 +390,13 @@ func StreamThreadMessages(w http.ResponseWriter, r *http.Request) {
 			common.ReplyErr(w, "messages request body required", http.StatusBadRequest)
 			return
 		}
-		if err := attachThreadModelConfig(r.Context(), db, store.UserID(r), requestPayload); err != nil {
-			common.ReplyErr(w, fmt.Sprintf("%s: %v", "load llm config failed", err), http.StatusInternalServerError)
-			return
+		messagePayload := map[string]any{}
+		for _, key := range []string{"message_id", "text", "content", "attachments", "client_context"} {
+			if value, ok := requestPayload[key]; ok {
+				messagePayload[key] = value
+			}
 		}
-		requestBytes, err := json.Marshal(requestPayload)
+		requestBytes, err := json.Marshal(messagePayload)
 		if err != nil {
 			common.ReplyErr(w, fmt.Sprintf("%s: %v", "marshal body failed", err), http.StatusInternalServerError)
 			return
@@ -547,13 +548,6 @@ func streamThreadEvents(w http.ResponseWriter, r *http.Request, stepID string) {
 				Str("thread_id", threadID).
 				Str("step_id", stepID).
 				Msg("agent thread events stopping after done")
-			return
-		}
-		if errors.Is(streamErr, errThreadEventsRunCompleted) {
-			log.Logger.Info().
-				Str("thread_id", threadID).
-				Str("step_id", stepID).
-				Msg("agent thread events stopping after run.completed")
 			return
 		}
 		if streamErr != nil {
@@ -861,13 +855,24 @@ func postThreadAction(w http.ResponseWriter, r *http.Request, action string) {
 			common.ReplyErr(w, fmt.Sprintf("%s: %v", "invalid body", decodeErr), http.StatusBadRequest)
 			return
 		}
-		if attachErr := attachThreadModelConfig(r.Context(), store.DB(), store.UserID(r), payload); attachErr != nil {
-			common.ReplyErr(w, fmt.Sprintf("%s: %v", "load llm config failed", attachErr), http.StatusInternalServerError)
+		commandPayload := map[string]any{}
+		for _, key := range []string{"command_id", "until_step"} {
+			if value, ok := payload[key]; ok {
+				commandPayload[key] = value
+			}
+		}
+		proxy, statusCode, err = postUpstreamProxy(r.Context(), r, threadActionURL(threadID, action), commandPayload)
+	} else {
+		payload, _, decodeErr := decodeRequestBody(r)
+		if decodeErr != nil {
+			common.ReplyErr(w, fmt.Sprintf("%s: %v", "invalid body", decodeErr), http.StatusBadRequest)
 			return
 		}
-		proxy, statusCode, err = postUpstreamProxy(r.Context(), r, threadActionURL(threadID, action), payload)
-	} else {
-		proxy, statusCode, err = postUpstreamProxy(r.Context(), r, threadActionURL(threadID, action), nil)
+		commandPayload := map[string]any{}
+		if value, ok := payload["command_id"]; ok {
+			commandPayload["command_id"] = value
+		}
+		proxy, statusCode, err = postUpstreamProxy(r.Context(), r, threadActionURL(threadID, action), commandPayload)
 	}
 	if err != nil {
 		common.ReplyErrWithData(w, "post thread action failed", map[string]any{"detail": err.Error()}, statusCode)
@@ -981,8 +986,6 @@ func streamUpstreamThreadEvents(
 				switch result.StopReason {
 				case "done":
 					return errThreadEventsDone
-				case "run_completed":
-					return errThreadEventsRunCompleted
 				}
 				return result.Err
 			}
@@ -1277,17 +1280,6 @@ func readUpstreamThreadEvents(
 					Msg("agent thread events upstream done received")
 				return
 			}
-			if isRunCompletedThreadEvent(event) {
-				result.StopReason = "run_completed"
-				log.Logger.Info().
-					Str("thread_id", threadID).
-					Str("task_id", event.TaskID).
-					Str("event_name", event.EventName).
-					Str("upstream_event_id", frame.ID).
-					Int("frame_index", frameIndex).
-					Msg("agent thread events upstream run.completed received")
-				return
-			}
 		}
 	}()
 
@@ -1379,43 +1371,9 @@ func isDoneThreadEvent(event fetchedThreadEvent) bool {
 	return ok && strings.EqualFold(strings.TrimSpace(rawType), "done")
 }
 
-func isRunCompletedThreadEvent(event fetchedThreadEvent) bool {
-	if strings.EqualFold(strings.TrimSpace(event.EventName), "run.completed") {
-		return true
-	}
-	payload, ok := parseJSONValue(event.RawFrame).(map[string]any)
-	if !ok {
-		return false
-	}
-	return hasRunCompletedEventType(payload)
-}
-
 func threadEventStepID(event fetchedThreadEvent) string {
 	payload := parseJSONValue(event.RawFrame)
 	return extractStringByExactKeys(payload, "step_run_id")
-}
-
-func hasRunCompletedEventType(payload map[string]any) bool {
-	if eventTypeMatches(payload["event_type"], "run.completed") {
-		return true
-	}
-	child, ok := payload["payload"].(map[string]any)
-	if !ok {
-		return false
-	}
-	if eventTypeMatches(child["event_type"], "run.completed") {
-		return true
-	}
-	rawEvent, ok := child["raw_event"].(map[string]any)
-	if !ok {
-		return false
-	}
-	return eventTypeMatches(rawEvent["event_type"], "run.completed")
-}
-
-func eventTypeMatches(value any, want string) bool {
-	raw, ok := value.(string)
-	return ok && strings.EqualFold(strings.TrimSpace(raw), want)
 }
 
 func firstNonNil(errs ...error) error {
@@ -2030,6 +1988,7 @@ func toThreadStepResponse(step orm.AgentThreadStep) threadStepResponse {
 		OrderIndex:    step.OrderIndex,
 		EventCount:    step.EventCount,
 		CurrentTaskID: step.CurrentTaskID,
+		NextStepRunID: step.NextStepRunID,
 		StartedAt:     step.StartedAt,
 		EndedAt:       step.EndedAt,
 		CreatedAt:     step.CreatedAt,

@@ -1,5 +1,5 @@
 import { Avatar, Button, Divider, Flex, message, Spin, Tooltip } from "antd";
-import { trim } from "lodash";
+import { trim, debounce } from "lodash";
 import { useEffect, useReducer, useRef } from "react";
 import type { MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -25,6 +25,7 @@ import { usePluginStore } from "@/modules/chat/store/pluginPanel";
 import { PluginPanel } from "@/modules/chat/components/PluginPanel";
 import MultiAnswerDisplay, { type PreferenceType } from "../MultiAnswerDisplay";
 import FeedbackModal from "../FeedbackModal";
+import AskCard from "@/modules/chat/components/AskCard";
 
 const BotAvatarIcon = new URL(
   "../../assets/images/bot_avatar.png",
@@ -85,7 +86,7 @@ type FeedbackAction =
   | { type: "SUBMIT_START" }
   | {
       type: "SUBMIT_SUCCESS";
-      feedbackType: FeedBackChatHistoryRequestTypeEnum;
+      feedbackType: FeedBackChatHistoryRequestTypeEnum | undefined;
       historyId: string;
     }
   | { type: "SUBMIT_FAIL" }
@@ -102,6 +103,14 @@ function normalizeFeedbackType(
     typeof feedbackType === "string"
       ? feedbackType.trim().toUpperCase()
       : feedbackType;
+  if (
+    normalizedFeedbackType ===
+      FeedBackChatHistoryRequestTypeEnum.FeedBackTypeUnspecified ||
+    normalizedFeedbackType === 0 ||
+    normalizedFeedbackType === "0"
+  ) {
+    return undefined;
+  }
   if (
     normalizedFeedbackType ===
       FeedBackChatHistoryRequestTypeEnum.FeedBackTypeLike ||
@@ -196,6 +205,13 @@ const AssistantMessage = (props: any) => {
   } = props;
   const citeButtonRef = useRef<HTMLButtonElement | null>(null);
   const citeSelectionTextRef = useRef("");
+  // Debounced backend persistence for ask-card answers. Created once per component
+  // instance with useRef so it is stable across re-renders.
+  const persistAskAnswersRef = useRef(
+    debounce((sid: string, hid: string, answers: Record<number, any>) => {
+      ChatServiceApi().conversationServiceSaveAskAnswers(sid, hid, answers).catch(() => {});
+    }, 600),
+  );
   const [feedbackState, dispatch] = useReducer(feedbackReducer, {
     showModal: false,
     isSubmitting: false,
@@ -447,29 +463,45 @@ const AssistantMessage = (props: any) => {
   }
 
   const createUpdatedItem = (
-    feedbackType: FeedBackChatHistoryRequestTypeEnum,
+    feedbackType: FeedBackChatHistoryRequestTypeEnum | undefined,
     targetHistoryId?: string,
   ) => {
     const resolvedHistoryId = targetHistoryId || item?.history_id;
+
+    const applyFeedbackFields = (
+      record: any,
+      nextFeedBack: FeedBackChatHistoryRequestTypeEnum | undefined,
+    ) => {
+      if (nextFeedBack !== undefined) {
+        return { ...record, feed_back: nextFeedBack };
+      }
+      return {
+        ...record,
+        feed_back: undefined,
+        reason: undefined,
+        expected_answer: undefined,
+      };
+    };
+
     if (resolvedHistoryId && item?.answers) {
       const hasTargetAnswer = item.answers.some(
         (ans: any) => ans.history_id === resolvedHistoryId,
       );
       const updatedAnswers = item.answers.map((ans: any) =>
         ans.history_id === resolvedHistoryId
-          ? { ...ans, feed_back: feedbackType }
+          ? applyFeedbackFields(ans, feedbackType)
           : { ...ans, feed_back: undefined },
       );
-      return {
-        ...item,
-        feed_back:
-          resolvedHistoryId === item?.history_id || !hasTargetAnswer
-            ? feedbackType
-            : undefined,
-        answers: updatedAnswers,
-      };
+      const itemLevelFeedback =
+        resolvedHistoryId === item?.history_id || !hasTargetAnswer
+          ? feedbackType
+          : undefined;
+      return applyFeedbackFields(
+        { ...item, answers: updatedAnswers },
+        itemLevelFeedback,
+      );
     }
-    return { ...item, feed_back: feedbackType };
+    return applyFeedbackFields(item, feedbackType);
   };
 
   
@@ -488,24 +520,28 @@ const AssistantMessage = (props: any) => {
     }
 
     const currentFeedBack = getCurrentFeedback(historyId);
-
-    if (currentFeedBack === type) {
-      return;
-    }
+    const isCancel = currentFeedBack === type;
+    const requestType = isCancel
+      ? FeedBackChatHistoryRequestTypeEnum.FeedBackTypeUnspecified
+      : type;
+    const nextFeedbackType = isCancel ? undefined : type;
 
     dispatch({ type: "SUBMIT_START" });
 
     ChatServiceApi()
       .conversationServiceFeedBackChatHistory({
-        feedBackChatHistoryRequest: { history_id: targetHistoryId, type },
+        feedBackChatHistoryRequest: {
+          history_id: targetHistoryId,
+          type: requestType,
+        },
       })
       .then(() => {
-        const updatedItem = createUpdatedItem(type, targetHistoryId);
+        const updatedItem = createUpdatedItem(nextFeedbackType, targetHistoryId);
         updateMessage(updatedItem);
 
         dispatch({
           type: "SUBMIT_SUCCESS",
-          feedbackType: type,
+          feedbackType: nextFeedbackType,
           historyId: targetHistoryId,
         });
       })
@@ -522,14 +558,18 @@ const AssistantMessage = (props: any) => {
     }
 
     const currentFeedBack = getCurrentFeedback(historyId);
+    const targetHistoryId = historyId || item?.history_id;
 
     if (
       currentFeedBack === FeedBackChatHistoryRequestTypeEnum.FeedBackTypeUnlike
     ) {
+      onFeedBack(
+        FeedBackChatHistoryRequestTypeEnum.FeedBackTypeUnlike,
+        historyId,
+      );
       return;
     }
 
-    const targetHistoryId = historyId || item?.history_id;
     if (!targetHistoryId) {
       message.error(t("chat.historyIdMissingFeedback"));
       return;
@@ -703,11 +743,12 @@ const AssistantMessage = (props: any) => {
               FeedBackChatHistoryRequestTypeEnum.FeedBackTypeLike ? (
                 <LikeFilled
                   className="tool-btn"
-                  style={{
-                    cursor: "not-allowed",
-                    opacity: 0.6,
-                    pointerEvents: "none",
-                  }}
+                  onClick={() =>
+                    onFeedBack(
+                      FeedBackChatHistoryRequestTypeEnum.FeedBackTypeLike,
+                      answerHistoryId,
+                    )
+                  }
                 />
               ) : (
                 <LikeOutlined
@@ -724,11 +765,7 @@ const AssistantMessage = (props: any) => {
               FeedBackChatHistoryRequestTypeEnum.FeedBackTypeUnlike ? (
                 <DislikeFilled
                   className="tool-btn"
-                  style={{
-                    cursor: "not-allowed",
-                    opacity: 0.6,
-                    pointerEvents: "none",
-                  }}
+                  onClick={() => handleDislikeClick(answerHistoryId)}
                 />
               ) : (
                 <DislikeOutlined
@@ -773,11 +810,11 @@ const AssistantMessage = (props: any) => {
             FeedBackChatHistoryRequestTypeEnum.FeedBackTypeLike ? (
               <LikeFilled
                 className="tool-btn"
-                style={{
-                  cursor: "not-allowed",
-                  opacity: 0.6,
-                  pointerEvents: "none",
-                }}
+                onClick={() =>
+                  onFeedBack(
+                    FeedBackChatHistoryRequestTypeEnum.FeedBackTypeLike,
+                  )
+                }
               />
             ) : (
               <LikeOutlined
@@ -793,11 +830,7 @@ const AssistantMessage = (props: any) => {
             FeedBackChatHistoryRequestTypeEnum.FeedBackTypeUnlike ? (
               <DislikeFilled
                 className="tool-btn"
-                style={{
-                  cursor: "not-allowed",
-                  opacity: 0.6,
-                  pointerEvents: "none",
-                }}
+                onClick={() => handleDislikeClick()}
               />
             ) : (
               <DislikeOutlined
@@ -837,6 +870,34 @@ const AssistantMessage = (props: any) => {
             {t("chat.regenerate")}
           </Button>
         </>
+      );
+    }
+    // Render ask_pending card if present
+    if (item.ask_pending) {
+      const askPending = item.ask_pending;
+      const isAnswered = !!item.ask_answered;
+      return (
+        <AskCard
+          key={askPending.ask_id}
+          askPending={askPending}
+          disabled={isAnswered}
+          savedAnswers={item.ask_saved_answers}
+          onAnswerChange={(idx, ans) => {
+            const currentAnswers = { ...(item.ask_saved_answers || {}), [idx]: ans };
+            // Update in-memory message immediately so answers survive session switches.
+            updateMessage({ ...item, ask_saved_answers: currentAnswers });
+            // Debounced write to backend so answers survive page reload.
+            if (sessionId && item.history_id) {
+              persistAskAnswersRef.current(sessionId, item.history_id, currentAnswers);
+            }
+          }}
+          onSubmit={(payload) => {
+            persistAskAnswersRef.current.cancel();
+            // Mark the card as answered in memory so it shows as disabled immediately.
+            updateMessage({ ...item, ask_answered: true, ask_saved_answers: undefined });
+            props.sendMessage?.(payload.text, undefined, { ask_answers_structured: payload.structured });
+          }}
+        />
       );
     }
     return null;
@@ -941,6 +1002,7 @@ const AssistantMessage = (props: any) => {
               key={sessionId}
               conversationId={sessionId}
               onSendMessage={(text) => props.sendMessage?.(text)}
+              onStop={props.stopGeneration}
             />
           )}
         </div>
@@ -993,6 +1055,7 @@ const AssistantMessage = (props: any) => {
             key={sessionId}
             conversationId={sessionId}
             onSendMessage={(text) => props.sendMessage?.(text)}
+            onStop={props.stopGeneration}
           />
         )}
       </div>

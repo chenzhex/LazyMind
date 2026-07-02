@@ -197,7 +197,7 @@ func TestBuildThreadCreateTitleFallsBackToPayloadTitle(t *testing.T) {
 	}
 }
 
-func TestCreateThreadRequiresConfiguredEvoLLM(t *testing.T) {
+func TestCreateThreadRequiresConfiguredThreadLLMs(t *testing.T) {
 	db := newAgentTestDB(t)
 	if err := db.DB.AutoMigrate(&orm.Dataset{}); err != nil {
 		t.Fatalf("auto migrate dataset: %v", err)
@@ -222,10 +222,10 @@ func TestCreateThreadRequiresConfiguredEvoLLM(t *testing.T) {
 	CreateThread(rec, req)
 
 	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected missing evo_llm to return 422, status=%d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("expected missing thread llm config to return 422, status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "evo_llm") {
-		t.Fatalf("expected response to mention evo_llm, body=%s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "llm") || !strings.Contains(rec.Body.String(), "evo_llm") {
+		t.Fatalf("expected response to mention llm and evo_llm, body=%s", rec.Body.String())
 	}
 	var activeCount int64
 	if err := db.DB.Model(&orm.AgentUserActiveThread{}).Count(&activeCount).Error; err != nil {
@@ -236,16 +236,17 @@ func TestCreateThreadRequiresConfiguredEvoLLM(t *testing.T) {
 	}
 }
 
-func TestAttachThreadModelConfigProvidesEvoLLM(t *testing.T) {
+func TestAttachThreadModelConfigProvidesRequiredThreadLLMs(t *testing.T) {
 	db := newAgentTestDB(t)
+	seedAgentRuntimeModelConfig(t, db, "user-1", "llm")
 	seedAgentRuntimeModelConfig(t, db, "user-1", "evo_llm")
 
 	payload := map[string]any{}
 	if err := attachThreadModelConfig(context.Background(), db.DB, "user-1", payload); err != nil {
 		t.Fatalf("attach thread model config: %v", err)
 	}
-	if !hasThreadEvoLLMConfig(payload) {
-		t.Fatalf("expected attached payload to satisfy evo_llm requirement: %#v", payload)
+	if !hasThreadRequiredLLMConfig(payload) {
+		t.Fatalf("expected attached payload to satisfy thread llm requirement: %#v", payload)
 	}
 	llmConfig, ok := payload["llm_config"].(map[string]any)
 	if !ok {
@@ -254,6 +255,143 @@ func TestAttachThreadModelConfigProvidesEvoLLM(t *testing.T) {
 	evoConfig, ok := llmConfig["evo_llm"].(map[string]any)
 	if !ok || evoConfig["model"] != "gpt-evo-llm" {
 		t.Fatalf("expected evo_llm config, got %#v", llmConfig["evo_llm"])
+	}
+	chatConfig, ok := llmConfig["llm"].(map[string]any)
+	if !ok || chatConfig["model"] != "gpt-llm" {
+		t.Fatalf("expected llm config, got %#v", llmConfig["llm"])
+	}
+}
+
+func TestPostThreadActionForwardsOnlyCommandFields(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "created",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/threads/thr_1/start" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "accepted"})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	body := `{"command_id":"cmd_1","until_step":"eval","llm_config":{"llm":{}},"extra":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/core/agent/threads/thr_1/start", strings.NewReader(body))
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+
+	postThreadAction(rec, req, "start")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(got) != 2 || got["command_id"] != "cmd_1" || got["until_step"] != "eval" {
+		t.Fatalf("unexpected upstream command body: %#v", got)
+	}
+}
+
+func TestPostThreadActionForwardsOnlyEmptyCommandFields(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "created",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/threads/thr_1/pause" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "accepted"})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	body := `{"command_id":"cmd_2","llm_config":{"llm":{}},"until_step":"eval","extra":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/core/agent/threads/thr_1/pause", strings.NewReader(body))
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+
+	postThreadAction(rec, req, "pause")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(got) != 1 || got["command_id"] != "cmd_2" {
+		t.Fatalf("unexpected upstream empty command body: %#v", got)
+	}
+}
+
+func TestStreamThreadMessagesForwardsOnlyMessageFields(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "created",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/threads/thr_1/messages" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"assistant_response\",\"content\":\"ok\"}\n\n")
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	body := `{"message_id":"m1","content":"继续","llm_config":{"llm":{}},"extra":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/core/agent/threads/thr_1/messages", strings.NewReader(body))
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+
+	StreamThreadMessages(rec, req)
+
+	if got["message_id"] != "m1" || got["content"] != "继续" || len(got) != 2 {
+		t.Fatalf("unexpected upstream message body: %#v", got)
 	}
 }
 
@@ -351,11 +489,11 @@ func TestThreadEventsURLDoesNotForceSince(t *testing.T) {
 	}
 }
 
-func TestThreadStepEventsURLUsesThreadEventsEndpoint(t *testing.T) {
+func TestThreadStepEventsURLUsesStepEventsEndpoint(t *testing.T) {
 	t.Setenv("LAZYMIND_EVO_SERVICE_URL", "http://evo-service:8048/")
 
 	got := threadStepEventsURL("thr/1", "step/collect")
-	want := "http://evo-service:8048/v1/evo/threads/thr%2F1/events"
+	want := "http://evo-service:8048/v1/evo/threads/thr%2F1/events/step%2Fcollect"
 	if got != want {
 		t.Fatalf("unexpected thread step events URL:\nwant: %q\ngot:  %q", want, got)
 	}
@@ -1264,6 +1402,21 @@ func TestUpdateThreadStepFromEventDoneCompletesRunningStep(t *testing.T) {
 	if step.EventCount != 2 {
 		t.Fatalf("expected event_count=2, got %d", step.EventCount)
 	}
+	if step.NextStepRunID != "step_2" {
+		t.Fatalf("expected next_step_run_id step_2, got %q", step.NextStepRunID)
+	}
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", "step_1", fetchedThreadEvent{
+		EventName: "done",
+		RawFrame:  `{"type":"done","status":"running","step_run_id":"step_1","next_step_run_id":"step_3"}`,
+	}); err != nil {
+		t.Fatalf("update duplicate done step returned error: %v", err)
+	}
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", "step_1").First(&step).Error; err != nil {
+		t.Fatalf("reload step: %v", err)
+	}
+	if step.NextStepRunID != "step_2" {
+		t.Fatalf("expected first next_step_run_id to be preserved, got %q", step.NextStepRunID)
+	}
 }
 
 func TestUpdateThreadStepFromEventKeepsOnlyLatestRunningStepActive(t *testing.T) {
@@ -1313,7 +1466,7 @@ func TestListThreadStepsReturnsActiveStep(t *testing.T) {
 		t.Fatalf("create thread: %v", err)
 	}
 	if err := db.DB.Create(&[]orm.AgentThreadStep{
-		{ThreadID: "thr_1", StepID: "collect_material", Title: "Collect", Status: "succeeded", Active: false, OrderIndex: 1, EventCount: 2, CreatedAt: now, UpdatedAt: now},
+		{ThreadID: "thr_1", StepID: "collect_material", Title: "Collect", Status: "succeeded", Active: false, OrderIndex: 1, EventCount: 2, NextStepRunID: "generate_image", CreatedAt: now, UpdatedAt: now},
 		{ThreadID: "thr_1", StepID: "generate_image", Title: "Generate", Status: "running", Active: true, OrderIndex: 2, EventCount: 3, CreatedAt: now, UpdatedAt: now.Add(time.Second)},
 	}).Error; err != nil {
 		t.Fatalf("create steps: %v", err)
@@ -1346,6 +1499,9 @@ func TestListThreadStepsReturnsActiveStep(t *testing.T) {
 	}
 	if response.Data.TotalSize != 2 || len(response.Data.Items) != 2 {
 		t.Fatalf("unexpected step list response: %#v", response.Data)
+	}
+	if response.Data.Items[0].NextStepRunID != "generate_image" {
+		t.Fatalf("expected first step next_step_run_id generate_image, got %q", response.Data.Items[0].NextStepRunID)
 	}
 }
 
@@ -1587,6 +1743,9 @@ func TestStreamUpstreamThreadEventsFiltersRequestedStep(t *testing.T) {
 	if step.Status != "succeeded" || step.Active || step.EventCount != 2 {
 		t.Fatalf("expected step_2 to be completed from filtered stream, got %#v", step)
 	}
+	if step.NextStepRunID != "step_3" {
+		t.Fatalf("expected step_2 next_step_run_id step_3, got %q", step.NextStepRunID)
+	}
 }
 
 func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
@@ -1613,7 +1772,7 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 		mu.Unlock()
 
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/evo/threads/thr_1/events":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/evo/threads/thr_1/events/step_1":
 			http.Error(w, `{"detail":"closed"}`, http.StatusNotFound)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/evo/threads/thr_1/flow-status":
 			_ = json.NewEncoder(w).Encode(threadFlowStatusResponse{ThreadID: "thr_1", Status: "ended"})
@@ -1645,7 +1804,7 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 	gotCalls := append([]string(nil), calls...)
 	mu.Unlock()
 	wantCalls := []string{
-		"GET /v1/evo/threads/thr_1/events",
+		"GET /v1/evo/threads/thr_1/events/step_1",
 		"GET /v1/evo/threads/thr_1/flow-status",
 	}
 	if fmt.Sprint(gotCalls) != fmt.Sprint(wantCalls) {
@@ -1682,31 +1841,36 @@ func TestStreamUpstreamThreadEventsStopsAfterDoneType(t *testing.T) {
 	}
 }
 
-func TestStreamUpstreamThreadEventsStopsAfterRunCompleted(t *testing.T) {
+func TestStreamUpstreamThreadEventsContinuesAfterRunCompletedUntilDone(t *testing.T) {
 	db := newAgentTestDB(t)
 	rec := httptest.NewRecorder()
 	completed := `{"type":"artifact.run.completed","event_type":"run.completed","payload":{"event_type":"run.completed","raw_event":{"event_type":"run.completed"}}}`
+	done := `{"type":"done","status":"success"}`
 	body := strings.NewReader(strings.Join([]string{
 		"id: 41\nevent: message\ndata: {\"kind\":\"task.running\",\"task_id\":\"task_1\"}\n\n",
 		"id: 42\nevent: message\ndata: " + completed + "\n\n",
 		"id: 43\nevent: message\ndata: {\"kind\":\"task.after\",\"task_id\":\"task_1\"}\n\n",
+		"id: 44\nevent: message\ndata: " + done + "\n\n",
+		"id: 45\nevent: message\ndata: {\"kind\":\"task.later\",\"task_id\":\"task_1\"}\n\n",
 	}, ""))
 
 	var lastUpstreamEventID string
 	err := streamUpstreamThreadEvents(context.Background(), rec, rec, db.DB, "thr_1", "", body, &lastUpstreamEventID, nil)
-	if !errors.Is(err, errThreadEventsRunCompleted) {
-		t.Fatalf("expected run completed stop error, got %v", err)
+	if !errors.Is(err, errThreadEventsDone) {
+		t.Fatalf("expected done stop error, got %v", err)
 	}
 
 	want := "data: {\"kind\":\"task.running\",\"task_id\":\"task_1\"}\n\n" +
-		"data: " + completed + "\n\n"
+		"data: " + completed + "\n\n" +
+		"data: {\"kind\":\"task.after\",\"task_id\":\"task_1\"}\n\n" +
+		"data: " + done + "\n\n"
 	if got := rec.Body.String(); got != want {
 		t.Fatalf("unexpected forwarded stream:\nwant: %q\ngot:  %q", want, got)
 	}
-	if strings.Contains(rec.Body.String(), "task.after") {
-		t.Fatalf("expected stream to stop before later frames, got %q", rec.Body.String())
+	if strings.Contains(rec.Body.String(), "task.later") {
+		t.Fatalf("expected stream to stop after done, got %q", rec.Body.String())
 	}
-	if lastUpstreamEventID != "42" {
+	if lastUpstreamEventID != "44" {
 		t.Fatalf("unexpected last upstream event id: %q", lastUpstreamEventID)
 	}
 }

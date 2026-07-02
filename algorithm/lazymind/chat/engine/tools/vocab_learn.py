@@ -12,7 +12,6 @@ from lazymind.chat.engine.tools.infra import (
     VocabEvolutionRequest,
     fetch_chat_histories_for_session,
     fetch_vocab_groups_for_user_id,
-    handle_tool_errors,
     post_core_api,
     prepare_vocab_candidates,
     resolve_vocab_user_id,
@@ -29,7 +28,6 @@ MAX_VOCAB_SUGGESTIONS_PER_CALL = 5
 _WORD_GROUP_APPLY_INTERNAL_PATH = '/inner/word_group:apply'
 
 
-@handle_tool_errors
 def vocab_learn(suggestions: List[VocabSuggestion]) -> Dict[str, Any]:
     """Apply durable user-specific vocabulary updates for the current session user.
 
@@ -38,9 +36,14 @@ def vocab_learn(suggestions: List[VocabSuggestion]) -> Dict[str, Any]:
     terms should be treated as the same concept in their domain. Do not use it for vague paraphrases,
     general world-knowledge synonyms, temporary nicknames, or one-off wording choices.
 
+    Prefer this tool over memory when the user asks to remember a mapping in a vocabulary,
+    glossary, domain terminology, or synonym list, or says that one term means, equals,
+    or is another term in a specific domain.
+
     The tool automatically resolves the current session user and updates only that user's vocabulary.
     Pass a small batch of concrete synonym suggestions. Each item must contain exactly one `word`, one
-    `synonym`, and a short `reason` grounded in the conversation.
+    `synonym`, a short `description` for the domain context when useful, and a short `reason`
+    grounded in the conversation.
 
     Args:
         suggestions (List[Dict[str, Any]]): A small batch of stable, user-specific term mappings for

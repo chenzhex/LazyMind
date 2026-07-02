@@ -1,4 +1,4 @@
-import { CloseOutlined, CloudDownloadOutlined } from "@ant-design/icons";
+import { CloseOutlined, CloudDownloadOutlined, FilterOutlined, PlusCircleOutlined } from "@ant-design/icons";
 import classnames from "classnames";
 import {
   Button,
@@ -6,6 +6,7 @@ import {
   Col,
   Input,
   message,
+  Popover,
   Row,
   Spin,
   Tooltip,
@@ -28,10 +29,18 @@ import InfiniteScroll from "react-infinite-scroll-component";
 import { axiosInstance, BASE_URL } from "@/components/request";
 import { useChatThinkStore } from "@/modules/chat/store/chatThink";
 import { useChatNewMessageStore } from "@/modules/chat/store/chatNewMessage";
+import { addTask, listTasks } from "@/modules/taskCenter/api";
 
 import dayjs from "dayjs";
 
 import { ChatServiceApi } from "@/modules/chat/utils/request";
+import {
+  bumpConversationToTop,
+} from "@/modules/chat/utils/conversationActivity";
+import {
+  CHAT_CONVERSATION_ACTIVITY_EVENT,
+  type ChatConversationActivityDetail,
+} from "@/modules/chat/constants/chat";
 import "./index.scss";
 import { downloadStream } from "@/modules/chat/utils/download";
 
@@ -114,6 +123,12 @@ const RecordList = forwardRef<RecordListImperativeProps, IRecordList>(
     const [checkedList, setCheckedList] = useState<string[]>([]);
     const [showBatchExport, setShowBatchExport] = useState(false);
     const [isHistoryLoading, setIsHistoryLoading] = useState(true);
+    // Set of conversation_ids already in task center (for dedup)
+    const [taskConvIds, setTaskConvIds] = useState<Set<string>>(new Set());
+    // convTypeFilter: which conversation types to show. Default = normal only (no task convs).
+    // Values: 'normal' = non-task, 'task' = task. Multiple values allowed.
+    const [convTypeFilter, setConvTypeFilter] = useState<string[]>(['normal']);
+    const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
     const scrollableTargetId = compact
       ? "sidebarConversationScrollableDiv"
       : "scrollableDiv";
@@ -121,6 +136,16 @@ const RecordList = forwardRef<RecordListImperativeProps, IRecordList>(
     const deleteHistoryLastInvokeRef = useRef(0);
     const { setThink } = useChatThinkStore();
     const { setNewMessage } = useChatNewMessageStore();
+
+    // Load task center index once on mount to support dedup check.
+    useEffect(() => {
+      listTasks({ page_size: 200 })
+        .then((resp) => {
+          const ids = new Set((resp.items ?? []).map((t) => t.conversation_id));
+          setTaskConvIds(ids);
+        })
+        .catch(() => {});
+    }, []);
     const groupedHistoryList = useMemo(() => {
       const groups: Record<ConversationGroup, Conversation[]> = {
         today: [],
@@ -150,7 +175,7 @@ const RecordList = forwardRef<RecordListImperativeProps, IRecordList>(
     }, [historyList, t]);
     useImperativeHandle(ref, () => ({
       refresh: () => {
-        getHistory({ isFirst: true });
+        getHistory({ isFirst: true, searchText: keyword });
       },
     }));
 
@@ -160,9 +185,55 @@ const RecordList = forwardRef<RecordListImperativeProps, IRecordList>(
           (history) => history.conversation_id === currentSessionId,
         )
       ) {
-        getHistory({ isFirst: true });
+        getHistory({ isFirst: true, searchText: keyword });
       }
     }, [currentSessionId]);
+
+    useEffect(() => {
+      const handleConversationActivity = (event: Event) => {
+        const detail =
+          (event as CustomEvent<ChatConversationActivityDetail>).detail || {};
+        const conversationId = detail.conversationId?.trim();
+        if (!conversationId) {
+          return;
+        }
+
+        setHistoryList((prev) => {
+          const exists = prev.some(
+            (item) => item.conversation_id === conversationId,
+          );
+          if (
+            !exists &&
+            !detail.displayName &&
+            !convTypeFilter.includes("normal")
+          ) {
+            return prev;
+          }
+
+          const next = bumpConversationToTop(prev, conversationId, {
+            displayName: detail.displayName,
+          });
+          window.requestAnimationFrame(() => {
+            document.getElementById(scrollableTargetId)?.scrollTo({
+              top: 0,
+              behavior: "smooth",
+            });
+          });
+          return next;
+        });
+      };
+
+      window.addEventListener(
+        CHAT_CONVERSATION_ACTIVITY_EVENT,
+        handleConversationActivity,
+      );
+      return () => {
+        window.removeEventListener(
+          CHAT_CONVERSATION_ACTIVITY_EVENT,
+          handleConversationActivity,
+        );
+      };
+    }, [convTypeFilter, scrollableTargetId]);
 
     useEffect(() => {
       if (searchText === undefined) {
@@ -179,15 +250,34 @@ const RecordList = forwardRef<RecordListImperativeProps, IRecordList>(
       isMore?: boolean;
       isFirst?: boolean;
       searchText?: string;
+      filterOverride?: string[];
     }) {
-      const { isMore = false, isFirst = false, searchText } = params ?? {};
+      const { isMore = false, isFirst = false, searchText, filterOverride } = params ?? {};
+      const activeFilter = filterOverride ?? convTypeFilter;
       setIsHistoryLoading(true);
+
+      // Determine is_task_conv query param based on active filter selection.
+      // 'normal' only → is_task_conv=false, 'task' only → is_task_conv=true, both → no filter.
+      const hasNormal = activeFilter.includes('normal');
+      const hasTask = activeFilter.includes('task');
+      let isTaskConvParam: string | undefined;
+      if (hasNormal && !hasTask) {
+        isTaskConvParam = 'false';
+      } else if (hasTask && !hasNormal) {
+        isTaskConvParam = 'true';
+      }
+
       ChatServiceApi()
-        .conversationServiceListConversations({
-          keyword: searchText ?? keyword,
-          pageToken: isFirst ? "" : pageToken,
-          pageSize: 50,
-        })
+        .conversationServiceListConversations(
+          {
+            keyword: searchText ?? keyword,
+            pageToken: isFirst ? "" : pageToken,
+            pageSize: 50,
+          },
+          isTaskConvParam !== undefined
+            ? { params: { is_task_conv: isTaskConvParam } }
+            : undefined,
+        )
         .then((res) => {
           const conversations: Conversation[] = res?.data?.conversations ?? [];
           setHistoryList(
@@ -291,6 +381,30 @@ const RecordList = forwardRef<RecordListImperativeProps, IRecordList>(
               deleteHistory(item);
             }}
           />
+          <Tooltip title={taskConvIds.has(item.conversation_id ?? '') ? "已在任务中心" : "加入任务中心"}>
+            <PlusCircleOutlined
+              className="add-to-task"
+              style={{
+                marginLeft: 4,
+                fontSize: 12,
+                color: taskConvIds.has(item.conversation_id ?? '') ? '#ccc' : '#888',
+                cursor: taskConvIds.has(item.conversation_id ?? '') ? 'default' : 'pointer',
+              }}
+              onClick={async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const convId = item.conversation_id ?? '';
+                if (taskConvIds.has(convId)) return;
+                try {
+                  await addTask(convId, item.display_name ?? '');
+                  setTaskConvIds((prev) => new Set([...prev, convId]));
+                  message.success('已加入任务中心');
+                } catch {
+                  message.error('加入任务中心失败');
+                }
+              }}
+            />
+          </Tooltip>
         </div>
       );
     }
@@ -385,14 +499,50 @@ const RecordList = forwardRef<RecordListImperativeProps, IRecordList>(
                         </Button>
                       </>
                     ) : (
-                      <Button
-                        size="small"
-                        type="link"
-                        style={{ padding: 0 }}
-                        onClick={() => setShowBatchExport(true)}
-                      >
-                        {t("chat.batch")}
-                      </Button>
+                      <>
+                        <Popover
+                          open={filterPopoverOpen}
+                          onOpenChange={setFilterPopoverOpen}
+                          trigger="click"
+                          placement="bottomRight"
+                          content={
+                            <div style={{ minWidth: 140 }}>
+                              <div style={{ marginBottom: 6, fontWeight: 500, fontSize: 12, color: '#666' }}>{t("chat.filterConversationType")}</div>
+                              <Checkbox.Group
+                                value={convTypeFilter}
+                                onChange={(vals) => {
+                                  const next = vals as string[];
+                                  if (next.length === 0) {
+                                    message.warning(t("chat.selectAtLeastOneConvType"));
+                                    return;
+                                  }
+                                  setConvTypeFilter(next);
+                                  getHistory({ isFirst: true, filterOverride: next, searchText: keyword });
+                                }}
+                                style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+                              >
+                                <Checkbox value="normal">{t("chat.normalConversation")}</Checkbox>
+                                <Checkbox value="task">{t("chat.taskConversation")}</Checkbox>
+                              </Checkbox.Group>
+                            </div>
+                          }
+                        >
+                          <Button
+                            size="small"
+                            type="text"
+                            icon={<FilterOutlined />}
+                            style={{ padding: '0 4px' }}
+                          />
+                        </Popover>
+                        <Button
+                          size="small"
+                          type="link"
+                          style={{ padding: 0 }}
+                          onClick={() => setShowBatchExport(true)}
+                        >
+                          {t("chat.batch")}
+                        </Button>
+                      </>
                     )}
                   </div>
                 )}
