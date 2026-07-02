@@ -4,6 +4,8 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any, Callable
 
+from evo.operations.public_contracts import build_eval_summary_root
+
 from .answer import call_chat_answer, failed_rag_answer
 from .judge import judge_answer, judge_contract_error, validate_judge_result
 
@@ -58,12 +60,12 @@ def eval_materializers() -> dict[str, Callable[[Any, Mapping[str, object]], Mapp
         judges = inputs.get('judges')
         if not isinstance(judges, tuple):
             raise ValueError('eval.summary judges input must be a partitioned tuple')
-        return {'summary': summarize_eval(judges)}
+        return {'summary': build_eval_summary_root(ctx.run_id, judges)}
 
     return {'eval.answer': answer, 'eval.judge': judge, 'eval.summary': summary}
 
 
-def summarize_eval(judges: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]]) -> dict[str, Any]:
+def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]]) -> dict[str, Any]:
     rows = []
     for index, judge in enumerate(judges, 1):
         if not isinstance(judge, Mapping):

@@ -16,7 +16,7 @@ import httpx
 
 from evo.operations.eval.answer import call_chat_answer, failed_rag_answer
 from evo.operations.eval.judge import judge_answer, judge_contract_error, validate_judge_result
-from evo.operations.eval.materializers import summarize_eval
+from evo.operations.public_contracts import build_abtest_comparison_root, build_eval_summary_root
 
 ENV_PASSTHROUGH = (
     'LAZYMIND_DOCUMENT_SERVER_URL',
@@ -50,8 +50,8 @@ SAFE_ID = re.compile(r'[^A-Za-z0-9_.-]+')
 
 def abtest_materializers() -> dict[str, Callable[[Any, Mapping[str, object]], Mapping[str, object]]]:
     def service(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
-        return {'service': candidate_service(_mapping(inputs['config'], 'config'),
-                                             _mapping(inputs['patch'], 'patch'), ctx)}
+        patch = _service_patch(_mapping(inputs['patch'], 'patch'), _mapping(inputs['workspace'], 'workspace'))
+        return {'service': candidate_service(_mapping(inputs['config'], 'config'), patch, ctx)}
 
     def answer(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
         return {'answer': candidate_rag_answer(_mapping(inputs['case'], 'case'),
@@ -67,12 +67,15 @@ def abtest_materializers() -> dict[str, Callable[[Any, Mapping[str, object]], Ma
         judges = inputs.get('judges')
         if not isinstance(judges, tuple):
             raise ValueError('abtest.candidate_eval_summary judges input must be a partitioned tuple')
-        value = summarize_eval(judges)
-        return {'summary': value | {'id': 'abtest.candidate_eval_summary'}}
+        return {'summary': build_eval_summary_root(ctx.run_id, judges)}
 
     def compare(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
-        return {'comparison': compare_abtest(_mapping(inputs['baseline'], 'baseline'),
-                                             _mapping(inputs['candidate'], 'candidate'))}
+        return {'comparison': build_abtest_comparison_root(
+            ctx.run_id,
+            _mapping(inputs['baseline'], 'baseline'),
+            _mapping(inputs['candidate'], 'candidate'),
+            _mapping(inputs['service'], 'service'),
+        )}
 
     return {
         'abtest.candidate_service': service,
@@ -128,6 +131,15 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
         return base | _failed_service('', '', '', '', type(exc).__name__, str(exc))
 
 
+def _service_patch(patch: Mapping[str, Any], workspace: Mapping[str, Any]) -> dict[str, Any]:
+    diff = patch.get('diff') if isinstance(patch.get('diff'), Mapping) else {}
+    return {
+        'status': patch.get('status'),
+        'workspace_ref': workspace.get('workspace_ref'),
+        'diff': ''.join(str(value) for value in diff.values()),
+    }
+
+
 def candidate_rag_answer(case: Mapping[str, Any], service: Mapping[str, Any]) -> dict[str, Any]:
     target = {
         'target_chat_url': _text(service.get('service_url')),
@@ -173,7 +185,7 @@ def candidate_judge_result(
     return results.get()
 
 
-def compare_abtest(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
+def compare_eval_detail_for_repair(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
     skipped = candidate.get('total') and candidate.get('quality_counts', {}).get('skipped') == candidate.get('total')
     baseline_rows, candidate_rows = _rows_by_case(baseline.get('rows')), _rows_by_case(candidate.get('rows'))
     case_ids = list(dict.fromkeys([*baseline_rows, *candidate_rows, *baseline.get('case_ids', ()),

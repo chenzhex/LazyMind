@@ -21,6 +21,7 @@ HEX = re.compile(r'^[0-9a-fA-F]+$')
 DELTA_KEYS = ('delta', 'answer_delta', 'content_delta')
 FINAL_ANSWER_KEYS = ('answer', 'message', 'text', 'result', 'content')
 SOURCE_KEYS = ('sources', 'source_documents', 'retrieved_contexts', 'contexts', 'documents')
+TOOL_RESULT = re.compile(r'<tool_result>(.*?)</tool_result>', re.S)
 DEFAULT_CASE_DEADLINE_SECONDS = 300.0
 DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS = 60.0
 
@@ -33,6 +34,10 @@ def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], 
         target = {
             'target_chat_url': _stream_url(str(target_config.get('target_chat_url') or '')),
             'kb_id': ';'.join(kb_ids),
+            'conversation_id': str(
+                target_config.get('conversation_id') or session_id
+            ).strip(),
+            'user_id': str(target_config.get('user_id') or '0').strip() or '0',
         }
         target.update({
             key: str(target_config[key])
@@ -44,13 +49,27 @@ def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], 
             return failed_rag_answer(case, {}, target, 'dataset_contract_error',
                                      'case routing metadata missing kb_id')
         payload = {
-            'message': {'query': str(case.get('question') or ''), 'history': []},
-            'conversation': {'session_id': session_id, 'mode': 'manual'},
-            'retrieval': {'filters': {'kb_id': kb_ids}, 'dataset': kb_ids[0]},
-            'runtime': {'reasoning': False, 'trace': True},
+            'message': {
+                'query': str(case.get('question') or ''),
+                'history': [],
+                'current_turn_seq': 1,
+            },
+            'conversation': {
+                'session_id': session_id,
+                'conversation_id': target['conversation_id'],
+                'user_id': target['user_id'],
+                'mode': 'manual',
+            },
+            'retrieval': {'filters': {'kb_id': kb_ids}},
+            'runtime': {
+                'debug': False,
+                'reasoning': False,
+                'trace': True,
+            },
             'personalization': {'use_memory': False},
             'agent': {
                 'disabled_tools': list(DISABLED_TOOLS),
+                'available_skills': [],
                 'has_subagents': False,
                 'enable_subagent': False,
             },
@@ -70,9 +89,13 @@ def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], 
             target_config.get('case_deadline_seconds') or os.getenv('LAZYMIND_EVO_CHAT_CASE_DEADLINE_SECONDS'),
             DEFAULT_CASE_DEADLINE_SECONDS,
         )
+        first_frame_timeout = target_config.get('first_frame_timeout_seconds')
+        if not first_frame_timeout:
+            first_frame_timeout = os.getenv(
+                'LAZYMIND_EVO_CHAT_FIRST_FRAME_TIMEOUT_SECONDS'
+            )
         first_frame_timeout_seconds = _number(
-            target_config.get('first_frame_timeout_seconds')
-            or os.getenv('LAZYMIND_EVO_CHAT_FIRST_FRAME_TIMEOUT_SECONDS'),
+            first_frame_timeout,
             DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS,
         )
         deadline = time.monotonic() + deadline_seconds
@@ -214,7 +237,7 @@ def _normalize(case: Mapping[str, Any], target: Mapping[str, Any], stream: Mappi
         return failed_rag_answer(case, stream, target, 'chat_protocol_error', 'stream ended before FINISHED')
     if not answer:
         return failed_rag_answer(case, stream, target, 'chat_protocol_error', 'stream finished without answer text')
-    contexts, doc_ids, chunk_ids, tool_errors = [], [], [], []
+    contexts, doc_ids, chunk_ids, tool_errors, sources = [], [], [], [], []
     for data in data_frames:
         for key in ('tool_error', 'tool_errors', 'kb_errors'):
             if data.get(key):
@@ -223,9 +246,34 @@ def _normalize(case: Mapping[str, Any], target: Mapping[str, Any], stream: Mappi
             item = data.get(key)
             for source in item if isinstance(item, list) else [item] if item else []:
                 if isinstance(source, Mapping):
-                    contexts.append(source.get('content') or source.get('text') or source.get('chunk'))
-                    doc_ids.append(source.get('doc_id') or source.get('docid') or source.get('document_id'))
-                    chunk_ids.append(source.get('chunk_id') or source.get('chunkid') or source.get('id'))
+                    sources.append(source)
+    for match in TOOL_RESULT.finditer(answer):
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        result = payload.get('result') if isinstance(payload, Mapping) else {}
+        result = result.get('result') if isinstance(result, Mapping) else {}
+        items = result.get('items') if isinstance(result, Mapping) else []
+        if not isinstance(items, list):
+            items = []
+        sources.extend(item for item in items if isinstance(item, Mapping))
+    target_kbs = [item for item in str(target.get('kb_id') or '').split(';') if item]
+    fallback_kb = target_kbs[0] if len(target_kbs) == 1 else ''
+    for source in sources:
+        metadata = source.get('global_metadata')
+        if not isinstance(metadata, Mapping):
+            metadata = {}
+        kb = str(source.get('kb_id') or metadata.get('kb_id') or metadata.get('dataset_id') or fallback_kb).strip()
+        doc = str(source.get('doc_id') or source.get('docid') or source.get('document_id')
+                  or metadata.get('docid') or metadata.get('core_document_id') or '').strip()
+        chunk = str(source.get('chunk_id') or source.get('chunkid') or source.get('uid')
+                    or source.get('id') or '').strip()
+        doc_ref = doc if ':' in doc else f'{kb}:{doc}' if kb and doc else doc
+        chunk_ref = chunk if ':' in chunk else f'{doc_ref}:{chunk}' if doc_ref and chunk else chunk
+        contexts.append(source.get('content') or source.get('text') or source.get('chunk'))
+        doc_ids.append(doc_ref)
+        chunk_ids.append(chunk_ref)
     return _answer_base(case, stream, target) | {
         'answer': answer,
         'status': 'ok',

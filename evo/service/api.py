@@ -1,20 +1,27 @@
 from __future__ import annotations
 
-import os
+import asyncio
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, Response
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 from starlette.responses import FileResponse
 
-from evo.message_intent import MessageRequest
-from evo.message_intent.handler import MessageTurnHandler
-from evo.message_intent.schemas import MessageContentRef
+from evo.message_intent.schemas import MessageRequest
 from evo.message_intent.storage import MessageConflictError, MessageInProgressError
+from evo.message_intent.turn import run_turn
 
 from .projections import ProjectionService
 from .threads import ThreadService
@@ -52,9 +59,6 @@ class MessageBody(StrictModel):
     message_id: str = Field(default='', max_length=160)
     text: str = Field(default='', max_length=20000)
     content: str = Field(default='', max_length=20000)
-    attachments: list[MessageContentRef] = Field(default_factory=list, max_length=4)
-    client_context: dict[str, Any] = Field(default_factory=dict)
-    ignored_llm_config: dict[str, Any] = Field(default_factory=dict, alias='llm_config')
 
 
 CommandBody = Annotated[CommandRequest, Body()]
@@ -64,9 +68,9 @@ MessageRequestBody = Annotated[MessageBody, Body()]
 
 class EvoService:
     def __init__(self, root: Path) -> None:
+        self.root = root
         self.threads = ThreadService(root)
         self.projections = ProjectionService(root, self.threads.runtime)
-        self.messages = MessageTurnHandler(root, self.threads.runtime, self.threads.run_message_command)
 
 
 def create_app() -> FastAPI:
@@ -78,14 +82,6 @@ def create_app() -> FastAPI:
     @app.get('/healthz')
     def healthz() -> dict[str, bool]:
         return {'ok': True}
-
-    @app.get('/livez')
-    def livez() -> dict[str, bool]:
-        return {'alive': True}
-
-    @app.get('/readyz')
-    def readyz() -> dict[str, bool]:
-        return {'ready': True}
 
     @app.post('/threads')
     def create_thread(payload: ThreadCreate) -> dict[str, Any]:
@@ -158,31 +154,32 @@ def create_app() -> FastAPI:
     def gate_content(thread_id: str, step: str, version: int) -> dict[str, Any]:
         return service.projections.gate_content(thread_id, step, version)
 
-    @app.get('/threads/{thread_id}/events')
-    def events(
-        thread_id: str,
-        step: str,
-        after: Annotated[int, Query(ge=0)] = 0,
-        limit: Annotated[int, Query(ge=1, le=500)] = 100,
-    ) -> dict[str, Any]:
-        return service.projections.events(thread_id, step, after, limit)
+    @app.get('/threads/{thread_id}/events:stream')
+    def event_stream(thread_id: str, request: Request, step_id: str = '') -> EventSourceResponse:
+        unsupported = set(request.query_params) - {'step_id'}
+        if unsupported:
+            raise HTTPException(422, f'unsupported query param: {sorted(unsupported)[0]}')
+        return _event_stream(service, thread_id, step_id, request, service.projections.events)
+
+    @app.get('/threads/{thread_id}/event-trace:stream')
+    def event_trace_stream(thread_id: str, request: Request, step_id: str = '') -> EventSourceResponse:
+        unsupported = set(request.query_params) - {'step_id'}
+        if unsupported:
+            raise HTTPException(422, f'unsupported query param: {sorted(unsupported)[0]}')
+        if not step_id:
+            raise HTTPException(422, 'step_id is required')
+        return _event_stream(service, thread_id, step_id, request, service.projections.event_trace)
 
     @app.post('/threads/{thread_id}/messages')
     def messages(thread_id: str, payload: MessageRequestBody, request: Request) -> Any:
         text = payload.text or payload.content
         if not text.strip():
             raise HTTPException(422, 'text or content is required')
-        msg = MessageRequest(message_id=payload.message_id, text=text, attachments=payload.attachments,
-                             client_context=payload.client_context)
+        msg = MessageRequest(message_id=payload.message_id, text=text)
         result = _message_result(service, thread_id, msg)
         if 'text/event-stream' in request.headers.get('accept', ''):
             return _message_stream(result)
         return result.model_dump()
-
-    @app.patch('/threads/{thread_id}/artifacts/{artifact_ref:path}')
-    def mutate_artifact(thread_id: str, artifact_ref: str, response: Response) -> dict[str, str]:
-        response.status_code = 501
-        return {'status': 'not_implemented', 'message': 'artifact mutation is not enabled'}
 
     @app.get('/candidates')
     def candidates(
@@ -215,7 +212,10 @@ def _service_root() -> Path:
 
 def _message_result(service: EvoService, thread_id: str, request: MessageRequest):
     try:
-        return service.messages.handle(thread_id, request)
+        return run_turn(
+            'user', service.root, service.threads.runtime,
+            service.threads.run_message_command, thread_id, request,
+        )
     except MessageConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
     except MessageInProgressError as exc:
@@ -247,7 +247,6 @@ def _message_stream(result) -> EventSourceResponse:
             ('observation', result.observation_ref),
             ('action_receipt', result.action_receipt_ref),
             ('pending_approval', result.pending_approval_ref),
-            ('pending_input', result.pending_input_ref),
         ):
             if ref is not None:
                 yield {'event': event, 'data': ref.model_dump_json()}
@@ -255,3 +254,42 @@ def _message_stream(result) -> EventSourceResponse:
         yield {'data': '[DONE]'}
 
     return EventSourceResponse(events())
+
+
+def _event_stream(
+    service: EvoService,
+    thread_id: str,
+    step_id: str,
+    request: Request,
+    snapshot_fn,
+) -> EventSourceResponse:
+    async def events():
+        last_event_id = request.headers.get('last-event-id', '').strip()
+        while True:
+            snapshot = await asyncio.to_thread(snapshot_fn, thread_id, step_id, last_event_id)
+            for item in snapshot['items']:
+                last_event_id = str(item['event_id'])
+                yield {
+                    'id': last_event_id,
+                    'event': str(item['event_type']),
+                    'data': json.dumps(item, ensure_ascii=False),
+                }
+            if not snapshot['items'] and await asyncio.to_thread(_thread_events_done, service, thread_id):
+                public = await asyncio.to_thread(service.threads.public_thread, thread_id, include_inputs=False)
+                yield {'id': last_event_id, 'event': 'done',
+                       'data': json.dumps({
+                           'thread_id': thread_id,
+                           'last_event_id': last_event_id,
+                           'status': public['status'],
+                           'current_step': public['current_step'],
+                       })}
+                break
+            if await request.is_disconnected():
+                break
+            await asyncio.sleep(1.0)
+
+    return EventSourceResponse(events())
+
+
+def _thread_events_done(service: EvoService, thread_id: str) -> bool:
+    return service.threads.public_thread(thread_id, include_inputs=False)['status'] != 'running'

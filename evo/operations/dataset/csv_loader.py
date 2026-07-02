@@ -8,7 +8,7 @@ from typing import Any
 CASE_FIELDS = tuple('answer difficulty difficulty_rationale grading_guidance id question question_type reasoning_steps '
                     'reference_chunk_ids reference_context reference_doc reference_doc_ids source_message_id '
                     'source_preparation type_rationale'.split())
-AUDIT_FIELDS = ('original_id', 'source', 'kb_id')
+AUDIT_FIELDS = ('original_id', 'source', 'kb_id', 'csv_path')
 DEFAULT_MIN_CASE_COUNT = 100
 QUESTION_TYPES = ('single_hop', 'single_doc_multi_hop', 'multi_doc_multi_hop', 'table_list', 'formula')
 DIFFICULTIES = ('easy', 'medium', 'hard')
@@ -66,6 +66,7 @@ def case_source(case: Mapping[str, Any]) -> dict[str, str]:
         'original_id': as_text(source.get('original_id') or case.get('original_id')),
         'source': as_text(source.get('source') or case.get('source')),
         'kb_id': as_text(source.get('kb_id') or case.get('kb_id')),
+        'csv_path': as_text(source.get('csv_path') or case.get('csv_path')),
     }
 
 
@@ -129,7 +130,8 @@ def load_eval_dataset_csv_report(path: str | Path, *, kb_id: str) -> dict[str, A
                 prep = dict(json_object(prep, message='source_preparation must be valid JSON')) \
                     if isinstance(prep, str) and prep.strip() else dict(prep or {})
                 prep['case_source'] = {'final_id': final_id, 'original_id': original_id or final_id,
-                                       'source': 'imported_csv', 'kb_id': kb_id}
+                                       'source': 'imported_csv', 'kb_id': kb_id,
+                                       'csv_path': str(Path(path).expanduser())}
                 row = normalize_eval_case({**dict(raw), 'id': final_id, 'source_preparation': prep},
                                           default_id=final_id)
             except ValueError as exc:

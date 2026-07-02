@@ -13,7 +13,10 @@ _DOCUMENT_LOCK = threading.Lock()
 
 
 def _sid(config: Mapping[str, Any], default: str = '') -> str:
-    return as_text(config.get('kb_id') or config.get('source_id') or config.get('dataset_id')) or default
+    kb_id = config.get('kb_id')
+    if isinstance(kb_id, list | tuple):
+        kb_id = kb_id[0] if kb_id else ''
+    return as_text(kb_id or config.get('source_id') or config.get('dataset_id')) or default
 
 
 def _csv_path(config: Mapping[str, Any]) -> str:
@@ -21,7 +24,7 @@ def _csv_path(config: Mapping[str, Any]) -> str:
 
 
 def load_corpus(source_config: Mapping[str, Any], case_ids: Iterable[str] | None = None) -> dict[str, Any]:
-    dataset_id = as_text(source_config.get('dataset_id') or source_config.get('kb_id') or 'dataset')
+    dataset_id = as_text(source_config.get('dataset_id')) or _sid(source_config, 'dataset')
     partitions = None if case_ids is None else tuple(case_id for case_id in case_ids if as_text(case_id))
     imported = _imported_cases(source_config)
     cases, warnings, has_csv = imported['cases'], imported['warnings'], imported['has_csv']
@@ -29,14 +32,14 @@ def load_corpus(source_config: Mapping[str, Any], case_ids: Iterable[str] | None
     target = int(raw_target) if raw_target not in (None, '') else (
         DEFAULT_MIN_CASE_COUNT if has_csv else len(partitions or ()) or 1
     )
-    if has_csv and target < DEFAULT_MIN_CASE_COUNT:
-        raise ValueError(f'min_case_count must be >= {DEFAULT_MIN_CASE_COUNT}')
     need_units = not cases or len(cases) < target or bool(partitions and len(cases) < len(partitions))
     units = _source_units(source_config, dataset_id) if need_units else []
     if not units:
-        if cases and need_units:
+        if cases and not need_units:
+            pass
+        elif cases and need_units:
             raise ValueError(f'eval dataset has {len(cases)} cases; supplementing to {target} needs source units')
-        if not cases:
+        else:
             raise ValueError('eval dataset csv has no usable cases and source units are empty' if has_csv
                              else f'dataset {dataset_id} has no source units or eval cases')
     if partitions is not None and len(partitions) < max(len(cases), target):
@@ -50,8 +53,7 @@ def load_corpus(source_config: Mapping[str, Any], case_ids: Iterable[str] | None
 
 
 def build_corpus_snapshot(report: Mapping[str, Any], source_config: Mapping[str, Any]) -> dict[str, Any]:
-    dataset_id = as_text(report.get('dataset_id') or source_config.get('dataset_id') or source_config.get('kb_id')
-                         or 'dataset')
+    dataset_id = as_text(report.get('dataset_id') or source_config.get('dataset_id')) or _sid(source_config, 'dataset')
     cases = [normalize_eval_case(case, default_id=f'case_{index:04d}')
              for index, case in enumerate(report.get('cases') or [], 1)]
     units = _normalize_units(report.get('source_units') or [], dataset_id)
@@ -114,8 +116,7 @@ def _imported_cases(source_config: Mapping[str, Any]) -> dict[str, Any]:
     rows, warnings, has_csv = [], [], False
     cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], tuple[bool, str]] = {}
     disabled_kbs: dict[str, str] = {}
-    root_csv = _csv_path(source_config)
-    for config in _configs(source_config) or ([source_config] if root_csv else []):
+    for config in _configs(source_config):
         path = _csv_path(config)
         if not path:
             continue
@@ -182,7 +183,7 @@ def _scope_import_refs(row: dict[str, Any], kb_id: str) -> str:
         doc if doc.startswith(f'{kb_id}:') else f'{kb_id}:{doc}' for doc in row['reference_doc_ids']
     ]
     row['reference_chunk_ids'] = scoped_chunks
-    if refs:
+    if refs and scoped_chunks:
         row['source_preparation']['context_reference'] = [
             {**dict(ref), 'source_id': kb_id,
              'doc_ref': row['reference_doc_ids'][min(index, len(row['reference_doc_ids']) - 1)],
@@ -264,13 +265,23 @@ def _direct_kb_units(config: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _configs(source_config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    configs, kb_ids = [], as_list(source_config.get('kb_ids'))
-    if _csv_path(source_config) and len(kb_ids) > 1:
-        raise ValueError('top-level csv_path with multiple kb_ids must use kb_csv_pairs')
-    for key in ('kb_csv_pairs', 'knowledge_bases'):
-        configs.extend(item for item in source_config.get(key) or () if isinstance(item, Mapping))
-    parent = {key: value for key, value in dict(source_config).items() if key != 'kb_ids'}
-    configs.extend({**parent, 'kb_id': kb_id, 'dataset_id': kb_id} for kb_id in kb_ids)
+    configs = [item for item in source_config.get('knowledge_bases') or () if isinstance(item, Mapping)]
+    base = {key: value for key, value in dict(source_config).items()
+            if key not in {'kb_id', 'csv_data', 'csv_path', 'eval_dataset_path', 'dataset_id'}}
+    csv_kbs, csv_seen = set(), set()
+    for item in source_config.get('csv_data') or ():
+        if isinstance(item, Mapping) and len(item) == 1:
+            kb_id, csv_path = next(iter(item.items()))
+            kb_id, csv_path = as_text(kb_id), as_text(csv_path)
+            if (kb_id, csv_path) in csv_seen:
+                continue
+            csv_kbs.add(kb_id)
+            csv_seen.add((kb_id, csv_path))
+            configs.append({**base, 'kb_id': kb_id, 'dataset_id': kb_id, 'csv_path': csv_path})
+    configs.extend(
+        {**base, 'kb_id': kb_id, 'dataset_id': kb_id}
+        for kb_id in as_list(source_config.get('kb_id')) if kb_id not in csv_kbs
+    )
     return configs
 
 

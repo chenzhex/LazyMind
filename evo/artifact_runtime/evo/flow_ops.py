@@ -122,7 +122,12 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class BuildRepairPlan(FixedOp):
         op_id = 'repair.plan'
         inputs = {
-            'analysis': ArtifactInput(C.ROOTS['analysis']),
+            'classifications': ArtifactInput(
+                C.ANALYSIS_CASE_CLASSIFICATION,
+                partition_spec=partitions,
+                partition_mapping=all_to_unpartitioned(),
+            ),
+            'clusters': ArtifactInput(C.ANALYSIS_TRACE_CLUSTERS),
             'policy': ArtifactInput(C.REPAIR_POLICY),
         }
         outputs = {'plan': ArtifactOutput(C.REPAIR_PLAN)}
@@ -138,6 +143,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class RepairLoop(FixedOp):
         op_id = 'repair.loop_result'
         inputs = {
+            'plan': ArtifactInput(C.REPAIR_PLAN),
             'workspace': ArtifactInput(C.REPAIR_CANDIDATE_WORKSPACE),
             'cases': ArtifactInput(
                 C.EVAL_CASE,
@@ -165,6 +171,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
         inputs = {
             'config': ArtifactInput(C.ABTEST_CANDIDATE_CONFIG),
             'patch': ArtifactInput(C.ROOTS['repair']),
+            'workspace': ArtifactInput(C.REPAIR_CANDIDATE_WORKSPACE),
         }
         outputs = {'service': ArtifactOutput(C.ABTEST_CANDIDATE_SERVICE)}
 
@@ -201,6 +208,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
         inputs = {
             'baseline': ArtifactInput(C.ROOTS['eval']),
             'candidate': ArtifactInput(C.ABTEST_CANDIDATE_EVAL_SUMMARY),
+            'service': ArtifactInput(C.ABTEST_CANDIDATE_SERVICE),
         }
         outputs = {'comparison': ArtifactOutput(C.ROOTS['abtest'])}
 

@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from evo.operations.public_contracts import algo_id, case_source_label
+
 Status = Literal['ok', 'failed']
 Quality = Literal['good', 'partial', 'bad', 'infra_failure']
 RetrievalFailure = Literal['none', 'retrieval_miss', 'retrieval_partial', 'retrieval_noise', 'not_applicable']
@@ -106,6 +108,9 @@ def classify_case(
     decision['actionable'] = _actionable(decision)
     return {
         'case_id': case_id,
+        'trace_id': _text(trace.get('trace_id')),
+        'source': case_source_label(case),
+        'algo_id': algo_id({'rag_answer': answer, 'target': judge.get('target') or {}}),
         'question_type': _text(case.get('question_type')),
         **decision,
         'judge_reason': _text(judge.get('reason')),

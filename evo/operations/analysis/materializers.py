@@ -30,7 +30,7 @@ def analysis_materializers() -> dict[str, Callable[[Any, Mapping[str, object]], 
         values = inputs.get('classifications')
         if not isinstance(values, tuple):
             raise ValueError('analysis.summary classifications input must be a partitioned tuple')
-        return {'summary': build_analysis_summary(values, _mapping(inputs['clusters'], 'clusters'))}
+        return {'summary': build_analysis_summary(ctx.run_id, values, _mapping(inputs['clusters'], 'clusters'))}
 
     return {
         'analysis.trace_summary': trace_summary,

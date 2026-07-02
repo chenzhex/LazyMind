@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -12,171 +12,112 @@ class StrictModel(BaseModel):
 class MessageContentRef(StrictModel):
     uri: str = Field(max_length=512)
     sha256: str = Field(min_length=64, max_length=64)
-    byte_size: int
-    mime_type: str = Field(default='application/json', max_length=80)
-    compression: str = Field(default='', max_length=24)
+    byte_size: int = Field(ge=0)
 
 
 class MessageRequest(StrictModel):
-    schema_version: Literal['message_request.v1'] = 'message_request.v1'
     message_id: str = Field(default='', max_length=160)
     text: str = Field(min_length=1, max_length=20000)
-    attachments: list[MessageContentRef] = Field(default_factory=list, max_length=4)
-    client_context: dict[str, Any] = Field(default_factory=dict)
-
-
-class TurnAgendaItem(StrictModel):
-    agenda_item_id: str = Field(default='', max_length=80)
-    summary: str = Field(default='', max_length=500)
-    intent_kind: str = Field(default='', max_length=40)
-    source_message_id: str = Field(default='', max_length=160)
 
 
 class ConfigValidationIssue(StrictModel):
     path: str = Field(max_length=240)
-    code: Literal[
-        'missing_required',
-        'invalid_type',
-        'invalid_url',
-        'out_of_range',
-        'unknown_field',
-        'immutable_field',
-        'unsafe_secret',
-        'cross_thread_reference',
-    ]
+    code: Literal['missing_required', 'invalid_type', 'invalid_url', 'out_of_range',
+                  'unknown_field', 'immutable_field', 'cross_thread_reference']
     message: str = Field(max_length=500)
-    observed_value_summary: str = Field(default='', max_length=240)
-
-
-class PendingInput(StrictModel):
-    prompt: str = Field(max_length=1000)
-    plan_ref: MessageContentRef | None = None
 
 
 class PendingApproval(StrictModel):
     approval_token: str = Field(max_length=80)
     expires_at: float
     origin_message_id: str = Field(max_length=160)
-    action_hash: str = Field(min_length=64, max_length=64)
+    base_observation_hash: str = Field(min_length=64, max_length=64)
     intent_ref: MessageContentRef
     compiled_ref: MessageContentRef
-    compiled_hash: str = Field(min_length=64, max_length=64)
-    preview_ref: MessageContentRef
-    base_observation_hash: str = Field(min_length=64, max_length=64)
 
 
-class FlowAction(StrictModel):
-    kind: Literal['flow']
-    command: Literal['continue', 'pause', 'resume', 'cancel', 'retry']
-    until_step: str = ''
-
-
-class QueryAction(StrictModel):
-    kind: Literal['query']
-    query: Literal['progress_snapshot', 'read_step_root', 'read_case_artifact']
+class PlannedAction(StrictModel):
+    kind: Literal['flow', 'query', 'mutation', 'config_patch', 'approval', 'clarify', 'final']
+    command: Literal['', 'continue', 'pause', 'resume', 'cancel', 'retry'] = ''
+    query: Literal['', 'progress_snapshot', 'read_step_root', 'read_case_artifact'] = ''
+    mutation: Literal['', 'edit_artifact', 'rerun_case_stage', 'rerun_step', 'invalidate_from_step'] = ''
+    target: Literal['', 'run_config', 'source_config', 'target_config', 'eval_policy',
+                    'repair_policy', 'candidate_config'] = ''
+    decision: Literal['', 'approve', 'reject', 'amend', 'replace', 'unclear'] = ''
     step: str = ''
+    until_step: str = ''
     case_id: str = ''
     case_kind: str = ''
-
-    @model_validator(mode='after')
-    def validate_query(self) -> 'QueryAction':
-        if self.query == 'read_step_root' and not self.step:
-            raise ValueError('step is required for read_step_root')
-        if self.query == 'read_case_artifact' and (not self.case_id or not self.case_kind):
-            raise ValueError('case_id and case_kind are required for read_case_artifact')
-        return self
-
-
-class MutationAction(StrictModel):
-    kind: Literal['mutation']
-    mutation: Literal['edit_artifact', 'rerun_case_stage', 'rerun_step', 'invalidate_from_step']
-    step: str = ''
-    case_id: str = ''
     stage: str = ''
     artifact_ref: list[Any] = Field(default_factory=list)
     pointer: str = ''
     value: Any = None
+    approval_token: str = ''
+    message: str = ''
 
     @model_validator(mode='after')
-    def validate_mutation(self) -> 'MutationAction':
-        if self.mutation == 'rerun_case_stage' and (not self.case_id or not self.stage):
-            raise ValueError('case_id and stage are required for rerun_case_stage')
-        if self.mutation in {'rerun_step', 'invalidate_from_step'} and not self.step:
-            raise ValueError('step is required for step mutation')
-        if self.mutation == 'edit_artifact' and (not self.artifact_ref or not self.pointer):
-            raise ValueError('artifact_ref and pointer are required for edit_artifact')
+    def validate_action(self) -> 'PlannedAction':
+        ok = {
+            'flow': bool(self.command),
+            'query': self.query == 'progress_snapshot'
+            or (self.query == 'read_step_root' and self.step)
+            or (self.query == 'read_case_artifact' and self.case_id and self.case_kind),
+            'mutation': (self.mutation == 'rerun_case_stage' and self.case_id and self.stage)
+            or (self.mutation in {'rerun_step', 'invalidate_from_step'} and self.step)
+            or (self.mutation == 'edit_artifact' and self.artifact_ref and self.pointer),
+            'config_patch': bool(self.target and self.pointer),
+            'approval': bool(self.decision),
+            'clarify': True,
+            'final': True,
+        }
+        if not ok[self.kind]:
+            raise ValueError(f'{self.kind} action is missing required fields')
+        fields = {
+            'flow': {'command', 'until_step'}, 'query': {'query', 'step', 'case_id', 'case_kind'},
+            'mutation': {'mutation', 'step', 'case_id', 'stage', 'artifact_ref', 'pointer', 'value'},
+            'config_patch': {'target', 'pointer', 'value', 'message'},
+            'approval': {'decision', 'approval_token', 'message'}, 'clarify': {'message'}, 'final': {'message'},
+        }[self.kind] | {'kind'}
+        dirty = {
+            name for name in self.model_fields
+            if name not in fields and getattr(self, name) not in ('', None, [])
+        }
+        if dirty:
+            raise ValueError(f'{self.kind} action has unrelated fields: {sorted(dirty)}')
         return self
 
 
-class ConfigPatchAction(StrictModel):
-    kind: Literal['config_patch']
-    target: Literal['run_config', 'source_config', 'target_config', 'eval_policy',
-                    'repair_policy', 'candidate_config']
-    pointer: str
-    value: Any = None
-    message: str = ''
-
-
-class ApprovalAction(StrictModel):
-    kind: Literal['approval']
-    decision: Literal['approve', 'reject', 'amend', 'replace', 'unclear']
-    message: str = ''
-
-
-class ClarifyAction(StrictModel):
-    kind: Literal['clarify']
-    message: str = ''
-
-
-class FinalAction(StrictModel):
-    kind: Literal['final']
-    message: str = ''
-
-
-PlannedAction: TypeAlias = Annotated[
-    FlowAction | QueryAction | MutationAction | ConfigPatchAction | ApprovalAction | ClarifyAction | FinalAction,
-    Field(discriminator='kind'),
-]
-
-
 class TurnPlan(StrictModel):
-    schema_version: Literal['message_intent.v1'] = 'message_intent.v1'
     turn_decision: Literal['next_action', 'needs_input', 'needs_approval', 'final']
-    active_agenda: list[TurnAgendaItem] = Field(default_factory=list)
+    active_agenda: list[str] = Field(default_factory=list)
     next_action: PlannedAction | None = None
     user_message_effect: Literal['append', 'amend', 'replace', 'cancel', 'none'] = 'none'
-    response_hint: str = ''
 
     @model_validator(mode='after')
     def validate_decision(self) -> 'TurnPlan':
         action = self.next_action
         if self.turn_decision == 'next_action':
-            if action is None or action.kind in {'clarify', 'final', 'approval'}:
-                raise ValueError('next_action turn requires executable flow/query/mutation/config_patch action')
+            if action is None or action.kind in {'clarify', 'final'}:
+                raise ValueError('next_action requires an executable action')
         elif self.turn_decision == 'needs_input':
-            if action is not None and action.kind != 'clarify':
-                raise ValueError('needs_input turn cannot carry executable action')
-            self.next_action = action or ClarifyAction(message=self.response_hint)
+            self.next_action = action or PlannedAction(kind='clarify')
+            if self.next_action.kind != 'clarify':
+                raise ValueError('needs_input requires clarify')
         elif self.turn_decision == 'final':
-            if action is not None and action.kind != 'final':
-                raise ValueError('final turn cannot carry executable action')
-            self.next_action = action or FinalAction(message=self.response_hint)
-        elif action is None or action.kind != 'approval':
-            raise ValueError('needs_approval turn requires approval action')
+            self.next_action = action or PlannedAction(kind='final')
+            if self.next_action.kind != 'final':
+                raise ValueError('final requires final')
+        elif action is None or action.kind in {'clarify', 'final'}:
+            raise ValueError('needs_approval requires approval or executable action')
         return self
 
 
 class MessageTurnResult(StrictModel):
-    schema_version: Literal['message_turn_result.v1'] = 'message_turn_result.v1'
     thread_id: str
     turn_id: str
     message_id: str
-    turn_decision: Literal[
-        'needs_input', 'needs_approval', 'action_executed', 'query_answered', 'final', 'rejected'
-    ]
+    turn_decision: Literal['needs_input', 'needs_approval', 'action_executed', 'query_answered', 'final', 'rejected']
     assistant_text: str = ''
-    assistant_text_ref: MessageContentRef | None = None
     observation_ref: MessageContentRef | None = None
-    pending_input_ref: MessageContentRef | None = None
     pending_approval_ref: MessageContentRef | None = None
     action_receipt_ref: MessageContentRef | None = None

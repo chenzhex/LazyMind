@@ -4,13 +4,15 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
+from evo.operations.public_contracts import build_analysis_summary_root
+
 from .classify import classify_case
 from .cluster import cluster_traces
 from .repair_groups import build_repair_group_queue
 from .trace_summary import build_trace_summary
 
 
-def build_analysis_summary(
+def build_analysis_detail(
     classifications: tuple[Mapping[str, Any], ...],
     clusters: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -64,6 +66,15 @@ def build_analysis_summary(
     }
 
 
+def build_analysis_summary(
+    run_id: str,
+    classifications: tuple[Mapping[str, Any], ...],
+    clusters: Mapping[str, Any],
+) -> dict[str, Any]:
+    _validate_clusters(classifications, clusters)
+    return build_analysis_summary_root(run_id, classifications)
+
+
 def build_analysis_from_answers(
     cases: Mapping[str, Mapping[str, Any]],
     answers: Mapping[str, Mapping[str, Any]],
@@ -74,7 +85,20 @@ def build_analysis_from_answers(
         trace = build_trace_summary(case, answers[case_id])
         classifications.append(classify_case(case, answers[case_id], judges[case_id], trace))
     clusters = cluster_traces(tuple(classifications))
-    return build_analysis_summary(tuple(classifications), clusters)
+    return build_analysis_detail(tuple(classifications), clusters)
+
+
+def _validate_clusters(classifications: tuple[Mapping[str, Any], ...], clusters: Mapping[str, Any]) -> None:
+    rows = [row for row in classifications if isinstance(row, Mapping)]
+    if len(rows) != len(classifications):
+        raise ValueError('analysis.summary classifications must all be mappings')
+    cluster_items = [row for row in clusters.get('rows', ()) if isinstance(row, Mapping) and row.get('case_id')]
+    cluster_ids = [_text(row.get('case_id')) for row in cluster_items]
+    row_ids = [_text(row.get('case_id')) for row in rows]
+    if len(set(cluster_ids)) != len(cluster_ids) or set(cluster_ids) != set(row_ids):
+        raise ValueError('analysis.summary cluster rows must cover every classification')
+    if int(clusters.get('total') or 0) != len(rows):
+        raise ValueError('analysis.summary cluster total must match classifications')
 
 
 def case_brief(row: Mapping[str, Any]) -> dict[str, Any]:

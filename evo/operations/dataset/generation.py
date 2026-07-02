@@ -105,6 +105,7 @@ def dataset_materializers(case_ids, *, llm_complete: Callable[[str], str] | None
         if runtime_partitions != partitions:
             raise ValueError('dataset materializer case_ids do not match runtime partitions')
         return {'dataset': assemble_dataset(dict(zip(partitions, values, strict=True)),
+                                            run_id=ctx.run_id,
                                             min_case_count=len(partitions))}
 
     return {'dataset.load_corpus': load, 'dataset.build_corpus_snapshot': snapshot,

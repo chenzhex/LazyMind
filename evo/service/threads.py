@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
+import random
 import re
 import shutil
 import threading
 import time
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
@@ -15,8 +16,6 @@ from fastapi import HTTPException
 
 from evo.artifact_flow.commands import CancelFlow, ContinueFlow, PauseFlow, ResumeFlow, RetryFlow
 from evo.artifact_flow.commands import FlowCommand
-from evo.message_intent.storage import MessageAuditStore, MessageBlobStore
-
 from .runtime_port import RuntimePort
 
 THREAD_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}')
@@ -41,13 +40,21 @@ class ThreadService:
         mode = str(payload['mode'])
         if mode not in {'auto', 'interactive'}:
             raise HTTPException(422, 'mode must be auto or interactive')
-        thread_id = f'thr_{uuid.uuid4().hex[:12]}'
-        seed = _seed(thread_id, mode, str(payload.get('title') or ''), inputs, llm_config)
-        try:
-            self.runtime.seed(thread_id, seed, _digest(seed))
-        except Exception:
-            self.runtime.delete_run(thread_id)
-            raise
+        with self._lock, (self.root / 'thread-create.lock').open('a') as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            for _ in range(16):
+                thread_id = f'thr-{random.randint(0, 99999999):08d}'
+                if self.runtime.run_config(thread_id) is not None:
+                    continue
+                seed = _seed(thread_id, mode, str(payload.get('title') or ''), inputs, llm_config)
+                try:
+                    self.runtime.seed(thread_id, seed, _digest(seed))
+                except Exception:
+                    self.runtime.delete_run(thread_id)
+                    raise
+                break
+            else:
+                raise HTTPException(500, 'failed to allocate thread id')
         return {'thread_id': thread_id, 'mode': seed['run_config']['mode'],
                 'title': seed['run_config']['title'], 'status': 'idle'}
 
@@ -83,8 +90,6 @@ class ThreadService:
             if thread_id in self._active:
                 raise HTTPException(409, 'thread has an active command; cancel before delete')
             self.runtime.delete_run(thread_id)
-            MessageAuditStore(self.root).delete_thread(thread_id)
-            MessageBlobStore(self.root).delete_thread(thread_id)
             shutil.rmtree(self.download_root / thread_id, ignore_errors=True)
             shutil.rmtree(self.repair_work_root / thread_id, ignore_errors=True)
         return {'thread_id': thread_id, 'deleted': True, 'message': 'thread deleted'}
@@ -260,15 +265,10 @@ def _inputs(value: Mapping[str, Any]) -> dict[str, Any]:
     for item in value.get('csv_data') or []:
         if not isinstance(item, Mapping):
             raise HTTPException(422, 'inputs.csv_data items must be objects')
-        if 'csv_path' in item:
-            if set(item) != {'kb_id', 'csv_path'}:
-                raise HTTPException(422, 'csv_data item keys must be kb_id and csv_path')
-            pair = {str(item.get('kb_id') or '').strip(): str(item.get('csv_path') or '').strip()}
-        elif len(item) == 1:
-            key, path = next(iter(item.items()))
-            pair = {str(key).strip(): str(path).strip()}
-        else:
+        if len(item) != 1:
             raise HTTPException(422, 'each csv_data item must be {"kb_id": "csv_path"}')
+        key, path = next(iter(item.items()))
+        pair = {str(key).strip(): str(path).strip()}
         if not next(iter(pair)) or not next(iter(pair.values())):
             raise HTTPException(422, 'csv_data kb_id and csv_path must be non-empty')
         csv_data.append(pair)
@@ -299,7 +299,6 @@ def _llm_config(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _seed(thread_id: str, mode: str, title: str, inputs: Mapping[str, Any], llm_config: Mapping[str, Any]):
-    pairs = [{'kb_id': key, 'csv_path': path} for item in inputs['csv_data'] for key, path in item.items()]
     target_config = {
         'target_chat_url': inputs['target_chat_url'],
         'llm_config': dict(llm_config),
@@ -309,8 +308,8 @@ def _seed(thread_id: str, mode: str, title: str, inputs: Mapping[str, Any], llm_
     return {
         'run_config': {'thread_id': thread_id, 'mode': mode, 'title': title, 'inputs': dict(inputs),
                        'num_case': inputs['num_case'], 'llm_config': dict(llm_config)},
-        'source_config': {'kb_id': inputs['kb_id'], 'csv_data': inputs['csv_data'], 'kb_ids': inputs['kb_id'],
-                          'kb_csv_pairs': pairs, 'target_case_count': inputs['num_case'],
+        'source_config': {'kb_id': inputs['kb_id'], 'csv_data': inputs['csv_data'],
+                          'target_case_count': inputs['num_case'],
                           'min_case_count': inputs['num_case']},
         'target_config': target_config,
         'eval_policy': {'judge_llm_config': dict(llm_config)},
