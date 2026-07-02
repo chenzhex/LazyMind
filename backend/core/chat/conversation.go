@@ -328,6 +328,16 @@ func ChatConversations(w http.ResponseWriter, r *http.Request) {
 		_ = taskcenter.CreateTask(reqCtx, db, bgTask)
 	}
 
+	// Mark the last assistant turn that had an ask_pending as answered.
+	// Only mark answered when the request carries a full ask_answers_structured payload,
+	// meaning the user actually submitted the AskCard. If the user ignored the card or
+	// only partially filled it, we do NOT mark it answered so the card stays interactive.
+	if !target.IsRegeneration {
+		if _, hasStructured := raw["ask_answers_structured"]; hasStructured {
+			markLastAskPendingAnswered(r.Context(), db, histories)
+		}
+	}
+
 	handleStreamChat(w, r, db, stateStore, baseURL, reqBody, convID, query, target, dualReply, historyExt)
 }
 
@@ -861,14 +871,20 @@ func chatHistoryToResponseItem(h orm.ChatHistory) map[string]any {
 	}
 	var input any
 	var askPending any
+	var askAnswered bool
+	var askSavedAnswers any
 	if len(h.Ext) > 0 {
 		var ext struct {
-			Input      any `json:"input"`
-			AskPending any `json:"ask_pending"`
+			Input           any  `json:"input"`
+			AskPending      any  `json:"ask_pending"`
+			AskAnswered     bool `json:"ask_answered"`
+			AskSavedAnswers any  `json:"ask_saved_answers"`
 		}
 		if err := json.Unmarshal(h.Ext, &ext); err == nil {
 			input = ext.Input
 			askPending = ext.AskPending
+			askAnswered = ext.AskAnswered
+			askSavedAnswers = ext.AskSavedAnswers
 		}
 	}
 	item := map[string]any{
@@ -885,6 +901,12 @@ func chatHistoryToResponseItem(h orm.ChatHistory) map[string]any {
 	}
 	if askPending != nil {
 		item["ask_pending"] = askPending
+		if askAnswered {
+			item["ask_answered"] = true
+		}
+		if askSavedAnswers != nil && !askAnswered {
+			item["ask_saved_answers"] = askSavedAnswers
+		}
 	}
 	return item
 }
@@ -895,6 +917,62 @@ func conversationHistoryResponseItems(histories []orm.ChatHistory) []map[string]
 		list = append(list, chatHistoryToResponseItem(h))
 	}
 	return list
+}
+
+func filterConversationSearchConfigDatasetList(ctx context.Context, db *gorm.DB, searchCfg any) any {
+	sc, ok := searchCfg.(map[string]any)
+	if !ok || db == nil {
+		return searchCfg
+	}
+
+	rawList, ok := sc["dataset_list"].([]any)
+	if !ok || len(rawList) == 0 {
+		return searchCfg
+	}
+
+	ids := make([]string, 0, len(rawList))
+	for _, item := range rawList {
+		selector, _ := item.(map[string]any)
+		if selector == nil {
+			continue
+		}
+		id, _ := selector["id"].(string)
+		id = strings.TrimSpace(id)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		sc["dataset_list"] = []any{}
+		return sc
+	}
+
+	var rows []orm.Dataset
+	if err := db.WithContext(ctx).
+		Select("id").
+		Where("id IN ? AND deleted_at IS NULL", ids).
+		Find(&rows).Error; err != nil {
+		return searchCfg
+	}
+
+	existing := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		existing[row.ID] = struct{}{}
+	}
+
+	filtered := make([]any, 0, len(rawList))
+	for _, item := range rawList {
+		selector, _ := item.(map[string]any)
+		if selector == nil {
+			continue
+		}
+		id, _ := selector["id"].(string)
+		if _, ok := existing[strings.TrimSpace(id)]; ok {
+			filtered = append(filtered, item)
+		}
+	}
+	sc["dataset_list"] = filtered
+	return sc
 }
 
 // GetConversationDetail text GET /api/v1/conversations/{name}:detail
@@ -909,8 +987,9 @@ func GetConversationDetail(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		userID = "0"
 	}
+	db := store.DB()
 	var c orm.Conversation
-	if err := store.DB().Where("id = ? AND create_user_id = ?", convID, userID).First(&c).Error; err != nil {
+	if err := db.Where("id = ? AND create_user_id = ?", convID, userID).First(&c).Error; err != nil {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "conversation not found", err), http.StatusNotFound)
 		return
 	}
@@ -918,6 +997,7 @@ func GetConversationDetail(w http.ResponseWriter, r *http.Request) {
 	var searchCfg any
 	if len(c.SearchConfig) > 0 {
 		_ = json.Unmarshal(c.SearchConfig, &searchCfg)
+		searchCfg = filterConversationSearchConfigDatasetList(r.Context(), db, searchCfg)
 	}
 	var models []string
 	if len(c.Models) > 0 {
@@ -927,7 +1007,6 @@ func GetConversationDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var likeCnt, unlikeCnt int64
-	db := store.DB()
 	db.Model(&orm.ChatHistory{}).Where("conversation_id = ? AND feed_back = ?", c.ID, 1).Count(&likeCnt)
 	db.Model(&orm.ChatHistory{}).Where("conversation_id = ? AND feed_back = ?", c.ID, 2).Count(&unlikeCnt)
 
