@@ -279,6 +279,9 @@ func TestBuildEvoThreadCreatePayloadForwardsRouterTarget(t *testing.T) {
 	if inputs["router_admin_url"] != "http://chat:8046" || inputs["algorithm_id"] != "default" {
 		t.Fatalf("expected router target to be sent to Evo ThreadInputs: %#v", inputs)
 	}
+	if inputs["router_chat_url"] == "" {
+		t.Fatalf("expected router_chat_url to be sent to Evo ThreadInputs: %#v", inputs)
+	}
 	if fmt.Sprint(inputs["kb_id"]) != "[kb-1]" || inputs["num_case"] != 2 {
 		t.Fatalf("unexpected Evo inputs: %#v", inputs)
 	}

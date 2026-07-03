@@ -298,7 +298,7 @@ def _inputs(value: Mapping[str, Any]) -> dict[str, Any]:
     inputs = {
         'kb_id': [str(item).strip() for item in value.get('kb_id') or [] if str(item).strip()],
         'csv_data': csv_data,
-        'target_chat_url': str(value.get('target_chat_url') or '').strip(),
+        'router_chat_url': str(value.get('router_chat_url') or '').strip(),
         'router_admin_url': str(value.get('router_admin_url') or '').strip(),
         'algorithm_id': str(value.get('algorithm_id') or '').strip(),
         'num_case': int(value.get('num_case') or 0),
@@ -306,8 +306,8 @@ def _inputs(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     if not inputs['kb_id'] and not inputs['csv_data']:
         raise HTTPException(422, 'inputs.kb_id or inputs.csv_data is required')
-    if not inputs['target_chat_url']:
-        raise HTTPException(422, 'inputs.target_chat_url is required')
+    if not inputs['router_chat_url']:
+        raise HTTPException(422, 'inputs.router_chat_url is required')
     if not inputs['router_admin_url']:
         raise HTTPException(422, 'inputs.router_admin_url is required')
     if not inputs['algorithm_id']:
@@ -329,7 +329,7 @@ def _llm_config(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _seed(thread_id: str, mode: str, title: str, inputs: Mapping[str, Any], llm_config: Mapping[str, Any]):
     target_config = {
-        'target_chat_url': inputs['target_chat_url'],
+        'router_chat_url': inputs['router_chat_url'],
         'router_admin_url': inputs['router_admin_url'],
         'algorithm_id': inputs['algorithm_id'],
         'llm_config': dict(llm_config),
@@ -337,7 +337,7 @@ def _seed(thread_id: str, mode: str, title: str, inputs: Mapping[str, Any], llm_
         'first_frame_timeout_seconds': CHAT_FIRST_FRAME_TIMEOUT_SECONDS,
     }
     candidate_config = {
-        'target_chat_url': inputs['target_chat_url'],
+        'router_chat_url': inputs['router_chat_url'],
         'router_admin_url': inputs['router_admin_url'],
         'llm_config': dict(llm_config),
         'case_deadline_seconds': inputs['case_deadline_seconds'],

@@ -17,8 +17,7 @@ DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS = 60.0
 def answer_case(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> dict[str, Any]:
     kb_id = case_kb_id(case, target_config)
     target = {
-        'target_chat_url': str(target_config.get('target_chat_url') or ''),
-        'router_chat_url': str(target_config.get('target_chat_url') or ''),
+        'router_chat_url': str(target_config.get('router_chat_url') or ''),
         'router_admin_url': str(target_config.get('router_admin_url') or ''),
         'algorithm_id': str(target_config.get('algorithm_id') or ''),
         'kb_id': kb_id,
@@ -119,8 +118,7 @@ def _with_case(case: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, 
 
 def _target(target_config: Mapping[str, Any], kb_ids: tuple[str, ...], session_id: str) -> dict[str, str]:
     target = {
-        'router_chat_url': str(target_config.get('target_chat_url') or '').strip(),
-        'target_chat_url': str(target_config.get('target_chat_url') or '').strip(),
+        'router_chat_url': str(target_config.get('router_chat_url') or '').strip(),
         'router_admin_url': str(target_config.get('router_admin_url') or '').strip(),
         'algorithm_id': str(target_config.get('algorithm_id') or '').strip(),
         'kb_id': ';'.join(kb_ids),
@@ -142,8 +140,7 @@ def _target(target_config: Mapping[str, Any], kb_ids: tuple[str, ...], session_i
 
 def _raw_target(target_config: Mapping[str, Any], kb_id: str) -> dict[str, str]:
     return {
-        'router_chat_url': str(target_config.get('target_chat_url') or ''),
-        'target_chat_url': str(target_config.get('target_chat_url') or ''),
+        'router_chat_url': str(target_config.get('router_chat_url') or ''),
         'router_admin_url': str(target_config.get('router_admin_url') or ''),
         'algorithm_id': str(target_config.get('algorithm_id') or ''),
         'kb_id': str(kb_id or ''),

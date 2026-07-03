@@ -92,13 +92,13 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
         return base | {'status': 'skipped', 'healthcheck': {'status': 'skipped'}}
     try:
         algorithm_id = _candidate_algorithm_id(config, patch, getattr(ctx, 'run_id', 'run'))
-        if not _text(config.get('target_chat_url')):
-            raise ValueError('candidate_config.target_chat_url is required')
-        target_url = normalize_chat_url(config.get('target_chat_url'))
+        if not _text(config.get('router_chat_url')):
+            raise ValueError('candidate_config.router_chat_url is required')
+        router_chat_url = normalize_chat_url(config.get('router_chat_url'))
         admin_url = _text(config.get('router_admin_url'))
         if not admin_url:
             raise ValueError('candidate_config.router_admin_url is required')
-        manager = RouterManager(admin_url, target_url)
+        manager = RouterManager(admin_url, router_chat_url)
         code_path = _code_path(config, patch)
         spec = RouterAlgorithmSpec(
             id=algorithm_id,
@@ -114,7 +114,7 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
         if existing and not _same_registration(existing, body):
             return base | _failed_service(
                 algorithm_id,
-                target_url,
+                router_chat_url,
                 manager.router_admin_url,
                 code_path,
                 'candidate_id_conflict',
@@ -122,12 +122,12 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
             )
         registered = {'reused': True} if existing else manager.register_algorithm(spec, timeout_s=timeout_s)
         ready = manager.wait_ready(algorithm_id, timeout_s=timeout_s)
-        _write_candidate_ledger(ctx, spec, target_url, manager.router_admin_url, body, patch)
+        _write_candidate_ledger(ctx, spec, router_chat_url, manager.router_admin_url, body, patch)
         return base | {
             'status': 'ready',
             'service_kind': 'router_algorithm',
             'algorithm_id': algorithm_id,
-            'service_url': target_url,
+            'router_chat_url': router_chat_url,
             'router_admin_url': manager.router_admin_url,
             'workspace_ref': _text(patch.get('workspace_ref')),
             'code_path': code_path,
@@ -144,8 +144,7 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
 def candidate_rag_answer(case: Mapping[str, Any], service: Mapping[str, Any]) -> dict[str, Any]:
     target_config = _candidate_target_config(service)
     target = {
-        'target_chat_url': _text(target_config.get('target_chat_url')),
-        'router_chat_url': _text(target_config.get('target_chat_url')),
+        'router_chat_url': _text(target_config.get('router_chat_url')),
         'router_admin_url': _text(target_config.get('router_admin_url')),
         'algorithm_id': _text(target_config.get('algorithm_id')),
         'kb_id': case_kb_id(case, target_config),
@@ -205,7 +204,7 @@ def compare_eval_detail_for_repair(baseline: Mapping[str, Any], candidate: Mappi
 def _candidate_target_config(service: Mapping[str, Any]) -> dict[str, Any]:
     config = service.get('candidate_config') if isinstance(service.get('candidate_config'), Mapping) else {}
     return dict(config) | {
-        'target_chat_url': service.get('service_url'),
+        'router_chat_url': service.get('router_chat_url'),
         'router_admin_url': service.get('router_admin_url'),
         'algorithm_id': service.get('algorithm_id'),
     }
@@ -232,7 +231,7 @@ def _register_request(spec: RouterAlgorithmSpec) -> dict[str, Any]:
 def _write_candidate_ledger(
     ctx: Any | None,
     spec: RouterAlgorithmSpec,
-    service_url: str,
+    router_chat_url: str,
     admin_url: str,
     register_request: Mapping[str, Any],
     patch: Mapping[str, Any],
@@ -250,7 +249,7 @@ def _write_candidate_ledger(
         run_id=run_id,
         candidate_ref=str(candidate_ref),
         router_admin_url=admin_url,
-        service_url=service_url,
+        service_url=router_chat_url,
         code_path=spec.code_path,
         config_hash=json_hash(spec.config),
         register_request_hash=json_hash(register_request),
@@ -258,10 +257,10 @@ def _write_candidate_ledger(
     )
 
 
-def _failed_service(algorithm_id: str, service_url: str, admin_url: str, code_path: str,
+def _failed_service(algorithm_id: str, router_chat_url: str, admin_url: str, code_path: str,
                     error_type: str, message: str) -> dict[str, Any]:
     return {'status': 'failed', 'service_kind': 'router_algorithm', 'algorithm_id': algorithm_id,
-            'service_url': service_url, 'router_admin_url': admin_url, 'code_path': code_path,
+            'router_chat_url': router_chat_url, 'router_admin_url': admin_url, 'code_path': code_path,
             'healthcheck': {'status': 'failed', 'type': error_type, 'message': message}}
 
 

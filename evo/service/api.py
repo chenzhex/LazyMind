@@ -35,7 +35,7 @@ class StrictModel(BaseModel):
 class ThreadInputs(StrictModel):
     kb_id: list[str] = Field(default_factory=list)
     csv_data: list[dict[str, str]] = Field(default_factory=list)
-    target_chat_url: str
+    router_chat_url: str
     router_admin_url: str
     algorithm_id: str
     num_case: int = Field(gt=0)

@@ -160,7 +160,7 @@ def build_router_api(service: Any) -> APIRouter:
             return {
                 'status': 'ready',
                 'algorithm_id': spec.id,
-                'service_url': manager.router_chat_url,
+                'router_chat_url': manager.router_chat_url,
                 'router_admin_url': manager.router_admin_url,
                 'register_response': _safe_register_response(register_response),
                 'healthcheck': health,
@@ -237,7 +237,7 @@ def build_router_api(service: Any) -> APIRouter:
 
 
 def _manager(router_admin_url: str = '', router_chat_url: str = '') -> RouterManager:
-    chat_url = router_chat_url or os.getenv('LAZYMIND_EVO_TARGET_CHAT_URL') or DEFAULT_ROUTER_CHAT_URL
+    chat_url = router_chat_url or os.getenv('LAZYMIND_EVO_ROUTER_CHAT_URL') or DEFAULT_ROUTER_CHAT_URL
     admin_url = router_admin_url or os.getenv('LAZYMIND_EVO_ROUTER_ADMIN_URL') or admin_url_from_chat_url(chat_url)
     return RouterManager(admin_url, normalize_chat_url(chat_url))
 
@@ -273,7 +273,7 @@ def _owned_live_item(
             'run_id': row['run_id'],
             'candidate_ref': row['candidate_ref'],
         },
-        'service_url': row['service_url'],
+        'router_chat_url': row['service_url'],
         'router_admin_url': row['router_admin_url'],
     }
 

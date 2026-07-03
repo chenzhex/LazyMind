@@ -76,6 +76,7 @@ def build_trace_summary(case: Mapping[str, Any], answer: Mapping[str, Any]) -> d
         node for node in nodes
         if node['error'] or node['status'] not in ok_status
     ]
+    unknown_error_count = sum(1 for node in error_nodes if node['stage'] == 'unknown')
     retrieval = _retrieval_artifacts(nodes)
     final_doc_ids, final_chunk_ids = _final_context_ids(nodes)
     features = _features(graph, nodes, diagnostic, stage_counts, latency_by_stage, error_nodes, retrieval)
@@ -88,7 +89,7 @@ def build_trace_summary(case: Mapping[str, Any], answer: Mapping[str, Any]) -> d
         'execution_tree': _step_payload(root),
         'stage_sequence': stage_sequence,
         'diagnostic_stage_sequence': diagnostic_sequence,
-        'unknown_stage_count': stage_counts.get('unknown', 0),
+        'unknown_stage_count': unknown_error_count,
         'edges': [{'source': source, 'target': target} for source, target in edges],
         'critical_path': _critical_path(graph, nodes[0]['id']),
         'bottleneck_stage': max(latency_by_stage, key=latency_by_stage.get) if latency_by_stage else '',

@@ -130,9 +130,9 @@ func buildEvoThreadCreatePayload(payload map[string]any) map[string]any {
 		deadlineSeconds = 300
 	}
 
-	targetChatURL := strings.TrimSpace(agentScalarString(inputs["target_chat_url"]))
-	if targetChatURL == "" {
-		targetChatURL = common.JoinURL(common.ChatServiceEndpoint(), "/api/chat/stream")
+	routerChatURL := strings.TrimSpace(agentScalarString(inputs["router_chat_url"]))
+	if routerChatURL == "" {
+		routerChatURL = common.JoinURL(common.ChatServiceEndpoint(), "/api/chat/stream")
 	}
 	routerAdminURL := strings.TrimSpace(agentScalarString(inputs["router_admin_url"]))
 	if routerAdminURL == "" {
@@ -150,7 +150,7 @@ func buildEvoThreadCreatePayload(payload map[string]any) map[string]any {
 		"inputs": map[string]any{
 			"kb_id":                 stringListFromAny(firstNonNilAny(inputs["kb_id"], inputs["knowledge_base_id"], inputs["dataset_id"])),
 			"csv_data":              csvDataListFromAny(inputs["csv_data"]),
-			"target_chat_url":       targetChatURL,
+			"router_chat_url":       routerChatURL,
 			"router_admin_url":      routerAdminURL,
 			"algorithm_id":          algorithmID,
 			"num_case":              numCase,

@@ -335,7 +335,10 @@ def _stage_error(trace: Mapping[str, Any]) -> tuple[str, str] | None:
 
 
 def _tracing_defect(case: Mapping[str, Any], judge: Mapping[str, Any], trace: Mapping[str, Any]) -> str:
-    unknown = int(trace.get('unknown_stage_count') or (trace.get('stage_counts') or {}).get('unknown') or 0)
+    unknown_value = trace.get('unknown_stage_count')
+    if unknown_value is None:
+        unknown_value = (trace.get('stage_counts') or {}).get('unknown') or 0
+    unknown = int(unknown_value)
     if unknown and ('unknown' in trace.get('critical_path', []) or judge.get('quality_label') != 'good'):
         return 'trace_stage_unknown'
     needs_ids = (

@@ -17,12 +17,12 @@ SPEC = {
     'run_config': (['thread_id', 'mode', 'num_case', 'inputs', 'llm_config'],
                    {'thread_id', 'mode', 'title', 'num_case', 'inputs', 'llm_config'}),
     'source_config': ([], {'kb_id', 'csv_data', 'target_case_count', 'min_case_count'}),
-    'target_config': (['target_chat_url', 'router_admin_url', 'algorithm_id', 'llm_config'],
-                      {'target_chat_url', 'router_admin_url', 'algorithm_id', 'llm_config',
+    'target_config': (['router_chat_url', 'router_admin_url', 'algorithm_id', 'llm_config'],
+                      {'router_chat_url', 'router_admin_url', 'algorithm_id', 'llm_config',
                        'case_deadline_seconds', 'first_frame_timeout_seconds',
                        'connect_timeout_seconds', 'write_timeout_seconds', 'pool_timeout_seconds'}),
-    'candidate_config': (['target_chat_url', 'router_admin_url', 'llm_config'],
-                         {'target_chat_url', 'router_admin_url', 'algorithm_id', 'llm_config',
+    'candidate_config': (['router_chat_url', 'router_admin_url', 'llm_config'],
+                         {'router_chat_url', 'router_admin_url', 'algorithm_id', 'llm_config',
                           'case_deadline_seconds', 'first_frame_timeout_seconds',
                           'connect_timeout_seconds', 'write_timeout_seconds', 'pool_timeout_seconds'}),
     'eval_policy': (['judge_llm_config'], {'judge_llm_config'}),
@@ -102,7 +102,7 @@ def _semantic_issues(thread_id: str, target: str, value: object) -> list[ConfigV
                 issues.append(_issue('/min_case_count', code, 'CSV source min_case_count must be integer >= 100'))
     if target in {'target_config', 'candidate_config'}:
         issues += (
-            _url_issue('/target_chat_url', value.get('target_chat_url'))
+            _url_issue('/router_chat_url', value.get('router_chat_url'))
             + _url_issue('/router_admin_url', value.get('router_admin_url'))
             + _role_issue('/llm_config/llm', value.get('llm_config'))
         )
