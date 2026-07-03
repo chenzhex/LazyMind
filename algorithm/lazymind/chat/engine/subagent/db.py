@@ -561,7 +561,7 @@ def _get_task_query_engine() -> Engine:
 
 
 class TaskQueryDB:
-    """Read-only accessor for sub_agent_tasks / sub_agent_artifacts used by ChatAgent tools.
+    """Accessor for sub_agent_tasks / sub_agent_artifacts used by ChatAgent tools.
 
     All methods return plain dicts and swallow DB errors (returning empty fallbacks),
     so callers never need to handle database exceptions at the tool level.
@@ -601,6 +601,9 @@ class TaskQueryDB:
     def list_tasks_by_conversation(self, conv_id: str) -> List[Dict[str, Any]]:
         """Return all tasks for a conversation with their latest artifacts.
 
+        Tasks belonging to a dismissed plugin session are excluded so that the
+        ChatAgent cannot see or access their artifacts after the plugin is dismissed.
+
         Returns the same shape expected by _list_conversation_tasks / _resolve_task:
         task_id, id, title, agent_type, status, progress_pct, current_phase, summary,
         seq_in_conversation, output_artifact_keys, artifacts (list of artifact dicts).
@@ -609,11 +612,21 @@ class TaskQueryDB:
             with self._conn() as conn:
                 task_rows = conn.execute(
                     text(
-                        'SELECT id, title, agent_type, status, progress_pct, current_phase, '
-                        '       summary, seq_in_conversation, output_artifact_keys, params '
-                        'FROM sub_agent_tasks '
-                        'WHERE conversation_id = :conv_id '
-                        'ORDER BY seq_in_conversation ASC'
+                        'SELECT sat.id, sat.title, sat.agent_type, sat.status, '
+                        '       sat.progress_pct, sat.current_phase, '
+                        '       sat.summary, sat.seq_in_conversation, '
+                        '       sat.output_artifact_keys, sat.params '
+                        'FROM sub_agent_tasks sat '
+                        # Exclude tasks that belong to a dismissed plugin session.
+                        # plugin_step tasks are linked via plugin_session_steps;
+                        # non-plugin tasks have no matching row so they are always kept.
+                        'WHERE sat.conversation_id = :conv_id '
+                        '  AND NOT EXISTS ( '
+                        '    SELECT 1 FROM plugin_session_steps pss '
+                        '    JOIN plugin_sessions ps ON ps.id = pss.session_id '
+                        '    WHERE pss.task_id = sat.id AND ps.dismissed = TRUE '
+                        '  ) '
+                        'ORDER BY sat.seq_in_conversation ASC'
                     ),
                     {'conv_id': conv_id},
                 ).mappings().all()
@@ -680,6 +693,43 @@ class TaskQueryDB:
     def format_plugin_session_artifacts(self, session_id: str) -> List[str]:
         rows = self.load_plugin_session_slot_summary(session_id)
         return _rows_to_artifact_summary(rows) if rows else []
+
+    def load_artifacts_for_tasks(self, task_ids: List[str]) -> List[Dict[str, Any]]:
+        """Return non-hidden artifacts for a list of task_ids, ordered by task_id / key / seq ASC.
+
+        Returns empty list on any error or if task_ids is empty.
+        """
+        if not task_ids:
+            return []
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    text(
+                        'SELECT task_id, artifact_key, content_type, value, seq '
+                        'FROM sub_agent_artifacts '
+                        'WHERE task_id IN :ids AND hidden = FALSE '
+                        'ORDER BY task_id, artifact_key, seq ASC'
+                    ).bindparams(bindparam('ids', expanding=True)),
+                    {'ids': task_ids},
+                ).mappings().all()
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                value = r['value']
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        value = {}
+                out.append({
+                    'task_id': r['task_id'],
+                    'artifact_key': r['artifact_key'],
+                    'content_type': r['content_type'],
+                    'value': value,
+                    'seq': r['seq'],
+                })
+            return out
+        except Exception:
+            return []
 
     def format_task_artifacts(self, task_ids: List[str]) -> List[str]:
         rows = self.load_artifacts_for_tasks(task_ids)
@@ -837,6 +887,101 @@ class TaskQueryDB:
                 'is_human': is_human,
             })
         return out
+
+    # ----- intent / constraint helpers -----
+
+    def get_session_intent(self, session_id: str) -> Optional[str]:
+        """Return the global intent_context text for a session, or None if not set."""
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    text('SELECT intent_context FROM plugin_sessions WHERE id = :sid'),
+                    {'sid': session_id},
+                ).mappings().first()
+            if row is None:
+                return None
+            raw = row['intent_context']
+            if raw is None:
+                return None
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            return data.get('text') or data.get('content') if isinstance(data, dict) else str(data) or None
+        except Exception:
+            return None
+
+    def get_step_intent(self, session_id: str, step_id: str) -> Optional[str]:
+        """Return the step-level intent_context text, or None if not set."""
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    text(
+                        'SELECT intent_context FROM plugin_step_intents '
+                        'WHERE session_id = :sid AND step_id = :step'
+                    ),
+                    {'sid': session_id, 'step': step_id},
+                ).mappings().first()
+            if row is None:
+                return None
+            raw = row['intent_context']
+            if raw is None:
+                return None
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            return data.get('text') or data.get('content') if isinstance(data, dict) else str(data) or None
+        except Exception:
+            return None
+
+    def list_step_intents(self, session_id: str) -> Dict[str, str]:
+        """Return all step-level intent texts for a session as {step_id: text}."""
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    text(
+                        'SELECT step_id, intent_context FROM plugin_step_intents '
+                        'WHERE session_id = :sid'
+                    ),
+                    {'sid': session_id},
+                ).mappings().all()
+            result: Dict[str, str] = {}
+            for row in rows:
+                raw = row['intent_context']
+                if raw is None:
+                    continue
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                text_val = data.get('text') or data.get('content') if isinstance(data, dict) else str(data)
+                if text_val:
+                    result[row['step_id']] = text_val
+            return result
+        except Exception:
+            return {}
+
+    def get_step_artifacts(self, session_id: str, step_id: str) -> Dict[str, Any]:
+        """Return artifact key→value dict for a step (latest seq per key, non-hidden)."""
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    text(
+                        'SELECT sa.artifact_key, sa.content_type, sa.value '
+                        'FROM sub_agent_artifacts sa '
+                        'JOIN plugin_session_steps pss ON pss.task_id = sa.task_id '
+                        'WHERE pss.session_id = :sid AND pss.step_id = :step '
+                        '  AND sa.hidden = FALSE '
+                        'ORDER BY sa.artifact_key, sa.seq DESC'
+                    ),
+                    {'sid': session_id, 'step': step_id},
+                ).mappings().all()
+            seen: set = set()
+            out: Dict[str, Any] = {}
+            for r in rows:
+                key = r['artifact_key']
+                if key in seen:
+                    continue
+                seen.add(key)
+                raw = r['value']
+                val = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                ct = r['content_type'] or 'text'
+                out[key] = artifact_summary_line(val, ct, is_human=False)
+            return out
+        except Exception:
+            return {}
 
 
 # ---------------------------------------------------------------------------

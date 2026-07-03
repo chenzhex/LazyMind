@@ -163,13 +163,12 @@ func CreateThread(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "load llm config failed", err), http.StatusInternalServerError)
 		return
 	}
-	if !hasThreadEvoLLMConfig(requestPayload) {
-		common.ReplyErr(w, "请先配置 evo_llm 模型后再创建任务", http.StatusUnprocessableEntity)
+	if !hasThreadRequiredLLMConfig(requestPayload) {
+		common.ReplyErr(w, "请先配置 llm 和 evo_llm 模型后再创建任务", http.StatusUnprocessableEntity)
 		return
 	}
 
 	var creationGuard *userActiveThreadCreationGuard
-	// Temporary integration bypass: comment this guard block to disable single-active-thread enforcement.
 	if guard, guardErr := reserveUserActiveThreadCreation(r.Context(), db, r); guardErr != nil {
 		replyUserActiveThreadError(w, guardErr)
 		return
@@ -391,11 +390,13 @@ func StreamThreadMessages(w http.ResponseWriter, r *http.Request) {
 			common.ReplyErr(w, "messages request body required", http.StatusBadRequest)
 			return
 		}
-		if err := attachThreadModelConfig(r.Context(), db, store.UserID(r), requestPayload); err != nil {
-			common.ReplyErr(w, fmt.Sprintf("%s: %v", "load llm config failed", err), http.StatusInternalServerError)
-			return
+		messagePayload := map[string]any{}
+		for _, key := range []string{"message_id", "text", "content", "attachments", "client_context"} {
+			if value, ok := requestPayload[key]; ok {
+				messagePayload[key] = value
+			}
 		}
-		requestBytes, err := json.Marshal(requestPayload)
+		requestBytes, err := json.Marshal(messagePayload)
 		if err != nil {
 			common.ReplyErr(w, fmt.Sprintf("%s: %v", "marshal body failed", err), http.StatusInternalServerError)
 			return
@@ -854,13 +855,24 @@ func postThreadAction(w http.ResponseWriter, r *http.Request, action string) {
 			common.ReplyErr(w, fmt.Sprintf("%s: %v", "invalid body", decodeErr), http.StatusBadRequest)
 			return
 		}
-		if attachErr := attachThreadModelConfig(r.Context(), store.DB(), store.UserID(r), payload); attachErr != nil {
-			common.ReplyErr(w, fmt.Sprintf("%s: %v", "load llm config failed", attachErr), http.StatusInternalServerError)
+		commandPayload := map[string]any{}
+		for _, key := range []string{"command_id", "until_step"} {
+			if value, ok := payload[key]; ok {
+				commandPayload[key] = value
+			}
+		}
+		proxy, statusCode, err = postUpstreamProxy(r.Context(), r, threadActionURL(threadID, action), commandPayload)
+	} else {
+		payload, _, decodeErr := decodeRequestBody(r)
+		if decodeErr != nil {
+			common.ReplyErr(w, fmt.Sprintf("%s: %v", "invalid body", decodeErr), http.StatusBadRequest)
 			return
 		}
-		proxy, statusCode, err = postUpstreamProxy(r.Context(), r, threadActionURL(threadID, action), payload)
-	} else {
-		proxy, statusCode, err = postUpstreamProxy(r.Context(), r, threadActionURL(threadID, action), nil)
+		commandPayload := map[string]any{}
+		if value, ok := payload["command_id"]; ok {
+			commandPayload["command_id"] = value
+		}
+		proxy, statusCode, err = postUpstreamProxy(r.Context(), r, threadActionURL(threadID, action), commandPayload)
 	}
 	if err != nil {
 		common.ReplyErrWithData(w, "post thread action failed", map[string]any{"detail": err.Error()}, statusCode)

@@ -197,7 +197,7 @@ func TestBuildThreadCreateTitleFallsBackToPayloadTitle(t *testing.T) {
 	}
 }
 
-func TestCreateThreadRequiresConfiguredEvoLLM(t *testing.T) {
+func TestCreateThreadRequiresConfiguredThreadLLMs(t *testing.T) {
 	db := newAgentTestDB(t)
 	if err := db.DB.AutoMigrate(&orm.Dataset{}); err != nil {
 		t.Fatalf("auto migrate dataset: %v", err)
@@ -222,10 +222,10 @@ func TestCreateThreadRequiresConfiguredEvoLLM(t *testing.T) {
 	CreateThread(rec, req)
 
 	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected missing evo_llm to return 422, status=%d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("expected missing thread llm config to return 422, status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "evo_llm") {
-		t.Fatalf("expected response to mention evo_llm, body=%s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "llm") || !strings.Contains(rec.Body.String(), "evo_llm") {
+		t.Fatalf("expected response to mention llm and evo_llm, body=%s", rec.Body.String())
 	}
 	var activeCount int64
 	if err := db.DB.Model(&orm.AgentUserActiveThread{}).Count(&activeCount).Error; err != nil {
@@ -236,16 +236,17 @@ func TestCreateThreadRequiresConfiguredEvoLLM(t *testing.T) {
 	}
 }
 
-func TestAttachThreadModelConfigProvidesEvoLLM(t *testing.T) {
+func TestAttachThreadModelConfigProvidesRequiredThreadLLMs(t *testing.T) {
 	db := newAgentTestDB(t)
+	seedAgentRuntimeModelConfig(t, db, "user-1", "llm")
 	seedAgentRuntimeModelConfig(t, db, "user-1", "evo_llm")
 
 	payload := map[string]any{}
 	if err := attachThreadModelConfig(context.Background(), db.DB, "user-1", payload); err != nil {
 		t.Fatalf("attach thread model config: %v", err)
 	}
-	if !hasThreadEvoLLMConfig(payload) {
-		t.Fatalf("expected attached payload to satisfy evo_llm requirement: %#v", payload)
+	if !hasThreadRequiredLLMConfig(payload) {
+		t.Fatalf("expected attached payload to satisfy thread llm requirement: %#v", payload)
 	}
 	llmConfig, ok := payload["llm_config"].(map[string]any)
 	if !ok {
@@ -254,6 +255,143 @@ func TestAttachThreadModelConfigProvidesEvoLLM(t *testing.T) {
 	evoConfig, ok := llmConfig["evo_llm"].(map[string]any)
 	if !ok || evoConfig["model"] != "gpt-evo-llm" {
 		t.Fatalf("expected evo_llm config, got %#v", llmConfig["evo_llm"])
+	}
+	chatConfig, ok := llmConfig["llm"].(map[string]any)
+	if !ok || chatConfig["model"] != "gpt-llm" {
+		t.Fatalf("expected llm config, got %#v", llmConfig["llm"])
+	}
+}
+
+func TestPostThreadActionForwardsOnlyCommandFields(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "created",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/threads/thr_1/start" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "accepted"})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	body := `{"command_id":"cmd_1","until_step":"eval","llm_config":{"llm":{}},"extra":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/core/agent/threads/thr_1/start", strings.NewReader(body))
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+
+	postThreadAction(rec, req, "start")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(got) != 2 || got["command_id"] != "cmd_1" || got["until_step"] != "eval" {
+		t.Fatalf("unexpected upstream command body: %#v", got)
+	}
+}
+
+func TestPostThreadActionForwardsOnlyEmptyCommandFields(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "created",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/threads/thr_1/pause" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "accepted"})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	body := `{"command_id":"cmd_2","llm_config":{"llm":{}},"until_step":"eval","extra":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/core/agent/threads/thr_1/pause", strings.NewReader(body))
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+
+	postThreadAction(rec, req, "pause")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(got) != 1 || got["command_id"] != "cmd_2" {
+		t.Fatalf("unexpected upstream empty command body: %#v", got)
+	}
+}
+
+func TestStreamThreadMessagesForwardsOnlyMessageFields(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "created",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/threads/thr_1/messages" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"assistant_response\",\"content\":\"ok\"}\n\n")
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	body := `{"message_id":"m1","content":"继续","llm_config":{"llm":{}},"extra":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/core/agent/threads/thr_1/messages", strings.NewReader(body))
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+
+	StreamThreadMessages(rec, req)
+
+	if got["message_id"] != "m1" || got["content"] != "继续" || len(got) != 2 {
+		t.Fatalf("unexpected upstream message body: %#v", got)
 	}
 }
 

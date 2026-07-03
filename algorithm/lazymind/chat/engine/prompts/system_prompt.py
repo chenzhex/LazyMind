@@ -3,17 +3,12 @@ from __future__ import annotations
 from .guidance import (
     ATTACHED_FILES_GUIDANCE,
     DEFAULT_SYSTEM_PROMPT,
-    DOCUMENT_LINK_GUIDANCE,
     IMAGE_REFERENCE_MARKDOWN_GUIDANCE,
-    MEMORY_GUIDANCE,
-    SEARCH_GUIDANCE,
-    SKILLS_GUIDANCE,
-    TOOL_AVAILABILITY_GUIDANCE,
+    KNOWLEDGE_EVIDENCE_CITATION_GUIDANCE,
     TOOL_CALL_STATUS_GUIDANCE,
-    VISION_EXTRACTOR_GUIDANCE,
-    VOCAB_GUIDANCE,
-    WEB_SEARCH_GUIDANCE,
 )
+
+_KNOWLEDGE_EVIDENCE_GROUPS = {'kb', 'temp_kb'}
 
 
 def _build_environment_context_prompt(environment_context: dict | None = None) -> str:
@@ -72,35 +67,33 @@ def build_system_prompt(
 
     if use_memory:
         if isinstance(user_preference, str) and user_preference.strip():
-            prompt_parts.append(f'## User Profile / Preferences\n{user_preference.strip()}')
+            preference_block = (
+                '## User Profile / Preferences\n'
+                "The following profile entries describe the user's long-term preferences"
+                ' and identity.\n'
+                "Apply a preference **only when it is relevant to the user's current"
+                ' intent**.\n'
+                'If a preference conflicts with or is unrelated to what the user is'
+                ' actually asking for in this turn, ignore it.\n'
+                'Do not force-apply style, format, or persona preferences when the'
+                " user's question is factual, technical, or unrelated to that"
+                ' preference.\n\n'
+                + user_preference.strip()
+                + '\n\n<!-- end of User Profile / Preferences -->'
+            )
+            prompt_parts.append(preference_block)
         if isinstance(memory, str) and memory.strip():
             prompt_parts.append(f'## Agent Working Memory\n{memory.strip()}')
 
-    tool_guidance: list[str] = []
-    if 'vocab_learn' in active_groups:
-        tool_guidance.append(VOCAB_GUIDANCE)
-    if 'memory_editor' in active_groups and use_memory:
-        tool_guidance.append(MEMORY_GUIDANCE)
-    if 'skill_editor' in active_groups:
-        tool_guidance.append(SKILLS_GUIDANCE)
-    if tool_guidance:
-        prompt_parts.append(' '.join(tool_guidance))
     if active_groups:
         prompt_parts.append(TOOL_CALL_STATUS_GUIDANCE)
-        prompt_parts.append(TOOL_AVAILABILITY_GUIDANCE)
-    if 'kb' in active_groups or 'temp_kb' in active_groups:
-        prompt_parts.append(SEARCH_GUIDANCE)
-    if 'feishu' in active_groups or 'notion' in active_groups:
-        prompt_parts.append(DOCUMENT_LINK_GUIDANCE)
-    if 'web_search' in active_groups:
-        prompt_parts.append(WEB_SEARCH_GUIDANCE)
+    if active_groups & _KNOWLEDGE_EVIDENCE_GROUPS:
+        prompt_parts.append(KNOWLEDGE_EVIDENCE_CITATION_GUIDANCE)
     if (
         files
         or 'image_generator' in active_groups
         or 'image_editor' in active_groups
     ):
         prompt_parts.append(IMAGE_REFERENCE_MARKDOWN_GUIDANCE)
-    if 'multimodal' in active_groups and files:
-        prompt_parts.append(VISION_EXTRACTOR_GUIDANCE)
 
     return '\n\n'.join(prompt_parts)

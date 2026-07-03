@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { message, Popconfirm } from 'antd';
 import { usePluginSession } from '@/modules/chat/hooks/usePlugin';
 import { usePluginStore } from '@/modules/chat/store/pluginPanel';
 import { uploadFileInChunks } from '@/modules/chat/utils/chunkUpload';
+import { PluginSessionApi } from '@/modules/chat/utils/request';
 import type {
   PluginSession,
   SlotRevision,
@@ -16,6 +18,81 @@ import type {
 import { SlotRenderer, SlotEditingContext } from './SlotComponents';
 import './PluginPanel.scss';
 
+/** Parse a JSON intent_context string and return the text field, or '' if empty/invalid. */
+function parseIntentText(raw?: string): string {
+  if (!raw || raw === '{}') return '';
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return (parsed as Record<string, unknown>).text as string ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** IntentPopover shows global intent + per-step intent inside a floating popover. */
+function IntentPopover({
+  session,
+  tabs,
+  onClose,
+}: {
+  session: PluginSession;
+  tabs: TabDef[];
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const globalText = parseIntentText(session.intent_context);
+  const stepIntents = (session.steps ?? [])
+    .filter((s) => !!parseIntentText(s.intent_context))
+    .map((s, idx) => ({
+      idx: idx + 1,
+      stepId: s.step_id,
+      text: parseIntentText(s.intent_context),
+      tabLabel: tabs.find((t) => t.id === s.step_id)?.label ?? s.step_id,
+    }));
+
+  useEffect(() => {
+    function handleMouseDown(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    }
+    document.addEventListener('mousedown', handleMouseDown);
+    return () => document.removeEventListener('mousedown', handleMouseDown);
+  }, [onClose]);
+
+  return (
+    <div className='plugin-panel__intent-popover' ref={wrapRef} role='dialog' aria-label={t('chat.pluginIntentBtn')}>
+      <div className='plugin-panel__intent-popover-title'>{t('chat.pluginIntentBtn')}</div>
+      {globalText && (
+        <div className='plugin-panel__intent-section'>
+          <div className='plugin-panel__intent-section-title'>{t('chat.pluginIntentGlobalTitle')}</div>
+          <div className='plugin-panel__intent-section-text'>{globalText}</div>
+        </div>
+      )}
+      {stepIntents.length > 0 && (
+        <div className='plugin-panel__intent-section'>
+          <div className='plugin-panel__intent-section-title'>{t('chat.pluginIntentStepTitle')}</div>
+          <div className='plugin-panel__intent-step-list'>
+            {stepIntents.map((si) => (
+              <div key={si.stepId} className='plugin-panel__intent-step-row'>
+                <span className='plugin-panel__intent-step-badge'>{si.idx}</span>
+                <span className='plugin-panel__intent-step-text'>{si.text}</span>
+                <span className='plugin-panel__intent-step-arrow'>→</span>
+                <span className='plugin-panel__intent-step-tab'>{si.tabLabel}</span>
+              </div>
+            ))}
+          </div>
+          <div className='plugin-panel__intent-step-note'>{t('chat.pluginIntentStepMapNote')}</div>
+        </div>
+      )}
+      {!globalText && stepIntents.length === 0 && (
+        <div className='plugin-panel__intent-empty'>{t('chat.pluginIntentEmpty')}</div>
+      )}
+    </div>
+  );
+}
+
 interface PluginPanelProps {
   conversationId: string;
   pollIntervalMs?: number;
@@ -23,6 +100,10 @@ interface PluginPanelProps {
   onSendMessage?: (text: string) => void;
   /** Called when the user clicks the reference button on a slot item. */
   onReference?: (slot: SlotRevision) => void;
+  /** Called when the user clicks the Stop button during an active session. */
+  onStop?: () => void;
+  /** Called after a session is successfully dismissed. */
+  onDismissed?: () => void;
 }
 
 /**
@@ -660,7 +741,6 @@ function TabSlotGrid({
 const STATUS_KEY: Record<string, string> = {
   active: 'chat.pluginStatusRunning',
   completed: 'chat.pluginStatusDone',
-  failed: 'chat.pluginStatusFailed',
   waiting: 'chat.pluginStatusWaiting',
 };
 
@@ -669,9 +749,15 @@ export function PluginPanel({
   pollIntervalMs = 3000,
   onSendMessage,
   onReference,
+  onStop,
+  onDismissed,
 }: PluginPanelProps) {
   const { t } = useTranslation();
   const { session, loading, refresh } = usePluginSession(conversationId);
+  const bumpDismissedRefresh = usePluginStore((s) => s.bumpDismissedRefresh);
+  const autoRunning = usePluginStore((s) =>
+    conversationId ? (s.autoRunningByConversation[conversationId] ?? false) : false,
+  );
   const [activeTabIdx, setActiveTabIdx] = React.useState(0);
   const [collapsed, setCollapsed] = useState(false);
   const fetchPluginUI = usePluginStore((s) => s.fetchPluginUI);
@@ -679,9 +765,25 @@ export function PluginPanel({
   const setFocusedTab = usePluginStore((s) => s.setFocusedTab);
   const setFocusedSortOrder = usePluginStore((s) => s.setFocusedSortOrder);
   const [ui, setUI] = useState<PluginUI>({});
+  const [dismissing, setDismissing] = useState(false);
+
+  const handleDismiss = useCallback(async () => {
+    if (!session || dismissing) return;
+    setDismissing(true);
+    try {
+      await PluginSessionApi().dismissSession(session.session_id);
+      bumpDismissedRefresh(conversationId);
+      onDismissed?.();
+      refresh();
+    } catch {
+      message.error(t('chat.pluginDismissFailed'));
+      setDismissing(false);
+    }
+  }, [session, dismissing, refresh, t, onDismissed, bumpDismissedRefresh, conversationId]);
   // Track which text slots are currently being edited; disable footer buttons while any are.
   const editingSlots = useRef<Set<string>>(new Set());
   const [anySlotEditing, setAnySlotEditing] = useState(false);
+  const [intentOpen, setIntentOpen] = useState(false);
 
   const handleSlotEditingChange = useCallback((key: string, editing: boolean) => {
     if (editing) {
@@ -698,6 +800,14 @@ export function PluginPanel({
     if (cached) { setUI(cached); return; }
     fetchPluginUI(session.plugin_id).then(setUI);
   }, [session?.plugin_id, fetchPluginUI, pluginUIByPlugin]);
+
+  // Restore the previously focused tab when UI loads or session changes.
+  useEffect(() => {
+    const tabs: TabDef[] = ui.tabs ?? [];
+    if (!tabs.length || !session?.focusedTab) return;
+    const idx = tabs.findIndex((t) => t.id === session.focusedTab);
+    if (idx !== -1) setActiveTabIdx(idx);
+  }, [ui.tabs, session?.focusedTab]);
 
   useEffect(() => {
     if (!session || session.status !== 'active') return;
@@ -731,14 +841,26 @@ export function PluginPanel({
   const tabs: TabDef[] = ui.tabs ?? [];
   const hasTabs = tabs.length > 0;
 
+  // Always show the intent button when a session exists.
+  // When no intent has been recorded yet the popover shows empty sections.
+  const hasIntent = true;
+
   const showActions =
     session.status === 'waiting' ||
     session.status === 'active' ||
-    session.status === 'completed' ||
-    session.status === 'failed';
-  const buttonsDisabled = session.status === 'active' || anySlotEditing;
-  const showContinue =
-    session.status === 'waiting' || session.status === 'active';
+    session.status === 'completed';
+  const displayStatus = autoRunning ? 'active' : session.status;
+  const buttonsDisabled = displayStatus === 'active' || anySlotEditing || autoRunning;
+  // "继续" is only shown in waiting/active; completed shows rollback step picker instead.
+  const showContinue = displayStatus === 'waiting' || displayStatus === 'active';
+
+  // A failed step cannot be checkpoint-resumed — the SubAgent exited uncleanly and there is
+  // no valid checkpoint to restore. Only "重试" (full restart) is meaningful in this case.
+  // Note: "interrupted" steps CAN be resumed via checkpoint, so only "failed" is blocked.
+  const currentStepStatus = session.steps
+    ?.filter((s) => s.step_id === session.current_step_id)
+    ?.sort((a, b) => b.attempt - a.attempt)[0]?.status;
+  const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
 
   function handleContinue() {
     if (buttonsDisabled) return;
@@ -750,63 +872,131 @@ export function PluginPanel({
     onSendMessage?.(t('chat.pluginRetry'));
   }
 
+  function handleRollback(stepId: string) {
+    if (buttonsDisabled) return;
+    onSendMessage?.(`${t('chat.pluginRollbackPrefix')}${stepId}`);
+  }
+
   return (
     <SlotEditingContext.Provider value={{ setEditing: handleSlotEditingChange }}>
     <div
-      className={`plugin-panel plugin-panel--${session.status}${collapsed ? ' plugin-panel--collapsed' : ''}`}
+      className={`plugin-panel plugin-panel--${displayStatus}${collapsed ? ' plugin-panel--collapsed' : ''}`}
       data-session-id={session.session_id}
       aria-label='Plugin Panel'
     >
       {/* Header */}
       <div className='plugin-panel__header'>
-        <span className='plugin-panel__title'>{session.plugin_id}</span>
-        <span
-          className={`plugin-panel__status plugin-panel__status--${session.status}`}
-          aria-label={`Status: ${t(STATUS_KEY[session.status] ?? session.status)}`}
-        >
-          {t(STATUS_KEY[session.status] ?? session.status)}
-        </span>
-        <button
-          type='button'
-          className='plugin-panel__collapse-btn'
-          onClick={() => setCollapsed((c) => !c)}
-          aria-label={collapsed ? 'Expand panel' : 'Collapse panel'}
-          title={collapsed ? 'Expand' : 'Collapse'}
-        >
-          <svg
-            width='12'
-            height='12'
-            viewBox='0 0 12 12'
-            fill='none'
-            xmlns='http://www.w3.org/2000/svg'
-            className={`plugin-panel__collapse-icon${collapsed ? ' plugin-panel__collapse-icon--up' : ''}`}
+        <div className='plugin-panel__header-left'>
+          <span className='plugin-panel__title'>{session.plugin_id}</span>
+          <span
+            className={`plugin-panel__status plugin-panel__status--${displayStatus}`}
+            aria-label={`Status: ${t(STATUS_KEY[displayStatus] ?? displayStatus)}`}
           >
-            <path d='M2 4L6 8L10 4' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' />
-          </svg>
-        </button>
+            {t(STATUS_KEY[displayStatus] ?? displayStatus)}
+          </span>
+        </div>
+        <div className='plugin-panel__header-right'>
+          {hasIntent && (
+            <div className='plugin-panel__intent-btn-wrap'>
+              <button
+                type='button'
+                className='plugin-panel__intent-btn'
+                onClick={() => setIntentOpen((v) => !v)}
+                aria-label={t('chat.pluginIntentBtn')}
+                aria-expanded={intentOpen}
+              >
+                <svg width='13' height='13' viewBox='0 0 13 13' fill='none' xmlns='http://www.w3.org/2000/svg' aria-hidden='true'>
+                  <circle cx='6.5' cy='6.5' r='5.75' stroke='currentColor' strokeWidth='1.5' />
+                  <path d='M6.5 5.5v4' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' />
+                  <circle cx='6.5' cy='3.75' r='0.75' fill='currentColor' />
+                </svg>
+                {t('chat.pluginIntentBtn')}
+              </button>
+              {intentOpen && (
+                <IntentPopover
+                  session={session}
+                  tabs={tabs}
+                  onClose={() => setIntentOpen(false)}
+                />
+              )}
+            </div>
+          )}
+          <Popconfirm
+            title={t('chat.pluginDismissConfirmTitle')}
+            description={t('chat.pluginDismissConfirmDesc')}
+            onConfirm={handleDismiss}
+            okText={t('chat.pluginDismissConfirmOk')}
+            cancelText={t('chat.pluginDismissConfirmCancel')}
+            okButtonProps={{ danger: true, size: 'small' }}
+            cancelButtonProps={{ size: 'small' }}
+            disabled={dismissing}
+            placement='bottomRight'
+          >
+            <button
+              type='button'
+              className='plugin-panel__dismiss-btn'
+              disabled={dismissing}
+              aria-label={t('chat.pluginDismissBtn')}
+              title={t('chat.pluginDismissBtn')}
+            >
+              <svg width='12' height='12' viewBox='0 0 12 12' fill='none' xmlns='http://www.w3.org/2000/svg' aria-hidden='true'>
+                <path d='M2 2L10 10M10 2L2 10' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' />
+              </svg>
+            </button>
+          </Popconfirm>
+          <button
+            type='button'
+            className='plugin-panel__collapse-btn'
+            onClick={() => setCollapsed((c) => !c)}
+            aria-label={collapsed ? 'Expand panel' : 'Collapse panel'}
+            title={collapsed ? 'Expand' : 'Collapse'}
+          >
+            <svg
+              width='12'
+              height='12'
+              viewBox='0 0 12 12'
+              fill='none'
+              xmlns='http://www.w3.org/2000/svg'
+              className={`plugin-panel__collapse-icon${collapsed ? ' plugin-panel__collapse-icon--up' : ''}`}
+            >
+              <path d='M2 4L6 8L10 4' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Tabs — step navigator style */}
       {!collapsed && hasTabs && (
         <div className='plugin-panel__tabs' role='tablist'>
-          {tabs.map((tab, idx) => (
-            <React.Fragment key={tab.id}>
-              <button
-                role='tab'
-                aria-selected={idx === activeTabIdx}
-                aria-controls={`plugin-tab-panel-${tab.id}`}
-                className={`plugin-panel__tab${idx === activeTabIdx ? ' plugin-panel__tab--active' : ''}${idx < activeTabIdx ? ' plugin-panel__tab--done' : ''}`}
-                onClick={() => handleTabChange(idx, tab.id)}
-                type='button'
-              >
-                <span className='plugin-panel__tab-badge'>{idx + 1}</span>
-                <span className='plugin-panel__tab-label'>{tab.label}</span>
-              </button>
-              {idx < tabs.length - 1 && (
-                <span className={`plugin-panel__tab-connector${idx < activeTabIdx ? ' plugin-panel__tab-connector--done' : ''}`} aria-hidden='true' />
-              )}
-            </React.Fragment>
-          ))}
+          {tabs.map((tab, idx) => {
+            const step = session.steps?.find((s) => s.step_id === tab.id);
+            const stepStatus = step?.status;
+            return (
+              <React.Fragment key={tab.id}>
+                <button
+                  role='tab'
+                  aria-selected={idx === activeTabIdx}
+                  aria-controls={`plugin-tab-panel-${tab.id}`}
+                  className={`plugin-panel__tab${idx === activeTabIdx ? ' plugin-panel__tab--active' : ''}${idx < activeTabIdx ? ' plugin-panel__tab--done' : ''}`}
+                  onClick={() => handleTabChange(idx, tab.id)}
+                  type='button'
+                >
+                  <span className='plugin-panel__tab-badge'>{idx + 1}</span>
+                  <span className='plugin-panel__tab-label'>{tab.label}</span>
+                  {stepStatus && stepStatus !== 'succeeded' && (
+                    <span
+                      className={`plugin-panel__step-status plugin-panel__step-status--${stepStatus}`}
+                      aria-label={`Step status: ${stepStatus}`}
+                      title={stepStatus}
+                    />
+                  )}
+                </button>
+                {idx < tabs.length - 1 && (
+                  <span className={`plugin-panel__tab-connector${idx < activeTabIdx ? ' plugin-panel__tab-connector--done' : ''}`} aria-hidden='true' />
+                )}
+              </React.Fragment>
+            );
+          })}
         </div>
       )}
 
@@ -843,6 +1033,16 @@ export function PluginPanel({
       {/* Footer */}
       {!collapsed && showActions && (
         <div className='plugin-panel__footer' role='group' aria-label='Session controls'>
+          {displayStatus === 'active' && onStop && (
+            <button
+              type='button'
+              className='plugin-panel__action-btn plugin-panel__action-btn--danger'
+              onClick={onStop}
+              title={t('chat.pluginStop')}
+            >
+              {t('chat.pluginStop')}
+            </button>
+          )}
           <button
             type='button'
             className='plugin-panel__action-btn plugin-panel__action-btn--secondary'
@@ -857,13 +1057,37 @@ export function PluginPanel({
             <button
               type='button'
               className='plugin-panel__action-btn plugin-panel__action-btn--primary'
-              disabled={buttonsDisabled}
-              aria-disabled={buttonsDisabled}
+              disabled={continueDisabled}
+              aria-disabled={continueDisabled}
               onClick={handleContinue}
-              title={buttonsDisabled ? t('chat.pluginBtnDisabledHint') : t('chat.pluginContinue')}
+              title={
+                currentStepStatus === 'failed'
+                  ? t('chat.pluginContinueDisabledFailed')
+                  : buttonsDisabled
+                    ? t('chat.pluginBtnDisabledHint')
+                    : t('chat.pluginContinue')
+              }
             >
               {t('chat.pluginContinue')}
             </button>
+          )}
+          {session.status === 'completed' && session.steps && session.steps.length > 0 && (
+            <div className='plugin-panel__rollback'>
+              <span className='plugin-panel__rollback-label'>{t('chat.pluginRollbackLabel')}</span>
+              <div className='plugin-panel__rollback-steps'>
+                {session.steps.map((step) => (
+                  <button
+                    key={`${step.step_id}-${step.attempt}`}
+                    type='button'
+                    className='plugin-panel__rollback-step-btn'
+                    onClick={() => handleRollback(step.step_id)}
+                    title={`${t('chat.pluginRollbackPrefix')}${step.step_id}`}
+                  >
+                    {step.step_id}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       )}

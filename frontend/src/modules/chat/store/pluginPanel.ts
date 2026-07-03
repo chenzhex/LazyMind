@@ -160,15 +160,33 @@ export interface PluginSession {
   session_id: string;
   conversation_id: string;
   plugin_id: string;
-  status: "active" | "completed" | "failed" | "waiting";
+  status: "active" | "waiting" | "completed";
   current_step_id: string;
+  /** Global intent/constraint for this session, JSON string e.g. {"text":"..."} */
+  intent_context?: string;
   created_at: string;
   updated_at: string;
   slots?: SlotRevision[];
+  /** Steps for this session, used in completed state to render rollback step list. */
+  steps?: PluginSessionStep[];
   /** The tab currently focused by the user — forwarded to the AI in plugin_context. */
   focusedTab?: string;
   /** The sort_order item currently focused by the user — forwarded to the AI. */
   focusedSortOrder?: number;
+}
+
+/** A single step execution record from plugin_session_steps. */
+export interface PluginSessionStep {
+  id: string;
+  session_id: string;
+  step_id: string;
+  attempt: number;
+  task_id: string;
+  status: string;
+  /** Step-level intent/constraint, JSON string e.g. {"text":"..."} */
+  intent_context?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // Slot value resolved from a TaskArtifact's value field.
@@ -250,17 +268,22 @@ interface PluginStore {
   pluginUIByPlugin: Record<string, PluginUI>;
   // Slot order cache: keyed by "sessionId:slotId"
   slotOrderCache: Record<string, SlotOrderInfo>;
+  // Incremented each time a session is dismissed, keyed by conversation_id.
+  // DismissedPluginRestoreButton subscribes to this to re-fetch the dismissed list.
+  dismissedRefreshTrigger: Record<string, number>;
+  // Cached dismissed sessions per conversation. Survives component remounts.
+  dismissedSessionsByConversation: Record<string, Array<{ session_id: string; plugin_id: string }>>;
 
   setSession: (conversationId: string, session: PluginSession | null) => void;
   updateSlot: (conversationId: string, slot: SlotRevision) => void;
   loadActiveSession: (conversationId: string) => Promise<void>;
   refreshSlots: (conversationId: string, sessionId: string) => Promise<void>;
   patchSlot: (conversationId: string, sessionId: string, slotId: string, revision: number) => Promise<void>;
-  advanceSession: (conversationId: string, sessionId: string) => Promise<void>;
-  retrySession: (conversationId: string, sessionId: string) => Promise<void>;
   clearSession: (conversationId: string) => void;
   setAutoRunning: (conversationId: string, running: boolean) => void;
   fetchPluginUI: (pluginId: string) => Promise<PluginUI>;
+  bumpDismissedRefresh: (conversationId: string) => void;
+  fetchDismissedSessions: (conversationId: string) => Promise<void>;
   // Phase 3: slot item management.
   deleteSlotItem: (sessionId: string, slotId: string, listIndex: number, orderVersion?: number) => Promise<void>;
   patchSlotItemValue: (sessionId: string, slotId: string, listIndex: number, value: any, contentType?: string) => Promise<void>;
@@ -282,11 +305,52 @@ export const usePluginStore = create<PluginStore>()((set, get) => ({
   autoRunningByConversation: {},
   pluginUIByPlugin: {},
   slotOrderCache: {},
+  dismissedRefreshTrigger: {},
+  dismissedSessionsByConversation: {},
+
+  bumpDismissedRefresh: (conversationId) => {
+    set((s) => ({
+      dismissedRefreshTrigger: {
+        ...s.dismissedRefreshTrigger,
+        [conversationId]: (s.dismissedRefreshTrigger[conversationId] ?? 0) + 1,
+      },
+    }));
+    // Also refresh the cached dismissed list so any remounted component gets fresh data.
+    get().fetchDismissedSessions(conversationId);
+  },
+
+  fetchDismissedSessions: async (conversationId) => {
+    try {
+      const resp = await PluginSessionApi().listDismissedSessions(conversationId);
+      const sessions = (resp.data?.data?.sessions ?? []) as Array<{ session_id: string; plugin_id: string }>;
+      set((s) => ({
+        dismissedSessionsByConversation: {
+          ...s.dismissedSessionsByConversation,
+          [conversationId]: sessions,
+        },
+      }));
+    } catch {
+      // silently ignore — stale cache is fine
+    }
+  },
 
   setSession: (conversationId, session) => {
-    set((state) => ({
-      sessionByConversation: { ...state.sessionByConversation, [conversationId]: session },
-    }));
+    set((state) => {
+      const next: Record<string, any> = {
+        sessionByConversation: { ...state.sessionByConversation, [conversationId]: session },
+      };
+      // If the session is no longer active, clear any stale autoRunning flag synchronously.
+      // This ensures displayStatus is not stuck on 'active' regardless of async timing.
+      if (session && session.status !== 'active') {
+        if (state.autoRunningByConversation[conversationId]) {
+          next.autoRunningByConversation = {
+            ...state.autoRunningByConversation,
+            [conversationId]: false,
+          };
+        }
+      }
+      return next;
+    });
   },
 
   updateSlot: (conversationId, slot) => {
@@ -323,7 +387,21 @@ export const usePluginStore = create<PluginStore>()((set, get) => ({
     try {
       const res = await PluginSessionApi().getLatestSession(conversationId);
       const session: PluginSession | null = res?.data?.data?.session ?? null;
+      // Load step records for completed and waiting sessions so the Panel can
+      // render the rollback list and step-status badges correctly.
+      if (session && (session.status === 'completed' || session.status === 'waiting') && session.session_id) {
+        try {
+          const stepsRes = await PluginSessionApi().getSteps(session.session_id);
+          const rawSteps = stepsRes?.data?.data?.steps ?? [];
+          // Exclude the __end__ sentinel — only expose real steps to the UI.
+          session.steps = rawSteps.filter((s: any) => s.step_id !== '__end__');
+        } catch {
+          session.steps = [];
+        }
+      }
       get().setSession(conversationId, session);
+      // Also refresh dismissed sessions so the restore button appears immediately on load.
+      get().fetchDismissedSessions(conversationId);
     } catch {
       // ignore
     } finally {
@@ -364,24 +442,6 @@ export const usePluginStore = create<PluginStore>()((set, get) => ({
     try {
       await PluginSessionApi().patchSlot(sessionId, slotId, revision);
       get().refreshSlots(conversationId, sessionId);
-    } catch {
-      // ignore
-    }
-  },
-
-  advanceSession: async (conversationId, sessionId) => {
-    try {
-      await PluginSessionApi().advanceSession(sessionId, 'continue');
-      get().loadActiveSession(conversationId);
-    } catch {
-      // ignore
-    }
-  },
-
-  retrySession: async (conversationId, sessionId) => {
-    try {
-      await PluginSessionApi().advanceSession(sessionId, 'retry');
-      get().loadActiveSession(conversationId);
     } catch {
       // ignore
     }

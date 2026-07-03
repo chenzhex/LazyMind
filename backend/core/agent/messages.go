@@ -187,8 +187,7 @@ func ensureMessageStream(
 	requestBody []byte,
 	headers map[string]string,
 ) (*activeMessageStream, error) {
-	persistedRequestBody := stripLLMConfigFromRequestBody(requestBody)
-	requestHash := sha256Hex(string(persistedRequestBody))
+	requestHash := sha256Hex(string(requestBody))
 	if existing := activeStreams.get(thread.ThreadID); existing != nil {
 		if existing.requestHash != requestHash {
 			return nil, fmt.Errorf("thread already has an active messages stream")
@@ -201,7 +200,7 @@ func ensureMessageStream(
 		return nil, err
 	}
 
-	round, err := createThreadRound(db, thread.ThreadID, requestHash, persistedRequestBody)
+	round, err := createThreadRound(db, thread.ThreadID, requestHash, requestBody)
 	if err != nil {
 		_ = resp.Body.Close()
 		return nil, err
@@ -266,19 +265,6 @@ func openMessageStream(threadID string, requestBody []byte, headers map[string]s
 		return nil, fmt.Errorf("upstream messages request failed with status %d", resp.StatusCode)
 	}
 	return resp, nil
-}
-
-func stripLLMConfigFromRequestBody(requestBody []byte) []byte {
-	var payload map[string]any
-	if err := json.Unmarshal(requestBody, &payload); err != nil {
-		return requestBody
-	}
-	delete(payload, "llm_config")
-	out, err := json.Marshal(payload)
-	if err != nil {
-		return requestBody
-	}
-	return out
 }
 
 func consumeMessageStream(db *gorm.DB, session *activeMessageStream, threadID string, resp *http.Response) {

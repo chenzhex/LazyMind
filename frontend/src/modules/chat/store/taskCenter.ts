@@ -450,6 +450,21 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
                 usePluginStore.getState().loadActiveSession(conversationId);
               });
             }
+          } else if (type === 'driver_input') {
+            const driverMessage = payload.message || '';
+            import('@/modules/chat/constants/chat').then(({ CHAT_AUTO_ADVANCE_EVENT }) => {
+              window.dispatchEvent(new CustomEvent(CHAT_AUTO_ADVANCE_EVENT, {
+                detail: {
+                  conversationId,
+                  driverMessage,
+                  phase: 'append',
+                },
+              }));
+            });
+            import('@/modules/chat/store/pluginPanel').then(({ usePluginStore }) => {
+              usePluginStore.getState().setAutoRunning(conversationId, true);
+              usePluginStore.getState().loadActiveSession(conversationId);
+            });
           } else if (
             type === 'step_waiting' ||
             type === 'plugin_completed' ||
@@ -460,13 +475,27 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
               usePluginStore.getState().loadActiveSession(conversationId);
               usePluginStore.getState().setAutoRunning(conversationId, false);
             });
+          } else if (type === 'step_partial_done') {
+            import('@/modules/chat/store/pluginPanel').then(({ usePluginStore }) => {
+              usePluginStore.getState().loadActiveSession(conversationId);
+            });
+          } else if (type === 'intent_updated') {
+            // An update_intent call completed — refresh the session so the
+            // intent badge in the plugin panel updates without a page reload.
+            import('@/modules/chat/store/pluginPanel').then(({ usePluginStore }) => {
+              usePluginStore.getState().loadActiveSession(conversationId);
+            });
           } else if (type === 'auto_chat_started') {
             import('@/modules/chat/store/pluginPanel').then(({ usePluginStore }) => {
               usePluginStore.getState().setAutoRunning(conversationId, true);
             });
             import('@/modules/chat/constants/chat').then(({ CHAT_AUTO_ADVANCE_EVENT }) => {
               window.dispatchEvent(new CustomEvent(CHAT_AUTO_ADVANCE_EVENT, {
-                detail: { conversationId },
+                detail: {
+                  conversationId,
+                  driverMessage: payload.driver_message || payload.message || '',
+                  phase: 'resume',
+                },
               }));
             });
           }

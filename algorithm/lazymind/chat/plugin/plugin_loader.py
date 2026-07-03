@@ -60,6 +60,28 @@ class StateMachine:
             return True
         return target_step in self.get_reachable_steps(current_step)
 
+    def get_terminal_steps(self, from_step: Optional[str] = None) -> List[str]:
+        """Return terminal step IDs whose only forward transitions lead to __end__.
+
+        When from_step is given, only the current step and its direct successors
+        are considered — past steps are irrelevant and distant future steps would
+        only add noise to the LLM prompt.
+        """
+        def _is_terminal(step: str) -> bool:
+            targets = self._transitions.get(step, [])
+            non_reserved = [t for t in targets if t not in self._RESERVED]
+            return '__end__' in targets and not non_reserved
+
+        if from_step is None:
+            return [s for s in self._transitions if s not in self._RESERVED and _is_terminal(s)]
+
+        candidates = {from_step}
+        candidates.update(
+            t for t in self._transitions.get(from_step or '__start__', [])
+            if t not in self._RESERVED
+        )
+        return [s for s in candidates if _is_terminal(s)]
+
     def get_ancestors(self, step: str) -> set:
         """Return all ancestor step IDs of step in the state machine graph.
 
@@ -376,6 +398,26 @@ def get_step_config(plugin_id: str, step_id: str) -> Dict[str, Any]:
 def get_scenario(plugin_id: str) -> str:
     spec = get_plugin(plugin_id)
     return spec.scenario_md if spec else ''
+
+
+def get_plugin_intro(plugin_id: str) -> str:
+    """Return a short intro (id + description + when_to_use) for cold-start injection.
+
+    Only the trigger-relevant fields are included so the full scenario.md is not
+    leaked into the system prompt before the plugin is activated.
+    """
+    spec = get_plugin(plugin_id)
+    if not spec:
+        return ''
+    plugin_id_val = spec.plugin_id
+    description = (spec.yaml.get('description') or '').strip()
+    when_to_use = (spec.yaml.get('when_to_use') or '').strip()
+    lines = [f'## Plugin: {plugin_id_val}']
+    if description:
+        lines.append(description)
+    if when_to_use:
+        lines.append(f'When to use: {when_to_use}')
+    return '\n'.join(lines)
 
 
 def get_driver(plugin_id: str) -> Optional[str]:

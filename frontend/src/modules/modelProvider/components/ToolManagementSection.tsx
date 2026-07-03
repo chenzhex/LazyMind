@@ -492,6 +492,8 @@ export default function ToolManagementSection({ view }: ToolManagementSectionPro
         <div className="model-provider-service-card-copy">
           <div className="model-provider-service-title-row">
             <h4>{server.name}</h4>
+          </div>
+          <div className="model-provider-managed-tool-status-row">
             <Tag className="model-provider-service-status" color={server.isVerified ? "blue" : "warning"}>
               {server.isVerified ? t("admin.memoryMcpVerified") : t("admin.memoryMcpUnverified")}
             </Tag>
@@ -559,7 +561,7 @@ export default function ToolManagementSection({ view }: ToolManagementSectionPro
 
   return (
     <section className="model-provider-service-category model-provider-tool-management-section">
-      <div className="model-provider-tool-management-head">
+      <div className="model-provider-service-category-top">
         <div className="model-provider-service-category-head model-provider-tool-category-title">
           <span>{view === "mcp" ? <CloudServerOutlined /> : <ToolOutlined />}</span>
           <div>
@@ -575,6 +577,25 @@ export default function ToolManagementSection({ view }: ToolManagementSectionPro
             </p>
           </div>
         </div>
+        <Input
+          allowClear
+          className="model-provider-category-search"
+          placeholder={
+            view === "mcp"
+              ? t("modelProvider.external.mcpToolSearchPlaceholder")
+              : t("modelProvider.external.toolSearchPlaceholder")
+          }
+          prefix={<SearchOutlined />}
+          value={searchInput}
+          onChange={(event) => {
+            const nextValue = event.target.value;
+            setSearchInput(nextValue);
+            submitSearch(nextValue);
+          }}
+          onPressEnter={(event) => {
+            submitSearch(event.currentTarget.value);
+          }}
+        />
         {view === "mcp" ? (
           <Button
             className="model-provider-tool-primary-button"
@@ -585,41 +606,6 @@ export default function ToolManagementSection({ view }: ToolManagementSectionPro
             {t("admin.memoryMcpCreateButton")}
           </Button>
         ) : null}
-      </div>
-
-      <div className="model-provider-tool-toolbar">
-        <Input
-          allowClear
-          className="model-provider-tool-search"
-          placeholder={
-            view === "mcp"
-              ? t("modelProvider.external.mcpToolSearchPlaceholder")
-              : t("modelProvider.external.toolSearchPlaceholder")
-          }
-          suffix={
-            <Tooltip title={t("common.search")}>
-              <Button
-                aria-label={t("common.search")}
-                className="model-provider-tool-search-button"
-                icon={<SearchOutlined />}
-                size="small"
-                type="text"
-                onClick={() => submitSearch(searchInput)}
-              />
-            </Tooltip>
-          }
-          value={searchInput}
-          onChange={(event) => {
-            const nextValue = event.target.value;
-            setSearchInput(nextValue);
-            if (!nextValue.trim()) {
-              submitSearch("");
-            }
-          }}
-          onPressEnter={(event) => {
-            submitSearch(event.currentTarget.value);
-          }}
-        />
       </div>
 
       <Spin spinning={view === "mcp" ? mcpLoading : toolLoading}>

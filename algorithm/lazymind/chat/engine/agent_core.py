@@ -36,6 +36,7 @@ def build_react_agent(
     keep_full_turns: Optional[int] = None,
     fs: Optional[Any] = None,
     skills_dir: Optional[str] = None,
+    extra_stop_condition: Optional[Any] = None,
 ) -> Any:
     """Build a ReactAgent with shared defaults.
 
@@ -62,6 +63,8 @@ def build_react_agent(
         kwargs['fs'] = fs
     if skills_dir is not None:
         kwargs['skills_dir'] = skills_dir
+    if extra_stop_condition is not None:
+        kwargs['extra_stop_condition'] = extra_stop_condition
 
     return _agent_mod.ReactAgent(llm=llm, tools=tools, **kwargs)
 
@@ -90,4 +93,10 @@ async def drive_agent(
         yield ('event', item)
 
     # Resolve the future; let the caller decide what to do on exception.
-    yield ('final', helper.future.result())
+    try:
+        result = helper.future.result()
+    except Exception as exc:
+        import lazyllm as _lazyllm
+        _lazyllm.LOG.exception(f'[drive_agent] agent future raised: {type(exc).__name__}: {exc}')
+        raise
+    yield ('final', result)
