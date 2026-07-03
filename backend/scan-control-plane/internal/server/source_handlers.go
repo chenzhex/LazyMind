@@ -286,6 +286,47 @@ func (h *Handler) deleteSourceByDataset(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (h *Handler) appendSource(w http.ResponseWriter, r *http.Request) {
+	if h.sources == nil {
+		writeError(w, missingDependency("source engine"))
+		return
+	}
+	actor, err := actorFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	sourceID := r.PathValue("source_id")
+	if err := h.access.CanWriteSource(r.Context(), actor, sourceID); err != nil {
+		writeError(w, err)
+		return
+	}
+	var req sourceengine.AppendSourceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, invalidJSON(err))
+		return
+	}
+	req.CallerID = actor.UserID
+	req.TenantID = actor.TenantID
+	req.SourceID = sourceID
+
+	if err := h.checkBindingTargetInputs(r, actor, sourceID, req.Bindings); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := requireLocalSourceAdmin(actor, req.Bindings, nil); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	resp, err := h.sources.AppendSource(r.Context(), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
 func (h *Handler) createSourceBinding(w http.ResponseWriter, r *http.Request) {
 	if h.sources == nil {
 		writeError(w, missingDependency("source engine"))
