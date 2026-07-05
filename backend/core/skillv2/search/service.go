@@ -147,7 +147,7 @@ func searchContentForRevision(ctx context.Context, tx *gorm.DB, skill skillRow, 
 		Table("skill_revision_entries AS e").
 		Select("e.path, b.content").
 		Joins("JOIN skill_blobs AS b ON b.hash = e.blob_hash").
-		Where("e.revision_id = ? AND e.entry_type = ? AND b.binary = ?", revisionID, "file", false).
+		Where("e.revision_id = ? AND e.entry_type = ? AND b.\"binary\" = ?", revisionID, "file", false).
 		Order("e.path ASC").
 		Find(&rows).Error; err != nil {
 		return "", err

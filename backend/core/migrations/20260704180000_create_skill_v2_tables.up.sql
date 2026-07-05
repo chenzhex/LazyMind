@@ -40,16 +40,16 @@ CREATE TABLE IF NOT EXISTS public.skill_blobs (
     size BIGINT NOT NULL,
     mime VARCHAR(128),
     file_type VARCHAR(32) NOT NULL DEFAULT 'unknown',
-    binary BOOLEAN NOT NULL DEFAULT FALSE,
+    "binary" BOOLEAN NOT NULL DEFAULT FALSE,
     storage_backend VARCHAR(32) NOT NULL,
     storage_key TEXT,
     content BYTEA,
     created_at TIMESTAMP NOT NULL,
     CONSTRAINT chk_skill_blob_storage_backend CHECK (storage_backend IN ('postgres', 'local_file', 's3')),
     CONSTRAINT chk_skill_blob_storage_shape CHECK (
-        (binary = FALSE AND storage_backend = 'postgres' AND content IS NOT NULL AND storage_key IS NULL)
+        ("binary" = FALSE AND storage_backend = 'postgres' AND content IS NOT NULL AND storage_key IS NULL)
         OR
-        (binary = TRUE AND storage_backend IN ('local_file', 's3') AND content IS NULL AND storage_key IS NOT NULL)
+        ("binary" = TRUE AND storage_backend IN ('local_file', 's3') AND content IS NULL AND storage_key IS NOT NULL)
     )
 );
 
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS public.skill_revision_entries (
     size BIGINT NOT NULL DEFAULT 0,
     mime VARCHAR(128),
     file_type VARCHAR(32) NOT NULL DEFAULT 'unknown',
-    binary BOOLEAN NOT NULL DEFAULT FALSE,
+    "binary" BOOLEAN NOT NULL DEFAULT FALSE,
     mode INT NOT NULL DEFAULT 420,
     PRIMARY KEY (revision_id, path),
     CONSTRAINT chk_skill_revision_entry_type CHECK (entry_type IN ('file', 'dir')),
@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS public.skill_draft_entries (
     size BIGINT NOT NULL DEFAULT 0,
     mime VARCHAR(128),
     file_type VARCHAR(32),
-    binary BOOLEAN NOT NULL DEFAULT FALSE,
+    "binary" BOOLEAN NOT NULL DEFAULT FALSE,
     mode INT NOT NULL DEFAULT 420,
     updated_at TIMESTAMP NOT NULL,
     PRIMARY KEY (skill_id, path),
