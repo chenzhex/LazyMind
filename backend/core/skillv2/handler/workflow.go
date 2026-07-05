@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"lazymind/core/algo"
 	"lazymind/core/common"
@@ -37,6 +40,12 @@ type draftPreviewResponse struct {
 	Outdated           bool   `json:"outdated"`
 }
 
+type skillMDFrontmatter struct {
+	Name        string `yaml:"name"`
+	Category    string `yaml:"category"`
+	Description string `yaml:"description"`
+}
+
 func Generate(w http.ResponseWriter, r *http.Request) {
 	db, skillID, userID, ok := requireOwnedSkill(w, r)
 	if !ok {
@@ -66,13 +75,18 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 		replyServiceError(w, err)
 		return
 	}
+	var row orm.SkillV2Skill
+	if err := db.WithContext(r.Context()).Where("id = ?", skillID).Take(&row).Error; err != nil {
+		replyServiceError(w, err)
+		return
+	}
 	llmConfig, err := modelconfig.LoadLLMConfig(r.Context(), db, userID)
 	if err != nil {
 		replyError(w, "load llm config failed", http.StatusInternalServerError)
 		return
 	}
 	generated, err := algo.GenerateSkill(r.Context(), algo.SkillGenerateRequest{
-		Content:      base.Content,
+		Content:      ensureSkillMDFrontmatter(base.Content, row),
 		UserInstruct: req.UserInstruct,
 		LLMConfig:    llmConfig,
 	})
@@ -84,6 +98,7 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 		replyError(w, "skill generate returned empty content", http.StatusBadGateway)
 		return
 	}
+	generated = ensureSkillMDFrontmatter(generated, row)
 	if status.DraftVersion <= 0 {
 		replyError(w, "skill draft not initialized", http.StatusInternalServerError)
 		return
@@ -95,11 +110,6 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 		ExpectedDraftVersion: status.DraftVersion,
 		UserID:               userID,
 	}); err != nil {
-		replyServiceError(w, err)
-		return
-	}
-	var row orm.SkillV2Skill
-	if err := db.WithContext(r.Context()).Where("id = ?", skillID).Take(&row).Error; err != nil {
 		replyServiceError(w, err)
 		return
 	}
@@ -197,4 +207,50 @@ func Discard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	common.ReplyOK(w, map[string]any{"discarded": true})
+}
+
+func ensureSkillMDFrontmatter(content string, row orm.SkillV2Skill) string {
+	meta, body, ok := parseSkillMDFrontmatter(content)
+	if ok && strings.TrimSpace(meta.Name) != "" && strings.TrimSpace(meta.Category) != "" && strings.TrimSpace(meta.Description) != "" {
+		return content
+	}
+	if !ok {
+		body = strings.TrimSpace(content)
+	}
+	if strings.TrimSpace(meta.Name) == "" {
+		meta.Name = firstNonEmpty(row.SkillName, row.ID)
+	}
+	if strings.TrimSpace(meta.Category) == "" {
+		meta.Category = strings.TrimSpace(row.Category)
+	}
+	if strings.TrimSpace(meta.Description) == "" {
+		meta.Description = firstNonEmpty(row.Description, row.SkillName, row.ID)
+	}
+	if strings.TrimSpace(body) == "" {
+		body = fmt.Sprintf("# %s", firstNonEmpty(meta.Name, row.SkillName, row.ID))
+	}
+	frontmatter, err := yaml.Marshal(meta)
+	if err != nil {
+		return content
+	}
+	return fmt.Sprintf("---\n%s---\n%s\n", string(frontmatter), strings.TrimSpace(body))
+}
+
+func parseSkillMDFrontmatter(content string) (skillMDFrontmatter, string, bool) {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	if !strings.HasPrefix(normalized, "---\n") {
+		return skillMDFrontmatter{}, "", false
+	}
+	rest := strings.TrimPrefix(normalized, "---\n")
+	idx := strings.Index(rest, "\n---")
+	if idx < 0 {
+		return skillMDFrontmatter{}, "", false
+	}
+	yamlPart := rest[:idx]
+	body := strings.TrimPrefix(rest[idx+len("\n---"):], "\n")
+	var meta skillMDFrontmatter
+	if err := yaml.Unmarshal([]byte(yamlPart), &meta); err != nil {
+		return skillMDFrontmatter{}, "", false
+	}
+	return meta, body, true
 }

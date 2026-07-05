@@ -334,7 +334,8 @@ func (r *RefResolver) ResolvePair(ctx context.Context, req ResolvePairRequest) (
 }
 
 func (r *RefResolver) Resolve(ctx context.Context, userID string, ref DiffRef) (ReadOnlySkillFS, error) {
-	switch ref.Type {
+	refType := strings.ToLower(strings.TrimSpace(ref.Type))
+	switch refType {
 	case "revision":
 		if ref.SkillID == "" || ref.RevisionID == "" {
 			return nil, fmt.Errorf("revision ref requires skill_id and revision_id")
@@ -349,6 +350,11 @@ func (r *RefResolver) Resolve(ctx context.Context, userID string, ref DiffRef) (
 			return nil, err
 		}
 		return newRevisionFS(ctx, r.db, ref.SkillID, revisionID)
+	case "draft":
+		if ref.SkillID == "" {
+			return nil, fmt.Errorf("draft ref requires skill_id")
+		}
+		return newDraftFS(ctx, r.db, ref.SkillID)
 	case "uploaded":
 		if ref.UploadID == "" {
 			return nil, fmt.Errorf("uploaded ref requires upload_id")
@@ -414,17 +420,120 @@ func (fs *revisionFS) ReadFile(ctx context.Context, filePath string) ([]byte, er
 	if err := fs.db.WithContext(ctx).Where("revision_id = ? AND path = ?", fs.revisionID, filePath).Take(&entry).Error; err != nil {
 		return nil, err
 	}
+	return readRevisionEntryBlob(ctx, fs.db, entry, filePath)
+}
+
+type draftFS struct {
+	db      *gorm.DB
+	entries []skillRevisionEntryRow
+}
+
+func newDraftFS(ctx context.Context, db *gorm.DB, skillID string) (*draftFS, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db is not configured")
+	}
+	entries, err := draftEntriesForSkill(ctx, db, skillID)
+	if err != nil {
+		return nil, err
+	}
+	return &draftFS{db: db, entries: entries}, nil
+}
+
+func (fs *draftFS) ListAll(ctx context.Context) ([]EntryInfo, error) {
+	entries := make([]EntryInfo, 0, len(fs.entries))
+	for _, row := range fs.entries {
+		blobHash := ""
+		if row.BlobHash != nil {
+			blobHash = *row.BlobHash
+		}
+		entries = append(entries, EntryInfo{
+			Path:     row.Path,
+			Type:     row.EntryType,
+			BlobHash: blobHash,
+			Binary:   row.Binary,
+			FileType: row.FileType,
+			Size:     row.Size,
+		})
+	}
+	return entries, nil
+}
+
+func (fs *draftFS) ReadFile(ctx context.Context, filePath string) ([]byte, error) {
+	for _, entry := range fs.entries {
+		if entry.Path == filePath {
+			return readRevisionEntryBlob(ctx, fs.db, entry, filePath)
+		}
+	}
+	return nil, fmt.Errorf("file not found: %s", filePath)
+}
+
+func readRevisionEntryBlob(ctx context.Context, db *gorm.DB, entry skillRevisionEntryRow, filePath string) ([]byte, error) {
 	if entry.EntryType != "file" || entry.BlobHash == nil {
 		return nil, fmt.Errorf("file not found: %s", filePath)
 	}
 	var blob skillBlobRow
-	if err := fs.db.WithContext(ctx).Where("hash = ?", *entry.BlobHash).Take(&blob).Error; err != nil {
+	if err := db.WithContext(ctx).Where("hash = ?", *entry.BlobHash).Take(&blob).Error; err != nil {
 		return nil, err
 	}
 	if blob.Binary {
 		return nil, fmt.Errorf("binary content is not available: %s", filePath)
 	}
 	return blob.Content, nil
+}
+
+func draftEntriesForSkill(ctx context.Context, db *gorm.DB, skillID string) ([]skillRevisionEntryRow, error) {
+	revisionID, err := headRevisionID(ctx, db, skillID)
+	if err != nil {
+		return nil, err
+	}
+	var rows []skillRevisionEntryRow
+	if err := db.WithContext(ctx).Where("revision_id = ?", revisionID).Order("path ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	entriesByPath := make(map[string]skillRevisionEntryRow, len(rows))
+	for _, row := range rows {
+		entriesByPath[row.Path] = row
+	}
+
+	var overlays []skillDraftEntryRow
+	if err := db.WithContext(ctx).Where("skill_id = ?", skillID).Order("path ASC").Find(&overlays).Error; err != nil {
+		return nil, err
+	}
+	for _, overlay := range overlays {
+		if overlay.Op == "delete" {
+			for entryPath := range entriesByPath {
+				if entryPath == overlay.Path || isDescendantPath(overlay.Path, entryPath) {
+					delete(entriesByPath, entryPath)
+				}
+			}
+			continue
+		}
+		hash := overlay.BlobHash
+		entriesByPath[overlay.Path] = skillRevisionEntryRow{
+			Path:      overlay.Path,
+			EntryType: overlay.EntryType,
+			BlobHash:  hash,
+			Size:      overlay.Size,
+			Mime:      overlay.Mime,
+			FileType:  overlay.FileType,
+			Binary:    overlay.Binary,
+			Mode:      overlay.Mode,
+		}
+	}
+	return revisionEntriesFromMap(entriesByPath), nil
+}
+
+func revisionEntriesFromMap(entries map[string]skillRevisionEntryRow) []skillRevisionEntryRow {
+	paths := make([]string, 0, len(entries))
+	for entryPath := range entries {
+		paths = append(paths, entryPath)
+	}
+	sort.Strings(paths)
+	out := make([]skillRevisionEntryRow, 0, len(paths))
+	for _, entryPath := range paths {
+		out = append(out, entries[entryPath])
+	}
+	return out
 }
 
 type zipFS struct {
@@ -531,6 +640,21 @@ type skillRevisionEntryRow struct {
 
 func (skillRevisionEntryRow) TableName() string { return "skill_revision_entries" }
 
+type skillDraftEntryRow struct {
+	SkillID   string  `gorm:"column:skill_id;type:varchar(36);primaryKey"`
+	Path      string  `gorm:"column:path;type:text;primaryKey"`
+	Op        string  `gorm:"column:op;type:text;not null"`
+	EntryType string  `gorm:"column:entry_type;type:text"`
+	BlobHash  *string `gorm:"column:blob_hash;type:text"`
+	Size      int64   `gorm:"column:size"`
+	Mime      string  `gorm:"column:mime;type:text"`
+	FileType  string  `gorm:"column:file_type;type:text"`
+	Binary    bool    `gorm:"column:binary"`
+	Mode      int     `gorm:"column:mode"`
+}
+
+func (skillDraftEntryRow) TableName() string { return "skill_draft_entries" }
+
 type skillBlobRow struct {
 	Hash    string `gorm:"column:hash;type:text;primaryKey"`
 	Binary  bool   `gorm:"column:binary;not null;default:false"`
@@ -618,6 +742,10 @@ func cleanSkillPath(name string) (string, error) {
 func contentHash(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func isDescendantPath(parent, child string) bool {
+	return child != parent && strings.HasPrefix(child, parent+"/")
 }
 
 func isBinaryFile(filePath string, data []byte) bool {

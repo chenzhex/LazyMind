@@ -61,3 +61,40 @@ func TestDiffUploadedRefMismatch_ReturnsError(t *testing.T) {
 		t.Fatal("ResolvePair succeeded for uploaded ref owned by another user")
 	}
 }
+
+func TestDiffDraftRef_MergesDraftOverlay(t *testing.T) {
+	db := testutil.NewTestDB(t)
+	testutil.SeedSkillWithRevision(t, db, "skill1", "rev1")
+	testutil.SeedTextBlob(t, db, "h_a", "# A\n")
+	testutil.SeedRevisionEntry(t, db, "rev1", "references/a.md", "file", "h_a", "markdown")
+	testutil.SeedTextBlob(t, db, "h_skill_draft", "# 论文精读 v2\n")
+	testutil.SeedTextBlob(t, db, "h_b", "# B\n")
+	testutil.SeedDraftEntry(t, db, "skill1", "SKILL.md", "upsert", "file", "h_skill_draft")
+	testutil.SeedDraftEntry(t, db, "skill1", "references/a.md", "delete", "", "")
+	testutil.SeedDraftEntry(t, db, "skill1", "references/b.md", "upsert", "file", "h_b")
+
+	resolver := NewRefResolver(RefResolverDeps{DB: db.DB})
+	oldFS, newFS, err := resolver.ResolvePair(context.Background(), ResolvePairRequest{
+		UserID: "user_001",
+		Old:    DiffRef{Type: "head", SkillID: "skill1"},
+		New:    DiffRef{Type: "draft", SkillID: "skill1"},
+	})
+	if err != nil {
+		t.Fatalf("ResolvePair returned error: %v", err)
+	}
+
+	service := NewService(ServiceDeps{})
+	result, err := service.Compare(context.Background(), oldFS, newFS, DiffOptions{})
+	if err != nil {
+		t.Fatalf("Compare returned error: %v", err)
+	}
+	assertDiffStatus(t, result, "SKILL.md", "modified")
+	assertDiffStatus(t, result, "references/a.md", "deleted")
+	assertDiffStatus(t, result, "references/b.md", "added")
+
+	file, err := service.CompareFile(context.Background(), oldFS, newFS, DiffOptions{Path: "SKILL.md"})
+	if err != nil {
+		t.Fatalf("CompareFile returned error: %v", err)
+	}
+	assertLineTypes(t, file.DiffEntryLines, "DELETION", "ADDITION")
+}
