@@ -20,6 +20,7 @@ import (
 )
 
 const defaultMaxTextBytes = 512 * 1024
+const maxInlineDiffCells = 20000
 
 type ServiceDeps struct {
 	MaxTextBytes int
@@ -221,18 +222,18 @@ func buildTextDiff(oldText, newText string) []DiffEntryLine {
 			oldLine++
 			newLine++
 		case len(oldLines) > 0 && len(newLines) > 0:
-			lines = append(lines, diffLine("DELETION", oldLines[0], oldLine, 0))
-			lines = append(lines, diffLine("ADDITION", newLines[0], 0, newLine))
+			deletion, addition := changedLinePair(oldLines[0], newLines[0], oldLine, newLine)
+			lines = append(lines, deletion, addition)
 			oldLines = oldLines[1:]
 			newLines = newLines[1:]
 			oldLine++
 			newLine++
 		case len(oldLines) > 0:
-			lines = append(lines, diffLine("DELETION", oldLines[0], oldLine, 0))
+			lines = append(lines, highlightedDiffLine("DELETION", oldLines[0], oldLine, 0, "diff-deletion"))
 			oldLines = oldLines[1:]
 			oldLine++
 		default:
-			lines = append(lines, diffLine("ADDITION", newLines[0], 0, newLine))
+			lines = append(lines, highlightedDiffLine("ADDITION", newLines[0], 0, newLine, "diff-addition"))
 			newLines = newLines[1:]
 			newLine++
 		}
@@ -260,6 +261,105 @@ func diffLine(typ, text string, oldLine, newLine int) DiffEntryLine {
 		OldLine: oldLine,
 		NewLine: newLine,
 	}
+}
+
+func highlightedDiffLine(typ, text string, oldLine, newLine int, class string) DiffEntryLine {
+	line := diffLine(typ, text, oldLine, newLine)
+	line.HTML = wrapDiffSpan(class, html.EscapeString(text))
+	return line
+}
+
+func changedLinePair(oldText, newText string, oldLine, newLine int) (DiffEntryLine, DiffEntryLine) {
+	oldHTML, newHTML := inlineDiffHTML(oldText, newText)
+	deletion := diffLine("DELETION", oldText, oldLine, 0)
+	addition := diffLine("ADDITION", newText, 0, newLine)
+	deletion.HTML = oldHTML
+	addition.HTML = newHTML
+	return deletion, addition
+}
+
+func inlineDiffHTML(oldText, newText string) (string, string) {
+	oldRunes := []rune(oldText)
+	newRunes := []rune(newText)
+	if len(oldRunes) == 0 {
+		return "", wrapDiffSpan("diff-addition", html.EscapeString(newText))
+	}
+	if len(newRunes) == 0 {
+		return wrapDiffSpan("diff-deletion", html.EscapeString(oldText)), ""
+	}
+	if len(oldRunes)*len(newRunes) > maxInlineDiffCells {
+		return wrapDiffSpan("diff-deletion", html.EscapeString(oldText)), wrapDiffSpan("diff-addition", html.EscapeString(newText))
+	}
+
+	oldChanged, newChanged := changedRuneMasks(oldRunes, newRunes)
+	return renderInlineDiffHTML(oldRunes, oldChanged, "diff-deletion"), renderInlineDiffHTML(newRunes, newChanged, "diff-addition")
+}
+
+func changedRuneMasks(oldRunes, newRunes []rune) ([]bool, []bool) {
+	m, n := len(oldRunes), len(newRunes)
+	lcs := make([][]int, m+1)
+	for i := range lcs {
+		lcs[i] = make([]int, n+1)
+	}
+	for i := m - 1; i >= 0; i-- {
+		for j := n - 1; j >= 0; j-- {
+			if oldRunes[i] == newRunes[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+				continue
+			}
+			if lcs[i+1][j] >= lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+
+	oldChanged := make([]bool, m)
+	newChanged := make([]bool, n)
+	for i := range oldChanged {
+		oldChanged[i] = true
+	}
+	for i := range newChanged {
+		newChanged[i] = true
+	}
+	for i, j := 0, 0; i < m && j < n; {
+		if oldRunes[i] == newRunes[j] {
+			oldChanged[i] = false
+			newChanged[j] = false
+			i++
+			j++
+			continue
+		}
+		if lcs[i+1][j] >= lcs[i][j+1] {
+			i++
+		} else {
+			j++
+		}
+	}
+	return oldChanged, newChanged
+}
+
+func renderInlineDiffHTML(runes []rune, changed []bool, class string) string {
+	var builder strings.Builder
+	for i := 0; i < len(runes); {
+		j := i + 1
+		for j < len(runes) && changed[j] == changed[i] {
+			j++
+		}
+		escaped := html.EscapeString(string(runes[i:j]))
+		if changed[i] {
+			builder.WriteString(wrapDiffSpan(class, escaped))
+		} else {
+			builder.WriteString(escaped)
+		}
+		i = j
+	}
+	return builder.String()
+}
+
+func wrapDiffSpan(class, escapedText string) string {
+	return `<span class="` + class + `">` + escapedText + `</span>`
 }
 
 func injectedContextText(text string, opts DiffOptions) string {
