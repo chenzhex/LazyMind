@@ -746,10 +746,11 @@ func updateThreadStepFromEvent(db *gorm.DB, threadID, stepID string, event fetch
 
 	now := time.Now().UTC()
 	payload := parseJSONValue(event.RawFrame)
+	stage := extractStringByExactKeys(payload, "stage")
 	title := extractStringByExactKeys(payload, "step_title", "title", "name", "display_name")
 	hasTitle := title != ""
 	if title == "" {
-		title = stepID
+		title = firstNonEmptyString(stage, stepID)
 	}
 	status := normalizeThreadStepStatus(extractStringByExactKeys(payload, "step_status", "status", "state", "action"), event.EventName)
 	active := !isTerminalThreadStepStatus(status)
@@ -762,6 +763,7 @@ func updateThreadStepFromEvent(db *gorm.DB, threadID, stepID string, event fetch
 	step := orm.AgentThreadStep{
 		ThreadID:      threadID,
 		StepID:        stepID,
+		Stage:         stage,
 		Title:         title,
 		Status:        status,
 		Active:        active,
@@ -780,6 +782,9 @@ func updateThreadStepFromEvent(db *gorm.DB, threadID, stepID string, event fetch
 		"ended_at":    endedAt,
 		"updated_at":  now,
 	}
+	if stage != "" {
+		updates["stage"] = stage
+	}
 	if hasTitle {
 		updates["title"] = title
 	}
@@ -789,12 +794,12 @@ func updateThreadStepFromEvent(db *gorm.DB, threadID, stepID string, event fetch
 	if hasOrder {
 		updates["order_index"] = orderIndex
 	}
-	if nextStepRunID := extractStringByExactKeys(payload, "next_step_id", "next_step_run_id"); nextStepRunID != "" {
-		step.NextStepRunID = nextStepRunID
-		updates["next_step_run_id"] = gorm.Expr(
-			"CASE WHEN agent_thread_steps.next_step_run_id = ? THEN ? ELSE agent_thread_steps.next_step_run_id END",
+	if nextStepID := extractStringByExactKeys(payload, "next_step_id"); nextStepID != "" {
+		step.NextStepID = nextStepID
+		updates["next_step_id"] = gorm.Expr(
+			"CASE WHEN agent_thread_steps.next_step_id = ? THEN ? ELSE agent_thread_steps.next_step_id END",
 			"",
-			nextStepRunID,
+			nextStepID,
 		)
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
@@ -843,12 +848,6 @@ func normalizeThreadEventRawData(rawData, frameEvent string) string {
 		setAlias("type", eventType)
 		setAlias("event", eventType)
 		setAlias("flow_kind", eventType)
-	}
-	if stepID := firstNonEmptyScalar(payload["step_id"]); stepID != "" {
-		setAlias("step_run_id", stepID)
-	}
-	if nextStepID := firstNonEmptyScalar(payload["next_step_id"]); nextStepID != "" {
-		setAlias("next_step_run_id", nextStepID)
 	}
 	if child, ok := payload["case"].(map[string]any); ok {
 		setAlias("case_id", firstNonEmptyScalar(child["id"]))

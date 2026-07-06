@@ -457,9 +457,10 @@ func TestEvoClientEventsStreamURLDoesNotForceSince(t *testing.T) {
 
 func TestEvoClientEventsStreamURLUsesStepQuery(t *testing.T) {
 	t.Setenv("LAZYMIND_EVO_SERVICE_URL", "http://evo-service:8048/")
+	stepID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
 
-	got := newEvoClient(nil).EventsStreamURL("thr/1", "step/collect")
-	want := "http://evo-service:8048/threads/thr%2F1/events:stream?step_id=step%2Fcollect"
+	got := newEvoClient(nil).EventsStreamURL("thr/1", stepID)
+	want := "http://evo-service:8048/threads/thr%2F1/events:stream?step_id=" + stepID
 	if got != want {
 		t.Fatalf("unexpected thread step events URL:\nwant: %q\ngot:  %q", want, got)
 	}
@@ -1260,10 +1261,11 @@ func TestSaveThreadRecordKeepsDuplicateThreadEventFrames(t *testing.T) {
 
 func TestSaveStepThreadEventRecordUsesStepAndStableRecordKey(t *testing.T) {
 	db := newAgentTestDB(t)
+	stepID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
 
 	first, created, err := saveThreadRecordWithOptions(db.DB, "thr_1", "", "task_1", streamKindThreadEvent, "dataset.complete", `{"seq":1}`, `{"seq":1}`, saveThreadRecordOptions{
-		StepID:    "collect_material",
-		RecordKey: sha256Hex("collect_material\x00evt_1"),
+		StepID:    stepID,
+		RecordKey: sha256Hex(stepID + "\x00evt_1"),
 	})
 	if err != nil {
 		t.Fatalf("first save returned error: %v", err)
@@ -1271,13 +1273,13 @@ func TestSaveStepThreadEventRecordUsesStepAndStableRecordKey(t *testing.T) {
 	if !created {
 		t.Fatalf("expected first save to create record")
 	}
-	if first.StepID != "collect_material" {
+	if first.StepID != stepID {
 		t.Fatalf("expected step_id to be persisted, got %q", first.StepID)
 	}
 
 	second, created, err := saveThreadRecordWithOptions(db.DB, "thr_1", "", "task_1", streamKindThreadEvent, "dataset.complete", `{"seq":1}`, `{"seq":1}`, saveThreadRecordOptions{
-		StepID:    "collect_material",
-		RecordKey: sha256Hex("collect_material\x00evt_1"),
+		StepID:    stepID,
+		RecordKey: sha256Hex(stepID + "\x00evt_1"),
 	})
 	if err != nil {
 		t.Fatalf("second save returned error: %v", err)
@@ -1315,25 +1317,29 @@ func TestSaveThreadRecordKeepsDuplicateMessageFrames(t *testing.T) {
 
 func TestUpdateThreadStepFromEventMaintainsSummary(t *testing.T) {
 	db := newAgentTestDB(t)
+	stepID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
 
-	if err := updateThreadStepFromEvent(db.DB, "thr_1", "collect_material", fetchedThreadEvent{
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
 		TaskID:    "task_1",
 		EventName: "step.started",
-		RawFrame:  `{"step_title":"Collect material","step_order":2,"status":"running"}`,
+		RawFrame:  `{"stage":"dataset","step_title":"Collect material","step_order":2,"status":"running"}`,
 	}); err != nil {
 		t.Fatalf("update running step returned error: %v", err)
 	}
-	if err := updateThreadStepFromEvent(db.DB, "thr_1", "collect_material", fetchedThreadEvent{
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
 		TaskID:    "task_1",
 		EventName: "step.completed",
-		RawFrame:  `{"status":"completed"}`,
+		RawFrame:  `{"stage":"dataset","status":"completed"}`,
 	}); err != nil {
 		t.Fatalf("update completed step returned error: %v", err)
 	}
 
 	var step orm.AgentThreadStep
-	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", "collect_material").First(&step).Error; err != nil {
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepID).First(&step).Error; err != nil {
 		t.Fatalf("load step: %v", err)
+	}
+	if step.Stage != "dataset" {
+		t.Fatalf("expected stage dataset, got %q", step.Stage)
 	}
 	if step.Title != "Collect material" {
 		t.Fatalf("expected title to be preserved, got %q", step.Title)
@@ -1354,22 +1360,25 @@ func TestUpdateThreadStepFromEventMaintainsSummary(t *testing.T) {
 
 func TestUpdateThreadStepFromEventDoneCompletesRunningStep(t *testing.T) {
 	db := newAgentTestDB(t)
+	stepID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+	nextStepID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
+	otherNextStepID := "cccccccc-cccc-5ccc-8ccc-cccccccccccc"
 
-	if err := updateThreadStepFromEvent(db.DB, "thr_1", "step_1", fetchedThreadEvent{
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
 		EventName: "dataset.start",
-		RawFrame:  `{"status":"running","step_run_id":"step_1"}`,
+		RawFrame:  `{"stage":"dataset","status":"running","step_id":"` + stepID + `"}`,
 	}); err != nil {
 		t.Fatalf("update running step returned error: %v", err)
 	}
-	if err := updateThreadStepFromEvent(db.DB, "thr_1", "step_1", fetchedThreadEvent{
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
 		EventName: "done",
-		RawFrame:  `{"type":"done","status":"running","step_run_id":"step_1","next_step_run_id":"step_2"}`,
+		RawFrame:  `{"type":"done","stage":"dataset","status":"running","step_id":"` + stepID + `","next_step_id":"` + nextStepID + `"}`,
 	}); err != nil {
 		t.Fatalf("update done step returned error: %v", err)
 	}
 
 	var step orm.AgentThreadStep
-	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", "step_1").First(&step).Error; err != nil {
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepID).First(&step).Error; err != nil {
 		t.Fatalf("load step: %v", err)
 	}
 	if step.Status != "succeeded" || step.Active {
@@ -1378,35 +1387,37 @@ func TestUpdateThreadStepFromEventDoneCompletesRunningStep(t *testing.T) {
 	if step.EventCount != 2 {
 		t.Fatalf("expected event_count=2, got %d", step.EventCount)
 	}
-	if step.NextStepRunID != "step_2" {
-		t.Fatalf("expected next_step_run_id step_2, got %q", step.NextStepRunID)
+	if step.NextStepID != nextStepID {
+		t.Fatalf("expected next_step_id %s, got %q", nextStepID, step.NextStepID)
 	}
-	if err := updateThreadStepFromEvent(db.DB, "thr_1", "step_1", fetchedThreadEvent{
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
 		EventName: "done",
-		RawFrame:  `{"type":"done","status":"running","step_run_id":"step_1","next_step_run_id":"step_3"}`,
+		RawFrame:  `{"type":"done","stage":"dataset","status":"running","step_id":"` + stepID + `","next_step_id":"` + otherNextStepID + `"}`,
 	}); err != nil {
 		t.Fatalf("update duplicate done step returned error: %v", err)
 	}
-	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", "step_1").First(&step).Error; err != nil {
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepID).First(&step).Error; err != nil {
 		t.Fatalf("reload step: %v", err)
 	}
-	if step.NextStepRunID != "step_2" {
-		t.Fatalf("expected first next_step_run_id to be preserved, got %q", step.NextStepRunID)
+	if step.NextStepID != nextStepID {
+		t.Fatalf("expected first next_step_id to be preserved, got %q", step.NextStepID)
 	}
 }
 
 func TestUpdateThreadStepFromEventKeepsOnlyLatestRunningStepActive(t *testing.T) {
 	db := newAgentTestDB(t)
+	stepOneID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+	stepTwoID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
 
-	if err := updateThreadStepFromEvent(db.DB, "thr_1", "step_1", fetchedThreadEvent{
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepOneID, fetchedThreadEvent{
 		EventName: "dataset.start",
-		RawFrame:  `{"status":"running","step_run_id":"step_1"}`,
+		RawFrame:  `{"stage":"dataset","status":"running","step_id":"` + stepOneID + `"}`,
 	}); err != nil {
 		t.Fatalf("update first running step returned error: %v", err)
 	}
-	if err := updateThreadStepFromEvent(db.DB, "thr_1", "step_2", fetchedThreadEvent{
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepTwoID, fetchedThreadEvent{
 		EventName: "eval.start",
-		RawFrame:  `{"status":"running","step_run_id":"step_2"}`,
+		RawFrame:  `{"stage":"eval","status":"running","step_id":"` + stepTwoID + `"}`,
 	}); err != nil {
 		t.Fatalf("update second running step returned error: %v", err)
 	}
@@ -1418,10 +1429,10 @@ func TestUpdateThreadStepFromEventKeepsOnlyLatestRunningStepActive(t *testing.T)
 	if len(steps) != 2 {
 		t.Fatalf("expected 2 steps, got %d", len(steps))
 	}
-	if steps[0].StepID != "step_1" || steps[0].Status != "succeeded" || steps[0].Active {
+	if steps[0].StepID != stepOneID || steps[0].Status != "succeeded" || steps[0].Active {
 		t.Fatalf("expected first step to be inactive succeeded, got %#v", steps[0])
 	}
-	if steps[1].StepID != "step_2" || steps[1].Status != "running" || !steps[1].Active {
+	if steps[1].StepID != stepTwoID || steps[1].Status != "running" || !steps[1].Active {
 		t.Fatalf("expected second step to be active running, got %#v", steps[1])
 	}
 }
@@ -1441,12 +1452,31 @@ func TestListThreadStepsReturnsActiveStep(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
+	stepOneID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+	stepTwoID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
 	if err := db.DB.Create(&[]orm.AgentThreadStep{
-		{ThreadID: "thr_1", StepID: "collect_material", Title: "Collect", Status: "succeeded", Active: false, OrderIndex: 1, EventCount: 2, NextStepRunID: "generate_image", CreatedAt: now, UpdatedAt: now},
-		{ThreadID: "thr_1", StepID: "generate_image", Title: "Generate", Status: "running", Active: true, OrderIndex: 2, EventCount: 3, CreatedAt: now, UpdatedAt: now.Add(time.Second)},
+		{ThreadID: "thr_1", StepID: stepOneID, Stage: "dataset", Title: "Dataset", Status: "succeeded", Active: false, OrderIndex: 1, EventCount: 2, NextStepID: stepTwoID, CreatedAt: now, UpdatedAt: now},
+		{ThreadID: "thr_1", StepID: stepTwoID, Stage: "eval", Title: "Eval", Status: "running", Active: true, OrderIndex: 2, EventCount: 3, CreatedAt: now, UpdatedAt: now.Add(time.Second)},
 	}).Error; err != nil {
 		t.Fatalf("create steps: %v", err)
 	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/steps" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(evoStepList{
+			ThreadID:     "thr_1",
+			ActiveStepID: stepTwoID,
+			Items: []evoStep{
+				{ThreadID: "thr_1", StepID: stepOneID, Stage: "dataset", Title: "Dataset", Status: "succeeded", Active: false, OrderIndex: 1, EventCount: 2, NextStepID: stepTwoID},
+				{ThreadID: "thr_1", StepID: stepTwoID, Stage: "eval", Title: "Eval", Status: "running", Active: true, OrderIndex: 2, EventCount: 3},
+			},
+			TotalSize: 2,
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/steps", nil)
 	req.Header.Set("X-User-Id", "u1")
@@ -1470,14 +1500,153 @@ func TestListThreadStepsReturnsActiveStep(t *testing.T) {
 	if rec.Code != http.StatusOK || response.Code != 0 {
 		t.Fatalf("expected ok response, status=%d code=%d message=%s", rec.Code, response.Code, response.Message)
 	}
-	if response.Data.ActiveStepID != "generate_image" {
-		t.Fatalf("expected active_step_id generate_image, got %q", response.Data.ActiveStepID)
+	if response.Data.ActiveStepID != stepTwoID {
+		t.Fatalf("expected active_step_id %s, got %q", stepTwoID, response.Data.ActiveStepID)
 	}
 	if response.Data.TotalSize != 2 || len(response.Data.Items) != 2 {
 		t.Fatalf("unexpected step list response: %#v", response.Data)
 	}
-	if response.Data.Items[0].NextStepRunID != "generate_image" {
-		t.Fatalf("expected first step next_step_run_id generate_image, got %q", response.Data.Items[0].NextStepRunID)
+	if response.Data.Items[0].NextStepID != stepTwoID {
+		t.Fatalf("expected first step next_step_id %s, got %q", stepTwoID, response.Data.Items[0].NextStepID)
+	}
+}
+
+func TestListThreadStepsSyncsProjectionStepsFromUpstream(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "running",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if err := db.DB.Create(&orm.AgentThreadStep{
+		ThreadID:   "thr_1",
+		StepID:     "stale",
+		Title:      "Stale",
+		Status:     "running",
+		Active:     true,
+		OrderIndex: 9,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}).Error; err != nil {
+		t.Fatalf("create stale step: %v", err)
+	}
+
+	stepOneID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+	stepTwoID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/steps" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(evoStepList{
+			ThreadID:     "thr_1",
+			ActiveStepID: stepTwoID,
+			Items: []evoStep{
+				{ThreadID: "thr_1", StepID: stepOneID, Stage: "dataset", Title: "dataset", Status: "completed", Active: false, OrderIndex: 0, EventCount: 4, NextStepID: stepTwoID},
+				{ThreadID: "thr_1", StepID: stepTwoID, Stage: "eval", Title: "eval", Status: "running", Active: true, OrderIndex: 1, EventCount: 1},
+			},
+			TotalSize: 2,
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/steps", nil)
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+	ListThreadSteps(rec, req)
+
+	var response struct {
+		Code int `json:"code"`
+		Data struct {
+			ActiveStepID string               `json:"active_step_id"`
+			Items        []threadStepResponse `json:"items"`
+			TotalSize    int                  `json:"total_size"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rec.Code != http.StatusOK || response.Code != 0 {
+		t.Fatalf("expected ok response, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if response.Data.ActiveStepID != stepTwoID || response.Data.TotalSize != 2 {
+		t.Fatalf("unexpected synced step list: %#v", response.Data)
+	}
+	if len(response.Data.Items) != 2 || response.Data.Items[0].StepID != stepOneID ||
+		response.Data.Items[0].Stage != "dataset" || response.Data.Items[0].NextStepID != stepTwoID {
+		t.Fatalf("unexpected first synced step: %#v", response.Data.Items)
+	}
+
+	var staleCount int64
+	if err := db.DB.Model(&orm.AgentThreadStep{}).Where("thread_id = ? AND step_id = ?", "thr_1", "stale").Count(&staleCount).Error; err != nil {
+		t.Fatalf("count stale steps: %v", err)
+	}
+	if staleCount != 0 {
+		t.Fatalf("expected stale local step to be deleted, got %d", staleCount)
+	}
+}
+
+func TestListThreadStepsClearsLocalStepsWhenUpstreamProjectionIsEmpty(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "running",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if err := db.DB.Create(&orm.AgentThreadStep{
+		ThreadID:  "thr_1",
+		StepID:    "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+		Status:    "running",
+		Active:    true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create local step: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/steps" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(evoStepList{ThreadID: "thr_1", Items: []evoStep{}})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/steps", nil)
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+	ListThreadSteps(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok response, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var count int64
+	if err := db.DB.Model(&orm.AgentThreadStep{}).Where("thread_id = ?", "thr_1").Count(&count).Error; err != nil {
+		t.Fatalf("count steps: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected local steps to be cleared, got %d", count)
 	}
 }
 
@@ -1496,18 +1665,20 @@ func TestListThreadStepRecordsFiltersStepThreadEvents(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
+	stepID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
+	otherStepID := "cccccccc-cccc-5ccc-8ccc-cccccccccccc"
 	records := []orm.AgentThreadRecord{
-		{ID: "record_1", ThreadID: "thr_1", StepID: "collect_material", StreamKind: streamKindThreadEvent, RecordKey: "rk1", EventName: "step.started", PayloadText: `{"seq":1}`, RawFrame: `{"seq":1}`, CreatedAt: now, UpdatedAt: now},
-		{ID: "record_2", ThreadID: "thr_1", StepID: "collect_material", StreamKind: streamKindMessage, RecordKey: "rk2", EventName: "message", PayloadText: `{"seq":2}`, RawFrame: `data: {"seq":2}`, CreatedAt: now, UpdatedAt: now},
-		{ID: "record_3", ThreadID: "thr_1", StepID: "generate_image", StreamKind: streamKindThreadEvent, RecordKey: "rk3", EventName: "step.started", PayloadText: `{"seq":3}`, RawFrame: `{"seq":3}`, CreatedAt: now, UpdatedAt: now},
+		{ID: "record_1", ThreadID: "thr_1", StepID: stepID, StreamKind: streamKindThreadEvent, RecordKey: "rk1", EventName: "step.started", PayloadText: `{"seq":1}`, RawFrame: `{"seq":1}`, CreatedAt: now, UpdatedAt: now},
+		{ID: "record_2", ThreadID: "thr_1", StepID: stepID, StreamKind: streamKindMessage, RecordKey: "rk2", EventName: "message", PayloadText: `{"seq":2}`, RawFrame: `data: {"seq":2}`, CreatedAt: now, UpdatedAt: now},
+		{ID: "record_3", ThreadID: "thr_1", StepID: otherStepID, StreamKind: streamKindThreadEvent, RecordKey: "rk3", EventName: "step.started", PayloadText: `{"seq":3}`, RawFrame: `{"seq":3}`, CreatedAt: now, UpdatedAt: now},
 	}
 	if err := db.DB.Create(&records).Error; err != nil {
 		t.Fatalf("create records: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/steps/collect_material/records", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/steps/"+stepID+"/records", nil)
 	req.Header.Set("X-User-Id", "u1")
-	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1", "step_id": "collect_material"})
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1", "step_id": stepID})
 	rec := httptest.NewRecorder()
 	ListThreadStepRecords(rec, req)
 
@@ -1526,14 +1697,41 @@ func TestListThreadStepRecordsFiltersStepThreadEvents(t *testing.T) {
 	if rec.Code != http.StatusOK || response.Code != 0 {
 		t.Fatalf("expected ok response, status=%d code=%d message=%s", rec.Code, response.Code, response.Message)
 	}
-	if response.Data.StepID != "collect_material" {
-		t.Fatalf("expected step_id collect_material, got %q", response.Data.StepID)
+	if response.Data.StepID != stepID {
+		t.Fatalf("expected step_id %s, got %q", stepID, response.Data.StepID)
 	}
 	if len(response.Data.Items) != 1 || response.Data.Items[0].ID != "record_1" {
 		t.Fatalf("unexpected step records: %#v", response.Data.Items)
 	}
 	if response.Data.Items[0].StreamKind != streamKindThreadEvent {
 		t.Fatalf("expected only thread_event records, got %q", response.Data.Items[0].StreamKind)
+	}
+}
+
+func TestListThreadRecordsRejectsNonProjectionStepQuery(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "completed",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/records?step_id=start:thr_1:1", nil)
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+	ListThreadRecords(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1667,9 +1865,12 @@ func TestStreamUpstreamThreadEventsTracksUpstreamIDWithoutForwarding(t *testing.
 func TestStreamUpstreamThreadEventsFiltersRequestedStep(t *testing.T) {
 	db := newAgentTestDB(t)
 	rec := httptest.NewRecorder()
-	stepOne := `{"type":"dataset.start","status":"running","step_run_id":"step_1"}`
-	stepTwo := `{"type":"eval.start","status":"running","step_run_id":"step_2"}`
-	stepTwoDone := `{"type":"done","status":"running","step_run_id":"step_2","next_step_run_id":"step_3"}`
+	stepOneID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+	stepTwoID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
+	stepThreeID := "cccccccc-cccc-5ccc-8ccc-cccccccccccc"
+	stepOne := `{"type":"dataset.start","stage":"dataset","status":"running","step_id":"` + stepOneID + `"}`
+	stepTwo := `{"type":"eval.start","stage":"eval","status":"running","step_id":"` + stepTwoID + `"}`
+	stepTwoDone := `{"type":"done","stage":"eval","status":"running","step_id":"` + stepTwoID + `","next_step_id":"` + stepThreeID + `"}`
 	body := strings.NewReader(strings.Join([]string{
 		"id: 1\nevent: message\ndata: " + stepOne + "\n\n",
 		"id: 2\nevent: message\ndata: " + stepTwo + "\n\n",
@@ -1677,7 +1878,7 @@ func TestStreamUpstreamThreadEventsFiltersRequestedStep(t *testing.T) {
 	}, ""))
 
 	var lastUpstreamEventID string
-	err := streamUpstreamThreadEvents(context.Background(), rec, rec, db.DB, "thr_1", "step_2", body, &lastUpstreamEventID, nil)
+	err := streamUpstreamThreadEvents(context.Background(), rec, rec, db.DB, "thr_1", stepTwoID, body, &lastUpstreamEventID, nil)
 	if !errors.Is(err, errThreadEventsDone) {
 		t.Fatalf("expected done stop error, got %v", err)
 	}
@@ -1687,8 +1888,8 @@ func TestStreamUpstreamThreadEventsFiltersRequestedStep(t *testing.T) {
 	if got := rec.Body.String(); got != want {
 		t.Fatalf("unexpected forwarded stream:\nwant: %q\ngot:  %q", want, got)
 	}
-	if strings.Contains(rec.Body.String(), "step_1") {
-		t.Fatalf("expected step_1 frame to be filtered, got %q", rec.Body.String())
+	if strings.Contains(rec.Body.String(), stepOneID) {
+		t.Fatalf("expected first step frame to be filtered, got %q", rec.Body.String())
 	}
 	if lastUpstreamEventID != "3" {
 		t.Fatalf("unexpected last upstream event id: %q", lastUpstreamEventID)
@@ -1696,56 +1897,84 @@ func TestStreamUpstreamThreadEventsFiltersRequestedStep(t *testing.T) {
 
 	var count int64
 	if err := db.DB.Model(&orm.AgentThreadRecord{}).
-		Where("thread_id = ? AND step_id = ?", "thr_1", "step_1").
+		Where("thread_id = ? AND step_id = ?", "thr_1", stepOneID).
 		Count(&count).Error; err != nil {
-		t.Fatalf("count step_1 records: %v", err)
+		t.Fatalf("count first step records: %v", err)
 	}
 	if count != 0 {
-		t.Fatalf("expected no step_1 records, got %d", count)
+		t.Fatalf("expected no first step records, got %d", count)
 	}
 	if err := db.DB.Model(&orm.AgentThreadRecord{}).
-		Where("thread_id = ? AND step_id = ?", "thr_1", "step_2").
+		Where("thread_id = ? AND step_id = ?", "thr_1", stepTwoID).
 		Count(&count).Error; err != nil {
-		t.Fatalf("count step_2 records: %v", err)
+		t.Fatalf("count second step records: %v", err)
 	}
 	if count != 2 {
-		t.Fatalf("expected 2 step_2 records, got %d", count)
+		t.Fatalf("expected 2 second step records, got %d", count)
 	}
 
 	var step orm.AgentThreadStep
-	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", "step_2").First(&step).Error; err != nil {
-		t.Fatalf("load step_2: %v", err)
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepTwoID).First(&step).Error; err != nil {
+		t.Fatalf("load second step: %v", err)
 	}
 	if step.Status != "succeeded" || step.Active || step.EventCount != 2 {
-		t.Fatalf("expected step_2 to be completed from filtered stream, got %#v", step)
+		t.Fatalf("expected second step to be completed from filtered stream, got %#v", step)
 	}
-	if step.NextStepRunID != "step_3" {
-		t.Fatalf("expected step_2 next_step_run_id step_3, got %q", step.NextStepRunID)
+	if step.NextStepID != stepThreeID {
+		t.Fatalf("expected second step next_step_id %s, got %q", stepThreeID, step.NextStepID)
 	}
 }
 
-func TestStreamUpstreamThreadEventsAssignsRequestedStepWhenFrameOmitsStep(t *testing.T) {
+func TestStreamUpstreamThreadEventsSkipsRequestedStepFrameWithoutProjectionStepID(t *testing.T) {
 	db := newAgentTestDB(t)
 	rec := httptest.NewRecorder()
 	body := strings.NewReader("id: 2\nevent: message\ndata: {\"type\":\"eval.start\",\"status\":\"running\"}\n\n")
+	stepID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
 
 	var lastUpstreamEventID string
-	if err := streamUpstreamThreadEvents(context.Background(), rec, rec, db.DB, "thr_1", "step_2", body, &lastUpstreamEventID, nil); err != nil {
+	if err := streamUpstreamThreadEvents(context.Background(), rec, rec, db.DB, "thr_1", stepID, body, &lastUpstreamEventID, nil); err != nil {
 		t.Fatalf("streamUpstreamThreadEvents returned error: %v", err)
 	}
 	if lastUpstreamEventID != "2" {
 		t.Fatalf("unexpected last upstream event id: %q", lastUpstreamEventID)
 	}
-	if got := rec.Body.String(); !strings.Contains(got, `"step_id":"step_2"`) || !strings.Contains(got, `"step_run_id":"step_2"`) {
-		t.Fatalf("expected requested step id to be injected into downstream event, got %q", got)
+	if got := rec.Body.String(); got != "" {
+		t.Fatalf("expected frame without projection step id to be skipped, got %q", got)
 	}
 
-	var record orm.AgentThreadRecord
-	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", "step_2").First(&record).Error; err != nil {
-		t.Fatalf("load step_2 record: %v", err)
+	var count int64
+	if err := db.DB.Model(&orm.AgentThreadRecord{}).Where("thread_id = ?", "thr_1").Count(&count).Error; err != nil {
+		t.Fatalf("count records: %v", err)
 	}
-	if !strings.Contains(record.PayloadText, `"step_id":"step_2"`) {
-		t.Fatalf("expected persisted payload to include step_id, got %q", record.PayloadText)
+	if count != 0 {
+		t.Fatalf("expected no persisted records, got %d", count)
+	}
+}
+
+func TestStreamThreadStepEventsRejectsNonProjectionStepID(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "running",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/events/start:thr_1:1", nil)
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1", "step_id": "start:thr_1:1"})
+	rec := httptest.NewRecorder()
+	StreamThreadStepEvents(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request for command_id-style step id, status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1764,6 +1993,7 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
+	stepID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
 
 	var mu sync.Mutex
 	calls := []string{}
@@ -1773,7 +2003,7 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 		mu.Unlock()
 
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/threads/thr_1/events:stream" && r.URL.Query().Get("step_id") == "step_1":
+		case r.Method == http.MethodGet && r.URL.Path == "/threads/thr_1/events:stream" && r.URL.Query().Get("step_id") == stepID:
 			http.Error(w, `{"detail":"closed"}`, http.StatusNotFound)
 		case r.Method == http.MethodGet && r.URL.Path == "/threads/thr_1":
 			_ = json.NewEncoder(w).Encode(evoThread{ThreadID: "thr_1", Status: "ended"})
@@ -1784,9 +2014,9 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 	defer server.Close()
 	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/events/step_1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/events/"+stepID, nil)
 	req.Header.Set("X-User-Id", "u1")
-	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1", "step_id": "step_1"})
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1", "step_id": stepID})
 	rec := httptest.NewRecorder()
 	StreamThreadStepEvents(rec, req)
 
@@ -1805,7 +2035,7 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 	gotCalls := append([]string(nil), calls...)
 	mu.Unlock()
 	wantCalls := []string{
-		"GET /threads/thr_1/events:stream?step_id=step_1",
+		"GET /threads/thr_1/events:stream?step_id=" + stepID,
 		"GET /threads/thr_1",
 	}
 	if fmt.Sprint(gotCalls) != fmt.Sprint(wantCalls) {

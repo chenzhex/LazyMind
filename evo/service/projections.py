@@ -135,6 +135,22 @@ class ProjectionService:
         target.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
         return target
 
+    def steps(self, thread_id: str) -> dict[str, Any]:
+        self._require_thread(thread_id)
+        store = self.runtime.store()
+        try:
+            rows = _source_event_rows(thread_id, store)
+        finally:
+            store.close()
+        items = _step_items(thread_id, rows)
+        active = next((item['step_id'] for item in reversed(items) if item['active']), '')
+        return {
+            'thread_id': thread_id,
+            'active_step_id': active,
+            'items': items,
+            'total_size': len(items),
+        }
+
     def events(self, thread_id: str, step_id: str = '', after_event_id: str = '') -> dict[str, Any]:
         config = self._require_thread(thread_id)
         store = self.runtime.store()
@@ -359,6 +375,39 @@ def _display_events(rows: list[dict[str, Any]], num_case: int) -> list[dict[str,
         if row['order'] == last_order_by_step[row['step_id']]:
             _append_transition(items, row)
     return items
+
+
+def _step_items(thread_id: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in sorted(rows, key=lambda item: item['order']):
+        step_id = row['step_id']
+        item = by_id.setdefault(
+            step_id,
+            {
+                'thread_id': thread_id,
+                'step_id': step_id,
+                'stage': row['stage'],
+                'title': row['stage'],
+                'order_index': len(by_id),
+                'event_count': 0,
+                'next_step_id': row.get('next_step_id') or '',
+                '_completed': False,
+            },
+        )
+        item['event_count'] += 1
+        item['next_step_id'] = row.get('next_step_id') or ''
+        ref = row['ref']
+        if ref.key.artifact_id == C.ROOTS[row['stage']]:
+            item['_completed'] = True
+    result = []
+    for item in by_id.values():
+        completed = bool(item.pop('_completed'))
+        item['status'] = 'completed' if completed else 'running'
+        item['active'] = not completed and not item['next_step_id']
+        if not item['next_step_id']:
+            item['next_step_id'] = ''
+        result.append(item)
+    return result
 
 
 def _append_transition(items: list[dict[str, Any]], row: Mapping[str, Any]) -> None:

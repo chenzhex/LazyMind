@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
@@ -9,6 +8,8 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+from filelock import FileLock
 
 PAYLOAD_LIMIT = 8192
 COLLECTION_LIMIT = 50
@@ -67,8 +68,7 @@ class RepairTraceStore:
     def append(self, thread_id: str, event: Mapping[str, Any], *, terminal: bool = False) -> dict[str, Any]:
         path = self._path(thread_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock_file(thread_id) as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        with self._lock(thread_id):
             last_seq = self._repair_and_last_seq(path)
             row = dict(event, seq=last_seq + 1, created_at=event.get('created_at') or time.time())
             clean = _clean(row)
@@ -85,8 +85,7 @@ class RepairTraceStore:
         path = self._path(thread_id)
         if not path.exists():
             return []
-        with self._lock_file(thread_id) as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_SH)
+        with self._lock(thread_id):
             rows = self._read_valid(path, repair=False)
         return [
             row for row in rows
@@ -97,8 +96,7 @@ class RepairTraceStore:
         path = self._path(thread_id)
         if not path.exists():
             return 0
-        with self._lock_file(thread_id) as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_SH)
+        with self._lock(thread_id):
             row = self._tail_row(path, repair=False)
             if row is None:
                 rows = self._read_valid(path, repair=False)
@@ -123,8 +121,8 @@ class RepairTraceStore:
     def _path(self, thread_id: str) -> Path:
         return self.root / f'{self._safe_thread_id(thread_id)}.jsonl'
 
-    def _lock_file(self, thread_id: str):
-        return (self.root / f'{self._safe_thread_id(thread_id)}.lock').open('a+', encoding='utf-8')
+    def _lock(self, thread_id: str) -> FileLock:
+        return FileLock(str(self.root / f'{self._safe_thread_id(thread_id)}.lock'))
 
     def _repair_and_last_seq(self, path: Path) -> int:
         if not path.exists():

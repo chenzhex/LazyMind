@@ -216,7 +216,6 @@ def build_abtest_comparison_root(
     candidate = EvalSummary.model_validate(candidate).model_dump(mode='json')
     origin = _eval_body(baseline)
     after = _eval_body(candidate)
-    delta = {key: round(float(after.get(key) or 0.0) - float(origin.get(key) or 0.0), 4) for key in AGGREGATES}
     verdict = 'review_candidate'
     status = 'completed'
     reasons: list[str] = []
@@ -224,10 +223,12 @@ def build_abtest_comparison_root(
         verdict = 'skipped'
         status = 'skipped'
         reasons.append('candidate evaluation skipped because repair patch is not verified')
+        after = _copy_case_trace_ids(after, origin)
     elif service.get('status') != 'ready':
         verdict = 'candidate_service_unavailable'
         status = 'failed'
         reasons.append('candidate service is not ready')
+    delta = {key: round(float(after.get(key) or 0.0) - float(origin.get(key) or 0.0), 4) for key in AGGREGATES}
     payload = {
         'run_id': str(run_id),
         'algo_id': str(baseline.get('algo_id') or ''),
@@ -244,6 +245,14 @@ def build_abtest_comparison_root(
 
 def _eval_body(summary: Mapping[str, Any]) -> dict[str, Any]:
     return {key: summary[key] for key in (*AGGREGATES, 'cases') if key in summary}
+
+
+def _copy_case_trace_ids(candidate: Mapping[str, Any], baseline: Mapping[str, Any]) -> dict[str, Any]:
+    trace_by_case = {row['case_id']: row['trace_id'] for row in baseline.get('cases', ())}
+    return dict(candidate) | {'cases': [
+        dict(row) | {'trace_id': trace_by_case.get(row['case_id'], row['trace_id'])}
+        for row in candidate.get('cases', ())
+    ]}
 
 
 def _score(value: object) -> float:
