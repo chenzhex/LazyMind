@@ -53,9 +53,6 @@ func derivedComposeProfileArgs() []string {
 	if enabledFromEnv("LAZYMIND_DEPLOY_MINERU") {
 		profiles = append(profiles, "mineru")
 	}
-	if isBuiltInServiceURI("LAZYMIND_MILVUS_URI", "http://milvus:19530") {
-		profiles = append(profiles, "milvus")
-	}
 	if localSegmentStoreUsesBuiltInOpenSearch() {
 		profiles = append(profiles, "opensearch")
 	}
@@ -261,6 +258,7 @@ func (m *ComposeManager) ComposeConfigJSON(ctx context.Context, repoRoot string)
 func localComposeEnv(cfg RuntimeConfig) []string {
 	return []string{
 		"LAZYMIND_FRONTEND_PORT=" + strconv.Itoa(cfg.FrontendPort),
+		"LAZYMIND_LOCAL_NETWORK_PROFILE=" + cfg.NetworkProfile,
 		"LAZYMIND_LOCAL_PROXY_PORT=" + strconv.Itoa(cfg.LocalProxy.Port),
 		"LAZYMIND_LOCAL_PROXY_AUTH_HOST_PORT=" + strconv.Itoa(cfg.LocalProxy.AuthHostPort),
 		"LAZYMIND_LOCAL_PROXY_CORE_HOST_PORT=" + strconv.Itoa(cfg.LocalProxy.CoreHostPort),
@@ -276,7 +274,7 @@ func localComposeEnv(cfg RuntimeConfig) []string {
 		"LAZYMIND_LOCAL_WORKER_PORT=" + strconv.Itoa(cfg.Algorithm.WorkerPort),
 		"LAZYMIND_LOCAL_CHAT_PORT=" + strconv.Itoa(cfg.Algorithm.ChatPort),
 		"LAZYMIND_LOCAL_EVO_PORT=" + strconv.Itoa(cfg.Algorithm.EvoPort),
-		"LAZYMIND_LOCAL_MILVUS_PORT=" + strconv.Itoa(cfg.Algorithm.MilvusPort),
+		"LAZYMIND_LOCAL_MILVUS_PORT=" + strconv.Itoa(cfg.ModeProfile.VectorStore.Port),
 		"LAZYMIND_LOCAL_OPENSEARCH_PORT=" + strconv.Itoa(cfg.Algorithm.OpenSearchPort),
 	}
 }

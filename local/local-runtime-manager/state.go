@@ -30,6 +30,8 @@ type ProcessComposeState struct {
 
 type RuntimeConfigSnapshot struct {
 	FrontendPort       int                       `json:"frontendPort,omitempty"`
+	ModeProfile        RuntimeModeProfileConfig  `json:"modeProfile,omitempty"`
+	NetworkProfile     string                    `json:"networkProfile,omitempty"`
 	LocalProxy         LocalProxyConfig          `json:"localProxy,omitempty"`
 	AuthService        AuthServiceConfig         `json:"authService,omitempty"`
 	Algorithm          AlgorithmConfig           `json:"algorithm,omitempty"`
@@ -122,6 +124,10 @@ func defaultRuntimeState(cfg RuntimeConfig, apiPort int, tokenPath string) Runti
 				Kind:   "host-process",
 				Status: "stopped",
 			},
+			milvusLiteProcessName: {
+				Kind:   "host-process",
+				Status: "stopped",
+			},
 			docServerProcessName: {
 				Kind:   "host-process",
 				Status: "stopped",
@@ -150,10 +156,12 @@ func defaultRuntimeState(cfg RuntimeConfig, apiPort int, tokenPath string) Runti
 
 func snapshotRuntimeConfig(cfg RuntimeConfig) RuntimeConfigSnapshot {
 	return RuntimeConfigSnapshot{
-		FrontendPort: cfg.FrontendPort,
-		LocalProxy:   cfg.LocalProxy,
-		AuthService:  cfg.AuthService,
-		Algorithm:    cfg.Algorithm,
+		FrontendPort:   cfg.FrontendPort,
+		ModeProfile:    cfg.ModeProfile,
+		NetworkProfile: cfg.NetworkProfile,
+		LocalProxy:     cfg.LocalProxy,
+		AuthService:    cfg.AuthService,
+		Algorithm:      cfg.Algorithm,
 		FileWatcher: FileWatcherConfigSnapshot{
 			Port:          cfg.FileWatcher.Port,
 			AgentID:       cfg.FileWatcher.AgentID,
@@ -170,6 +178,9 @@ func applyStateConfig(cfg RuntimeConfig, state RuntimeState) RuntimeConfig {
 	}
 	if state.Config.FrontendPort > 0 {
 		cfg.FrontendPort = state.Config.FrontendPort
+	}
+	if state.Config.ModeProfile.Name != "" {
+		cfg.ModeProfile = state.Config.ModeProfile
 	}
 	if state.Config.LocalProxy.Port > 0 {
 		cfg.LocalProxy = state.Config.LocalProxy
@@ -229,6 +240,10 @@ func newStateWithServiceStatus(state RuntimeState, serviceStatus string) Runtime
 	fileWatcher.Kind = "host-process"
 	fileWatcher.Status = serviceStatus
 	state.Services[fileWatcherProcessName] = fileWatcher
+	milvus := state.Services[milvusLiteProcessName]
+	milvus.Kind = "host-process"
+	milvus.Status = serviceStatus
+	state.Services[milvusLiteProcessName] = milvus
 	for _, name := range []string{
 		docServerProcessName,
 		processorServerProcessName,
@@ -315,7 +330,7 @@ func normalizeRuntimeServices(services map[string]RuntimeServiceState) map[strin
 		svc.Kind = "host-process"
 		normalized[coreProcessName] = svc
 	}
-	for _, name := range []string{scanControlPlaneProcessName, fileWatcherProcessName} {
+	for _, name := range []string{scanControlPlaneProcessName, fileWatcherProcessName, milvusLiteProcessName} {
 		if _, ok := services[name]; !ok {
 			normalized[name] = RuntimeServiceState{
 				Kind:   "host-process",

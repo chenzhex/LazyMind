@@ -15,6 +15,7 @@ const (
 	processComposePortEnvVar      = "LAZYMIND_PROCESS_COMPOSE_PORT"
 	localUpTimeoutEnvVar          = "LAZYMIND_LOCAL_UP_TIMEOUT"
 	localDownTimeoutEnvVar        = "LAZYMIND_LOCAL_DOWN_TIMEOUT"
+	localNetworkProfileEnvVar     = "LAZYMIND_LOCAL_NETWORK_PROFILE"
 	localProxyAddressEnvVar       = "LAZYMIND_LOCAL_PROXY_ADDRESS"
 	localProxyPortEnvVar          = "LAZYMIND_LOCAL_PROXY_PORT"
 	localProxyAuthHostPortEnvVar  = "LAZYMIND_LOCAL_PROXY_AUTH_HOST_PORT"
@@ -32,14 +33,19 @@ const (
 	localChatPortEnvVar           = "LAZYMIND_LOCAL_CHAT_PORT"
 	localEvoPortEnvVar            = "LAZYMIND_LOCAL_EVO_PORT"
 	localMilvusPortEnvVar         = "LAZYMIND_LOCAL_MILVUS_PORT"
+	localMilvusLiteDBPathEnvVar   = "LAZYMIND_LOCAL_MILVUS_DB_PATH"
 	localOpenSearchPortEnvVar     = "LAZYMIND_LOCAL_OPENSEARCH_PORT"
 	localEnableEvoEnvVar          = "LAZYMIND_LOCAL_ENABLE_EVO"
+	routerPortPoolStartEnvVar     = "LAZYMIND_ROUTER_PORT_POOL_START"
+	routerPortPoolEndEnvVar       = "LAZYMIND_ROUTER_PORT_POOL_END"
+	routerPortsPerInstanceEnvVar  = "LAZYMIND_ROUTER_PORTS_PER_INSTANCE"
 	frontendPortEnvVar            = "LAZYMIND_FRONTEND_PORT"
 	authServicePortEnvVar         = "LAZYMIND_AUTH_SERVICE_PORT"
 	authServicePythonEnvVar       = "LAZYMIND_AUTH_SERVICE_PYTHON"
 	authServiceUVEnvVar           = "LAZYMIND_AUTH_SERVICE_UV"
 	authServiceDatabaseURLEnvVar  = "LAZYMIND_AUTH_SERVICE_DATABASE_URL"
 	authServiceInstallDepsEnvVar  = "LAZYMIND_AUTH_SERVICE_INSTALL_DEPS"
+	localSQLiteDirEnvVar          = "LAZYMIND_LOCAL_SQLITE_DIR"
 	caddyBinEnvVar                = "LAZYMIND_CADDY_BIN"
 	caddyVersionEnvVar            = "LAZYMIND_CADDY_VERSION"
 	defaultProfile                = "linux-browser"
@@ -49,7 +55,8 @@ const (
 	defaultLocalUpTimeout         = 30 * 60
 	defaultLocalDownTimeout       = 2 * 60
 	defaultFrontendPort           = 8090
-	defaultLocalProxyAddress      = "0.0.0.0"
+	defaultLocalNetworkProfile    = "localhost"
+	defaultLocalProxyAddress      = "127.0.0.1"
 	defaultLocalProxyPort         = 5024
 	defaultLocalProxyAuthHostPort = 18000
 	defaultLocalProxyCoreHostPort = 18001
@@ -64,6 +71,8 @@ const (
 	defaultLocalWorkerPort        = 18005
 	defaultLocalMilvusPort        = 19530
 	defaultLocalOpenSearchPort    = 19200
+	defaultRouterPortPoolStart    = 18100
+	defaultRouterPortsPerInstance = 100
 	stateFileName                 = "runtime-state.json"
 	composeGeneratedFileName      = "process-compose.generated.yaml"
 	serviceEndpointsJSONName      = "service-endpoints.json"
@@ -96,6 +105,7 @@ const (
 	algoProcessName               = "lazyllm-algo"
 	chatProcessName               = "chat"
 	evoProcessName                = "evo-api"
+	milvusLiteProcessName         = "milvus-lite"
 )
 
 type RuntimePaths struct {
@@ -115,10 +125,14 @@ type RuntimePaths struct {
 	AuthServicePIDFile       string
 	AuthServiceVenvDir       string
 	AuthServiceStateDir      string
+	AuthServiceDBPath        string
 	CoreLog                  string
 	CorePIDFile              string
 	CoreBin                  string
 	CoreStateDir             string
+	CoreDBPath               string
+	LazyLLMDBPath            string
+	ScanDBPath               string
 	ScanControlPlaneLog      string
 	ScanControlPlanePIDFile  string
 	ScanControlPlaneBin      string
@@ -135,6 +149,9 @@ type RuntimePaths struct {
 	AlgoLog                  string
 	ChatLog                  string
 	EvoLog                   string
+	MilvusLiteLog            string
+	MilvusLitePIDFile        string
+	MilvusLiteDBPath         string
 	LocalProxyBin            string
 	CaddyBin                 string
 	LocalProxyConfig         string
@@ -153,8 +170,10 @@ type RuntimeConfig struct {
 	Profile            string
 	RepoRoot           string
 	RuntimeRoot        string
+	ModeProfile        RuntimeModeProfileConfig
 	ProcessComposePort int
 	FrontendPort       int
+	NetworkProfile     string
 	LocalProxy         LocalProxyConfig
 	AuthService        AuthServiceConfig
 	CaddyVersion       string
@@ -187,6 +206,19 @@ type FileWatcherConfig struct {
 	HostPathStyle string
 }
 
+type RuntimeModeProfileConfig struct {
+	Name        string
+	VectorStore VectorStoreConfig
+}
+
+type VectorStoreConfig struct {
+	Engine         string
+	Endpoint       string
+	Port           int
+	ManagedProcess bool
+	DBPath         string
+}
+
 type AlgorithmConfig struct {
 	PostgresPort   int
 	DocPort        int
@@ -195,7 +227,6 @@ type AlgorithmConfig struct {
 	WorkerPort     int
 	ChatPort       int
 	EvoPort        int
-	MilvusPort     int
 	OpenSearchPort int
 	EnableEvo      bool
 }
@@ -269,18 +300,22 @@ func (a *localPortAllocator) envOrAvailable(envName string, fallback int) int {
 }
 
 func (a *localPortAllocator) envOrAvailableDefaultCanMove(envName string, fallback int) int {
+	return a.envOrAvailableDefaultCanMoveOn(envName, fallback, "127.0.0.1")
+}
+
+func (a *localPortAllocator) envOrAvailableDefaultCanMoveOn(envName string, fallback int, address string) int {
 	raw := strings.TrimSpace(os.Getenv(envName))
 	if raw == "" {
-		return a.availableFrom(fallback, 500)
+		return a.availableFromOn(fallback, 500, address)
 	}
 	port := envPort(envName, fallback)
 	if envBool(localPortsPinnedEnvVar, false) {
 		return a.reserve(port)
 	}
-	if port != fallback || localPortAvailable(port) {
+	if port != fallback || localPortAvailableOn(address, port) {
 		return a.reserve(port)
 	}
-	return a.availableFrom(fallback, 500)
+	return a.availableFromOn(fallback, 500, address)
 }
 
 func (a *localPortAllocator) firstEnvOrAvailable(envNames []string, fallback int) int {
@@ -293,11 +328,15 @@ func (a *localPortAllocator) firstEnvOrAvailable(envNames []string, fallback int
 }
 
 func (a *localPortAllocator) availableFrom(start int, attempts int) int {
+	return a.availableFromOn(start, attempts, "127.0.0.1")
+}
+
+func (a *localPortAllocator) availableFromOn(start int, attempts int, address string) int {
 	for port := start; port < start+attempts && port < 65536; port++ {
 		if _, ok := a.used[port]; ok {
 			continue
 		}
-		if !localPortAvailable(port) {
+		if !localPortAvailableOn(address, port) {
 			continue
 		}
 		return a.reserve(port)
@@ -306,7 +345,11 @@ func (a *localPortAllocator) availableFrom(start int, attempts int) int {
 }
 
 func localPortAvailable(port int) bool {
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	return localPortAvailableOn("127.0.0.1", port)
+}
+
+func localPortAvailableOn(address string, port int) bool {
+	ln, err := net.Listen("tcp", net.JoinHostPort(address, strconv.Itoa(port)))
 	if err != nil {
 		return false
 	}
@@ -356,6 +399,19 @@ func envBool(name string, fallback bool) bool {
 	}
 }
 
+func localNetworkProfile() (string, error) {
+	profile := strings.ToLower(strings.TrimSpace(os.Getenv(localNetworkProfileEnvVar)))
+	if profile == "" {
+		return defaultLocalNetworkProfile, nil
+	}
+	switch profile {
+	case "localhost", "lan":
+		return profile, nil
+	default:
+		return "", fmt.Errorf("%s must be localhost or lan", localNetworkProfileEnvVar)
+	}
+}
+
 func defaultFileWatcherWatchHostDir(repoRoot string) string {
 	raw := strings.TrimSpace(os.Getenv("LAZYMIND_FILE_WATCHER_WATCH_HOST_DIR"))
 	if raw == "" {
@@ -384,6 +440,19 @@ func defaultFileWatcherBaseRoot(repoRoot string) string {
 	return filepath.Clean(filepath.Join(repoRoot, raw))
 }
 
+func localRuntimeModeProfile(milvusPort int, milvusLiteDBPath string) RuntimeModeProfileConfig {
+	return RuntimeModeProfileConfig{
+		Name: "local",
+		VectorStore: VectorStoreConfig{
+			Engine:         "milvus-lite",
+			Endpoint:       "http://127.0.0.1:" + strconv.Itoa(milvusPort),
+			Port:           milvusPort,
+			ManagedProcess: true,
+			DBPath:         milvusLiteDBPath,
+		},
+	}
+}
+
 func defaultAuthServicePortValue() int {
 	if v := os.Getenv(localProxyAuthHostPortEnvVar); v != "" {
 		return envPort(localProxyAuthHostPortEnvVar, defaultLocalProxyAuthHostPort)
@@ -404,14 +473,19 @@ func defaultLocalProxyAuthHostPortValue() int {
 	return defaultLocalProxyAuthHostPort
 }
 
-func authServiceDatabaseURL(postgresPort int) string {
+func sqliteURL(path string) string {
+	return "sqlite:///" + filepath.ToSlash(path)
+}
+
+func sqliteDSN(path string) string {
+	return "file:" + filepath.ToSlash(path) + "?_journal_mode=WAL&_busy_timeout=30000&_foreign_keys=on"
+}
+
+func authServiceDatabaseURL(path string) string {
 	if v := strings.TrimSpace(os.Getenv(authServiceDatabaseURLEnvVar)); v != "" {
 		return v
 	}
-	if postgresPort <= 0 {
-		postgresPort = defaultLocalPostgresPort
-	}
-	return "postgresql+psycopg://root:123456@127.0.0.1:" + strconv.Itoa(postgresPort) + "/authservice"
+	return sqliteURL(path)
 }
 
 func serviceEndpointsFromConfig(cfg RuntimeConfig) ServiceEndpoints {
@@ -476,6 +550,7 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 
 	root := filepath.Clean(resolved)
 	runtimeRoot := filepath.Join(root, ".lazymind-local")
+	sqliteRoot := envText(localSQLiteDirEnvVar, filepath.Join(runtimeRoot, "stores", "sqlite"))
 	p := RuntimePaths{
 		RepoRoot:                 root,
 		RuntimeRoot:              runtimeRoot,
@@ -493,10 +568,14 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 		AuthServicePIDFile:       filepath.Join(runtimeRoot, "run", "auth-service.pid"),
 		AuthServiceVenvDir:       filepath.Join(runtimeRoot, "venvs", "auth-service"),
 		AuthServiceStateDir:      filepath.Join(runtimeRoot, "stores", "sqlite", "auth-state"),
+		AuthServiceDBPath:        filepath.Join(sqliteRoot, "auth", "authservice.db"),
 		CoreLog:                  filepath.Join(runtimeRoot, "logs", coreLogFileName),
 		CorePIDFile:              filepath.Join(runtimeRoot, "run", "core.pid"),
 		CoreBin:                  filepath.Join(runtimeRoot, "bin", "core"),
 		CoreStateDir:             filepath.Join(runtimeRoot, "stores", "sqlite", "core-state"),
+		CoreDBPath:               filepath.Join(sqliteRoot, "core", "core.db"),
+		LazyLLMDBPath:            filepath.Join(sqliteRoot, "lazyllm", "app.db"),
+		ScanDBPath:               filepath.Join(sqliteRoot, "scan", "scan_control_plane.db"),
 		ScanControlPlaneLog:      filepath.Join(runtimeRoot, "logs", scanControlPlaneProcessName+".log"),
 		ScanControlPlanePIDFile:  filepath.Join(runtimeRoot, "run", scanControlPlaneProcessName+".pid"),
 		ScanControlPlaneBin:      filepath.Join(runtimeRoot, "bin", scanControlPlaneProcessName),
@@ -513,6 +592,9 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 		AlgoLog:                  filepath.Join(runtimeRoot, "logs", algoProcessName+".log"),
 		ChatLog:                  filepath.Join(runtimeRoot, "logs", chatProcessName+".log"),
 		EvoLog:                   filepath.Join(runtimeRoot, "logs", evoProcessName+".log"),
+		MilvusLiteLog:            filepath.Join(runtimeRoot, "logs", milvusLiteProcessName+".log"),
+		MilvusLitePIDFile:        filepath.Join(runtimeRoot, "run", milvusLiteProcessName+".pid"),
+		MilvusLiteDBPath:         filepath.Join(runtimeRoot, "stores", "milvus", "lazymind.db"),
 		LocalProxyBin:            filepath.Join(runtimeRoot, "bin", "local-proxy"),
 		CaddyBin:                 filepath.Join(runtimeRoot, "bin", "caddy"),
 		LocalProxyConfig:         filepath.Join(root, localProxyConfigName),
@@ -527,8 +609,16 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 		AlgorithmPIDDir:          filepath.Join(runtimeRoot, "run", "algorithm"),
 	}
 	ports := newLocalPortAllocator()
+	networkProfile, err := localNetworkProfile()
+	if err != nil {
+		return RuntimeConfig{}, RuntimePaths{}, err
+	}
+	frontendBindCheckAddress := "127.0.0.1"
+	if networkProfile == "lan" {
+		frontendBindCheckAddress = "0.0.0.0"
+	}
 	processComposePort := ports.envOrAvailable(processComposePortEnvVar, defaultProcessComposePort)
-	frontendPort := ports.envOrAvailableDefaultCanMove(frontendPortEnvVar, defaultFrontendPort)
+	frontendPort := ports.envOrAvailableDefaultCanMoveOn(frontendPortEnvVar, defaultFrontendPort, frontendBindCheckAddress)
 	localProxyPort := ports.envOrAvailable(localProxyPortEnvVar, defaultLocalProxyPort)
 	authHostPort := ports.envOrAvailable(localProxyAuthHostPortEnvVar, defaultLocalProxyAuthHostPort)
 	coreHostPort := ports.firstEnvOrAvailable([]string{localCorePortEnvVar, localProxyCoreHostPortEnvVar}, defaultLocalProxyCoreHostPort)
@@ -543,12 +633,15 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 	openSearchPort := ports.envOrAvailable(localOpenSearchPortEnvVar, defaultLocalOpenSearchPort)
 	chatPort := ports.firstEnvOrAvailable([]string{localChatPortEnvVar, localProxyChatHostPortEnvVar}, defaultLocalProxyChatHostPort)
 	evoPort := ports.firstEnvOrAvailable([]string{localEvoPortEnvVar, localProxyEvoHostPortEnvVar}, defaultLocalProxyEvoHostPort)
+	milvusLiteDBPath := filepath.Clean(envText(localMilvusLiteDBPathEnvVar, p.MilvusLiteDBPath))
 	return RuntimeConfig{
 		Profile:            profile,
 		RepoRoot:           p.RepoRoot,
 		RuntimeRoot:        runtimeRoot,
+		ModeProfile:        localRuntimeModeProfile(milvusPort, milvusLiteDBPath),
 		ProcessComposePort: processComposePort,
 		FrontendPort:       frontendPort,
+		NetworkProfile:     networkProfile,
 		CaddyVersion:       envText(caddyVersionEnvVar, defaultCaddyVersion),
 		LocalProxy: LocalProxyConfig{
 			Address:      envText(localProxyAddressEnvVar, defaultLocalProxyAddress),
@@ -567,14 +660,13 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 			WorkerPort:     workerPort,
 			ChatPort:       chatPort,
 			EvoPort:        evoPort,
-			MilvusPort:     milvusPort,
 			OpenSearchPort: openSearchPort,
 			EnableEvo:      envBool(localEnableEvoEnvVar, false),
 		},
 		AuthService: AuthServiceConfig{
 			Port:        authHostPort,
 			Python:      envText(authServicePythonEnvVar, "python3"),
-			DatabaseURL: authServiceDatabaseURL(postgresPort),
+			DatabaseURL: authServiceDatabaseURL(p.AuthServiceDBPath),
 			InstallDeps: envBool(authServiceInstallDepsEnvVar, true),
 		},
 		FileWatcher: FileWatcherConfig{
@@ -596,7 +688,11 @@ func (p RuntimePaths) EnsureAllDirs() error {
 		p.BinDir,
 		filepath.Dir(p.AuthServicePIDFile),
 		p.AuthServiceStateDir,
+		filepath.Dir(p.AuthServiceDBPath),
 		p.CoreStateDir,
+		filepath.Dir(p.CoreDBPath),
+		filepath.Dir(p.LazyLLMDBPath),
+		filepath.Dir(p.ScanDBPath),
 		p.ScanControlPlaneStateDir,
 		p.ScanControlPlaneTempDir,
 		p.FileWatcherBaseRoot,
@@ -604,11 +700,21 @@ func (p RuntimePaths) EnsureAllDirs() error {
 		filepath.Dir(p.AlgorithmVenv),
 		p.AlgorithmHome,
 		p.AlgorithmPIDDir,
+		filepath.Dir(p.MilvusLiteDBPath),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
+	}
+	for _, d := range []string{
+		filepath.Dir(filepath.Dir(p.AuthServiceDBPath)),
+		filepath.Dir(p.AuthServiceDBPath),
+		filepath.Dir(p.CoreDBPath),
+		filepath.Dir(p.LazyLLMDBPath),
+		filepath.Dir(p.ScanDBPath),
+	} {
+		_ = os.Chmod(d, 0o777)
 	}
 	return nil
 }
