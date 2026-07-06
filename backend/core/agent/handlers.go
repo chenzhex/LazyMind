@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
@@ -51,13 +53,14 @@ type recordResponse struct {
 type threadStepResponse struct {
 	ThreadID      string     `json:"thread_id"`
 	StepID        string     `json:"step_id"`
+	Stage         string     `json:"stage,omitempty"`
 	Title         string     `json:"title,omitempty"`
 	Status        string     `json:"status"`
 	Active        bool       `json:"active"`
 	OrderIndex    int        `json:"order_index"`
 	EventCount    int64      `json:"event_count"`
 	CurrentTaskID string     `json:"current_task_id,omitempty"`
-	NextStepRunID string     `json:"next_step_run_id"`
+	NextStepID    string     `json:"next_step_id"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
 	EndedAt       *time.Time `json:"ended_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -253,6 +256,14 @@ func ListThreadRecords(w http.ResponseWriter, r *http.Request) {
 
 	streamKind := strings.TrimSpace(r.URL.Query().Get("stream_kind"))
 	stepID := strings.TrimSpace(r.URL.Query().Get("step_id"))
+	if stepID != "" {
+		normalizedStepID, err := normalizedProjectionStepID(stepID)
+		if err != nil {
+			common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		stepID = normalizedStepID
+	}
 	afterID := parseAfterID(r)
 	limit := parseRecordLimit(r.URL.Query().Get("limit"))
 
@@ -297,6 +308,10 @@ func ListThreadSteps(w http.ResponseWriter, r *http.Request) {
 		replyThreadLoadError(w, err)
 		return
 	}
+	if err := syncThreadStepsFromUpstream(r.Context(), r, db, threadID); err != nil {
+		common.ReplyErrWithData(w, "sync upstream projection steps failed", map[string]any{"detail": err.Error()}, evoProxyStatusCode(err))
+		return
+	}
 
 	var steps []orm.AgentThreadStep
 	if err := db.Where("thread_id = ?", threadID).
@@ -325,6 +340,83 @@ func ListThreadSteps(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func syncThreadStepsFromUpstream(ctx context.Context, r *http.Request, db *gorm.DB, threadID string) error {
+	steps, err := newEvoClient(forwardedUpstreamHeaders(r)).ListSteps(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	return db.Transaction(func(tx *gorm.DB) error {
+		if len(steps.Items) == 0 {
+			return tx.Where("thread_id = ?", threadID).Delete(&orm.AgentThreadStep{}).Error
+		}
+		stepIDs := make([]string, 0, len(steps.Items))
+		for _, item := range steps.Items {
+			stepID := strings.TrimSpace(item.StepID)
+			stepID, err := normalizedProjectionStepID(stepID)
+			if err != nil {
+				return err
+			}
+			stepIDs = append(stepIDs, stepID)
+			nextStepID := strings.TrimSpace(item.NextStepID)
+			if nextStepID != "" {
+				nextStepID, err = normalizedProjectionStepID(nextStepID)
+				if err != nil {
+					return err
+				}
+			}
+			stage := strings.TrimSpace(item.Stage)
+			title := strings.TrimSpace(item.Title)
+			if title == "" {
+				title = firstNonEmptyString(stage, stepID)
+			}
+			status := normalizeThreadStepStatus(item.Status, "")
+			active := item.Active && !isTerminalThreadStepStatus(status)
+			var endedAt *time.Time
+			if !active && isTerminalThreadStepStatus(status) {
+				endedAt = &now
+			}
+			step := orm.AgentThreadStep{
+				ThreadID:   threadID,
+				StepID:     stepID,
+				Stage:      stage,
+				Title:      title,
+				Status:     status,
+				Active:     active,
+				OrderIndex: item.OrderIndex,
+				EventCount: item.EventCount,
+				NextStepID: nextStepID,
+				StartedAt:  &now,
+				EndedAt:    endedAt,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			updates := map[string]any{
+				"stage":        stage,
+				"title":        title,
+				"status":       status,
+				"active":       active,
+				"order_index":  item.OrderIndex,
+				"event_count":  item.EventCount,
+				"next_step_id": nextStepID,
+				"updated_at":   now,
+			}
+			if active {
+				updates["ended_at"] = nil
+			} else if endedAt != nil {
+				updates["ended_at"] = gorm.Expr("COALESCE(agent_thread_steps.ended_at, ?)", endedAt)
+			}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "thread_id"}, {Name: "step_id"}},
+				DoUpdates: clause.Assignments(updates),
+			}).Create(&step).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("thread_id = ? AND step_id NOT IN ?", threadID, stepIDs).Delete(&orm.AgentThreadStep{}).Error
+	})
+}
+
 func ListThreadStepRecords(w http.ResponseWriter, r *http.Request) {
 	db := store.DB()
 	if db == nil {
@@ -337,6 +429,12 @@ func ListThreadStepRecords(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "step_id required", http.StatusBadRequest)
 		return
 	}
+	normalizedStepID, err := normalizedProjectionStepID(stepID)
+	if err != nil {
+		common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stepID = normalizedStepID
 	if _, err := loadUserThread(db, r, threadID); err != nil {
 		replyThreadLoadError(w, err)
 		return
@@ -455,7 +553,20 @@ func StreamThreadStepEvents(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "step_id required", http.StatusBadRequest)
 		return
 	}
-	streamThreadEvents(w, r, stepID)
+	normalizedStepID, err := normalizedProjectionStepID(stepID)
+	if err != nil {
+		common.ReplyErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	streamThreadEvents(w, r, normalizedStepID)
+}
+
+func normalizedProjectionStepID(stepID string) (string, error) {
+	value, err := uuid.Parse(strings.TrimSpace(stepID))
+	if err != nil {
+		return "", fmt.Errorf("step_id must be a projection UUID")
+	}
+	return value.String(), nil
 }
 
 func streamThreadEvents(w http.ResponseWriter, r *http.Request, stepID string) {
@@ -996,6 +1107,16 @@ func writeThreadEventStreamChunk(
 	requestedStepID := strings.TrimSpace(stepID)
 	if requestedStepID != "" {
 		if eventStepID == "" {
+			if !isDoneThreadEvent(chunk.Event) {
+				log.Logger.Info().
+					Str("thread_id", threadID).
+					Str("step_id", stepID).
+					Str("event_name", chunk.Event.EventName).
+					Str("upstream_event_id", chunk.UpstreamEventID).
+					Int("frame_index", chunk.FrameIndex).
+					Msg("agent thread step event without projection step id skipped")
+				return nil
+			}
 			eventStepID = requestedStepID
 			chunk.Event.RawFrame = threadEventRawFrameWithStepID(chunk.Event.RawFrame, requestedStepID)
 		} else if eventStepID != requestedStepID {
@@ -1110,10 +1231,6 @@ func threadEventRawFrameWithStepID(rawFrame, stepID string) string {
 	changed := false
 	if firstNonEmptyScalar(payload["step_id"]) == "" {
 		payload["step_id"] = stepID
-		changed = true
-	}
-	if firstNonEmptyScalar(payload["step_run_id"]) == "" {
-		payload["step_run_id"] = stepID
 		changed = true
 	}
 	if !changed {
@@ -1354,7 +1471,7 @@ func isDoneThreadEvent(event fetchedThreadEvent) bool {
 
 func threadEventStepID(event fetchedThreadEvent) string {
 	payload := parseJSONValue(event.RawFrame)
-	return extractStringByExactKeys(payload, "step_id", "step_run_id")
+	return extractStringByExactKeys(payload, "step_id")
 }
 
 func threadEventsStreamEndReason(readErr, ctxErr error) string {
@@ -1892,13 +2009,14 @@ func toThreadStepResponse(step orm.AgentThreadStep) threadStepResponse {
 	return threadStepResponse{
 		ThreadID:      step.ThreadID,
 		StepID:        step.StepID,
+		Stage:         step.Stage,
 		Title:         step.Title,
 		Status:        step.Status,
 		Active:        step.Active,
 		OrderIndex:    step.OrderIndex,
 		EventCount:    step.EventCount,
 		CurrentTaskID: step.CurrentTaskID,
-		NextStepRunID: step.NextStepRunID,
+		NextStepID:    step.NextStepID,
 		StartedAt:     step.StartedAt,
 		EndedAt:       step.EndedAt,
 		CreatedAt:     step.CreatedAt,

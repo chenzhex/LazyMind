@@ -50,6 +50,25 @@ type evoGateContent struct {
 	Content  any    `json:"content"`
 }
 
+type evoStep struct {
+	ThreadID   string `json:"thread_id"`
+	StepID     string `json:"step_id"`
+	Stage      string `json:"stage"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	Active     bool   `json:"active"`
+	OrderIndex int    `json:"order_index"`
+	EventCount int64  `json:"event_count"`
+	NextStepID string `json:"next_step_id"`
+}
+
+type evoStepList struct {
+	ThreadID     string    `json:"thread_id"`
+	ActiveStepID string    `json:"active_step_id"`
+	Items        []evoStep `json:"items"`
+	TotalSize    int       `json:"total_size"`
+}
+
 func newEvoClient(headers map[string]string) evoClient {
 	copied := make(map[string]string, len(headers))
 	for key, value := range headers {
@@ -107,6 +126,14 @@ func (c evoClient) MessagesURL(threadID string) string {
 func (c evoClient) ListGates(ctx context.Context, threadID string) (*evoGateList, error) {
 	var result evoGateList
 	if err := c.doJSON(ctx, http.MethodGet, "/threads/"+url.PathEscape(threadID)+"/gates", nil, nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c evoClient) ListSteps(ctx context.Context, threadID string) (*evoStepList, error) {
+	var result evoStepList
+	if err := c.doJSON(ctx, http.MethodGet, "/threads/"+url.PathEscape(threadID)+"/steps", nil, nil, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

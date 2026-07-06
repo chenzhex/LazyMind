@@ -148,6 +148,10 @@ def create_app() -> FastAPI:
     def gates(thread_id: str) -> dict[str, Any]:
         return service.projections.gates(thread_id)
 
+    @app.get('/threads/{thread_id}/steps')
+    def steps(thread_id: str) -> dict[str, Any]:
+        return service.projections.steps(thread_id)
+
     @app.get('/threads/{thread_id}/gates/{step}/versions/{version}:download')
     def gate_download(thread_id: str, step: str, version: int, format: str = 'json') -> FileResponse:  # noqa: A002
         path = service.projections.gate_download(thread_id, step, version, format)
@@ -281,13 +285,15 @@ def _event_stream(
                 }
             if not snapshot['items'] and await asyncio.to_thread(_thread_events_done, service, thread_id):
                 public = await asyncio.to_thread(service.threads.public_thread, thread_id, include_inputs=False)
-                yield {'id': last_event_id, 'event': 'done',
-                       'data': json.dumps({
-                           'thread_id': thread_id,
-                           'last_event_id': last_event_id,
-                           'status': public['status'],
-                           'current_step': public['current_step'],
-                       })}
+                payload = {
+                    'thread_id': thread_id,
+                    'last_event_id': last_event_id,
+                    'status': public['status'],
+                    'current_step': public['current_step'],
+                }
+                if snapshot.get('step_id'):
+                    payload['step_id'] = snapshot['step_id']
+                yield {'id': last_event_id, 'event': 'done', 'data': json.dumps(payload, ensure_ascii=False)}
                 break
             if await request.is_disconnected():
                 break

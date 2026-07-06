@@ -7,16 +7,14 @@ from typing import Any
 
 DEFAULT_ALLOWED_ROOTS = ('lazymind/chat',)
 DEFAULT_BLOCKED_ROOTS = ('tests', '.git', 'lazyllm', 'evo', 'data')
-POLICY_VIEW_KEYS = (
-    'allowed_roots',
-    'blocked_roots',
-    'target_case_budget',
-    'neighbor_case_budget',
-    'goodcase_guard_budget',
-    'cross_block_guard_budget',
-    'evidence_case_budget',
-    'seed_file_budget',
-)
+BUDGET_LIMITS = {
+    'target_case_budget': (8, 1, 30),
+    'neighbor_case_budget': (3, 0, 12),
+    'goodcase_guard_budget': (2, 0, 12),
+    'cross_block_guard_budget': (2, 0, 12),
+    'evidence_case_budget': (8, 1, 30),
+    'seed_file_budget': (5, 1, 10),
+}
 BLOCK_INVARIANTS = {
     'retrieval': ('do not change eval policy, case data, reference answers, or document ids',
                   'preserve chat API request/response contract and trace emission'),
@@ -39,16 +37,9 @@ def build_repair_plan(analysis: Mapping[str, Any], policy: Mapping[str, Any]) ->
     rows = [row for row in _items(analysis.get('rows')) if isinstance(row, Mapping)]
     allowed_roots = _roots(policy.get('allowed_roots'), DEFAULT_ALLOWED_ROOTS)
     blocked_roots = _roots(policy.get('blocked_roots'), DEFAULT_BLOCKED_ROOTS)
-    budgets = {
-        'target_case_budget': _bounded_int(policy.get('target_case_budget'), 8, 1, 30),
-        'neighbor_case_budget': _bounded_int(policy.get('neighbor_case_budget'), 3, 0, 12),
-        'goodcase_guard_budget': _bounded_int(policy.get('goodcase_guard_budget'), 2, 0, 12),
-        'cross_block_guard_budget': _bounded_int(policy.get('cross_block_guard_budget'), 2, 0, 12),
-        'evidence_case_budget': _bounded_int(policy.get('evidence_case_budget'), 8, 1, 30),
-        'seed_file_budget': _bounded_int(policy.get('seed_file_budget'), 5, 1, 10),
-    }
+    budgets = {key: _bounded_int(policy.get(key), *limits) for key, limits in BUDGET_LIMITS.items()}
     policy_view = {'allowed_roots': allowed_roots, 'blocked_roots': blocked_roots}
-    policy_view.update({key: budgets[key] for key in POLICY_VIEW_KEYS if key in budgets and key in policy})
+    policy_view.update({key: budgets[key] for key in budgets if key in policy})
 
     def empty_plan(code: str, blocked: bool = False) -> dict[str, Any]:
         return {
@@ -265,17 +256,12 @@ def build_repair_plan(analysis: Mapping[str, Any], policy: Mapping[str, Any]) ->
         'analysis_summary': {
             'id': str(analysis.get('id') or '').strip(),
             'total': int(_number(analysis.get('total'), 0.0)),
-            'issue_category_counts': dict(analysis.get('issue_category_counts'))
-            if isinstance(analysis.get('issue_category_counts'), Mapping) else {},
-            'issue_type_counts': dict(analysis.get('issue_type_counts'))
-            if isinstance(analysis.get('issue_type_counts'), Mapping) else {},
-            'affected_block_counts': dict(analysis.get('affected_block_counts'))
-            if isinstance(analysis.get('affected_block_counts'), Mapping) else {},
-            'failure_mode_counts': dict(analysis.get('failure_mode_counts'))
-            if isinstance(analysis.get('failure_mode_counts'), Mapping) else {},
+            'issue_category_counts': _dict(analysis.get('issue_category_counts')),
+            'issue_type_counts': _dict(analysis.get('issue_type_counts')),
+            'affected_block_counts': _dict(analysis.get('affected_block_counts')),
+            'failure_mode_counts': _dict(analysis.get('failure_mode_counts')),
             'top_failure_patterns': _items(analysis.get('top_failure_patterns'))[:10],
-            'trace_quality': dict(analysis.get('trace_quality'))
-            if isinstance(analysis.get('trace_quality'), Mapping) else {},
+            'trace_quality': _dict(analysis.get('trace_quality')),
             'repair_group_count': len(_items(analysis.get('repair_group_queue'))),
         },
         'events': [
@@ -327,11 +313,13 @@ def _path(value: Any) -> str:
 
 
 def _items(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
+    if isinstance(value, (list, tuple)):
         return list(value)
     return [] if value in (None, '') else [value]
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:

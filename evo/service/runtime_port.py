@@ -16,6 +16,7 @@ from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef, SQLiteArtifact
 from evo.operations.abtest import abtest_materializers
 from evo.operations.analysis import analysis_materializers
 from evo.operations.dataset import dataset_materializers
+from evo.operations.dataset.csv_loader import as_text, norm_text
 from evo.operations.eval import eval_materializers
 from evo.operations.repair import repair_materializers
 
@@ -48,7 +49,7 @@ class RuntimePort:
             store,
             default_evo_ops(spec.cases),
             {
-                **dataset_materializers(spec.cases),
+                **dataset_materializers(spec.cases, duplicate_questions=self._duplicate_case_questions),
                 **eval_materializers(),
                 **analysis_materializers(),
                 **repair_materializers(),
@@ -100,6 +101,24 @@ class RuntimePort:
             ref = store.effective_artifacts(run_id).get(ArtifactKey.of(C.RUN_CONFIG))
             record = store.get(run_id, ref) if ref is not None else None
             return record.value if record is not None and isinstance(record.value, Mapping) else None
+        finally:
+            store.close()
+
+    def _duplicate_case_questions(self, run_id: str, case_id: str, row: Mapping[str, Any]) -> list[str]:
+        question = norm_text(row.get('question'))
+        if not question:
+            return []
+        store = self.store()
+        try:
+            duplicates = []
+            for key, ref in store.effective_artifacts(run_id).items():
+                if key.artifact_id != C.EVAL_CASE or key.partition == case_id:
+                    continue
+                record = store.get(run_id, ref)
+                value = record.value if record is not None else None
+                if isinstance(value, Mapping) and norm_text(value.get('question')) == question:
+                    duplicates.append(as_text(value.get('question')))
+            return list(dict.fromkeys(item for item in duplicates if item))
         finally:
             store.close()
 
