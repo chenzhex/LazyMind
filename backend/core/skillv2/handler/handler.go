@@ -118,7 +118,7 @@ func ListTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []orm.SkillV2Skill
-	if err := db.WithContext(r.Context()).Select("tags").Where("owner_user_id = ?", userID).Find(&rows).Error; err != nil {
+	if err := db.WithContext(r.Context()).Select("tags").Where("owner_user_id = ? AND deleted_at IS NULL", userID).Find(&rows).Error; err != nil {
 		replyServiceError(w, err)
 		return
 	}
@@ -146,7 +146,7 @@ func ListCategories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []orm.SkillV2Skill
-	if err := db.WithContext(r.Context()).Select("category").Where("owner_user_id = ?", userID).Find(&rows).Error; err != nil {
+	if err := db.WithContext(r.Context()).Select("category").Where("owner_user_id = ? AND deleted_at IS NULL", userID).Find(&rows).Error; err != nil {
 		replyServiceError(w, err)
 		return
 	}
@@ -769,12 +769,24 @@ func RemoteFSContent(w http.ResponseWriter, r *http.Request) {
 	newRemoteFSHandler().Content(w, remoteRequestWithHeaderUser(r))
 }
 
+func RemoteFSDir(w http.ResponseWriter, r *http.Request) {
+	newRemoteFSHandler().Dir(w, remoteRequestWithHeaderUser(r))
+}
+
 func RemoteFSDelete(w http.ResponseWriter, r *http.Request) {
 	newRemoteFSHandler().DeletePath(w, remoteRequestWithHeaderUser(r))
 }
 
+func RemoteFSCopy(w http.ResponseWriter, r *http.Request) {
+	newRemoteFSHandler().Copy(w, remoteRequestWithHeaderUser(r))
+}
+
 func RemoteFSMove(w http.ResponseWriter, r *http.Request) {
 	newRemoteFSHandler().Move(w, remoteRequestWithHeaderUser(r))
+}
+
+func RemoteFSTrash(w http.ResponseWriter, r *http.Request) {
+	newRemoteFSHandler().Trash(w, remoteRequestWithHeaderUser(r))
 }
 
 func MarketInstall(w http.ResponseWriter, r *http.Request) {
@@ -950,7 +962,7 @@ func Share(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var source orm.SkillV2Skill
-	if err := db.WithContext(r.Context()).Where("id = ? AND owner_user_id = ?", skillID, userID).Take(&source).Error; err != nil {
+	if err := db.WithContext(r.Context()).Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", skillID, userID).Take(&source).Error; err != nil {
 		replyServiceError(w, err)
 		return
 	}
@@ -1343,7 +1355,7 @@ func requireOwnedRevision(w http.ResponseWriter, r *http.Request) (*gorm.DB, str
 
 func ensureSkillOwner(ctx context.Context, db *gorm.DB, skillID, userID string) error {
 	var row orm.SkillV2Skill
-	return db.WithContext(ctx).Select("id").Where("id = ? AND owner_user_id = ?", skillID, userID).Take(&row).Error
+	return db.WithContext(ctx).Select("id").Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", skillID, userID).Take(&row).Error
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {

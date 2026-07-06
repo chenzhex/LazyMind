@@ -148,7 +148,38 @@ func TestReplaceSkillContent_RejectsWhenDraftExists(t *testing.T) {
 	}
 }
 
-func TestDeleteSkill_RemovesSkillGraphAndKeepsSharedBlob(t *testing.T) {
+func TestDeleteSkill_TrashOnlyKeepsSkillGraph(t *testing.T) {
+	db := newSkillV2TestDB(t)
+	seedSkillWithHeadRevision(t, db, "skill1", "rev1")
+	svc := NewSkillService(SkillServiceDeps{DB: db, BlobStore: NewBlobStore(db, NewLocalObjectStore(t.TempDir())), Clock: fixedClock()})
+
+	if err := svc.DeleteSkill(context.Background(), DeleteSkillRequest{SkillID: "skill1", UserID: "user_001"}); err != nil {
+		t.Fatalf("DeleteSkill returned error: %v", err)
+	}
+	var row testSkillV2SkillRow
+	if err := db.Where("id = ?", "skill1").Take(&row).Error; err != nil {
+		t.Fatalf("query trashed skill: %v", err)
+	}
+	if row.DeletedAt == nil || row.DeletedBy == nil || *row.DeletedBy != "user_001" {
+		t.Fatalf("skill was not logically deleted: %#v", row)
+	}
+	for _, tc := range []struct {
+		table string
+		where string
+		args  []any
+	}{
+		{table: "skills", where: "id = ?", args: []any{"skill1"}},
+		{table: "skill_drafts", where: "skill_id = ?", args: []any{"skill1"}},
+		{table: "skill_revisions", where: "skill_id = ?", args: []any{"skill1"}},
+		{table: "skill_revision_entries", where: "revision_id = ?", args: []any{"rev1"}},
+	} {
+		if got := countRows(t, db, tc.table, tc.where, tc.args...); got == 0 {
+			t.Fatalf("%s graph rows were deleted by trash", tc.table)
+		}
+	}
+}
+
+func TestPurgeSkill_RemovesSkillGraphAndKeepsSharedBlob(t *testing.T) {
 	db := newSkillV2TestDB(t)
 	seedSkillWithHeadRevision(t, db, "skill1", "rev1")
 	seedSkillWithHeadRevision(t, db, "skill2", "rev2")
@@ -160,9 +191,22 @@ func TestDeleteSkill_RemovesSkillGraphAndKeepsSharedBlob(t *testing.T) {
 	if err := svc.DeleteSkill(context.Background(), DeleteSkillRequest{SkillID: "skill1", UserID: "user_001"}); err != nil {
 		t.Fatalf("DeleteSkill returned error: %v", err)
 	}
-	for _, table := range []string{"skills", "skill_drafts", "skill_draft_entries", "skill_revisions", "skill_revision_entries"} {
-		if got := countRows(t, db, table, "skill_id = ? OR id = ? OR revision_id = ?", "skill1", "skill1", "rev1"); got != 0 {
-			t.Fatalf("%s retained skill1 rows: %d", table, got)
+	if err := svc.PurgeSkill(context.Background(), PurgeSkillRequest{SkillID: "skill1", UserID: "user_001"}); err != nil {
+		t.Fatalf("PurgeSkill returned error: %v", err)
+	}
+	for _, tc := range []struct {
+		table string
+		where string
+		args  []any
+	}{
+		{table: "skills", where: "id = ?", args: []any{"skill1"}},
+		{table: "skill_drafts", where: "skill_id = ?", args: []any{"skill1"}},
+		{table: "skill_draft_entries", where: "skill_id = ?", args: []any{"skill1"}},
+		{table: "skill_revisions", where: "skill_id = ?", args: []any{"skill1"}},
+		{table: "skill_revision_entries", where: "revision_id = ?", args: []any{"rev1"}},
+	} {
+		if got := countRows(t, db, tc.table, tc.where, tc.args...); got != 0 {
+			t.Fatalf("%s retained skill1 rows: %d", tc.table, got)
 		}
 	}
 	if got := countRows(t, db, "skill_blobs", "hash = ?", sharedHash); got != 1 {

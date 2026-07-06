@@ -1019,14 +1019,11 @@ func revisionDTO(row skillRevisionRow) Revision {
 }
 
 func blobReferenced(tx *gorm.DB, hash string) (bool, error) {
-	var headRefs int64
-	if err := tx.Table("skill_revision_entries AS e").
-		Joins("JOIN skills AS s ON s.head_revision_id = e.revision_id").
-		Where("e.blob_hash = ?", hash).
-		Count(&headRefs).Error; err != nil {
+	var revisionRefs int64
+	if err := tx.Model(&skillRevisionEntryRow{}).Where("blob_hash = ?", hash).Count(&revisionRefs).Error; err != nil {
 		return false, err
 	}
-	if headRefs > 0 {
+	if revisionRefs > 0 {
 		return true, nil
 	}
 	var draftRefs int64

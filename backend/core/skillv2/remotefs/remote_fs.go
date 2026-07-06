@@ -2,7 +2,9 @@ package remotefs
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,10 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	skillhttperr "lazymind/core/skillv2/httperr"
 	"lazymind/core/skillv2/revision"
+	skillsearch "lazymind/core/skillv2/search"
 	skillservice "lazymind/core/skillv2/service"
 )
 
@@ -196,18 +200,117 @@ func (h *Handler) Content(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) DeletePath(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Dir(w http.ResponseWriter, r *http.Request) {
 	userID, taskID, ok := requireWriteParams(w, r)
 	if !ok {
 		return
 	}
-	parsed, skill, err := h.resolveSkillPath(r, userID)
+	var body struct {
+		Path      string `json:"path"`
+		Recursive bool   `json:"recursive"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		skillhttperr.Reply(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	parsed, err := parseRemotePath(body.Path)
 	if err != nil {
 		writeHTTPError(w, err)
 		return
 	}
+	if parsed.level == pathLevelRoot || parsed.level == pathLevelCategory {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	err = h.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		skill, err := h.skillForPathInDB(r.Context(), tx, userID, parsed)
+		if parsed.relPath == "" {
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			return h.createEmptyPackage(r.Context(), tx, userID, parsed)
+		}
+		if err != nil {
+			return err
+		}
+		if err := h.claimTask(r.Context(), tx, skill.ID, userID, taskID); err != nil {
+			return err
+		}
+		entries, err := h.entriesForSkill(r.Context(), tx, skill.ID)
+		if err != nil {
+			return err
+		}
+		if existing, ok := entries[parsed.relPath]; ok && existing.EntryType == "file" {
+			return conflict("target is a file")
+		}
+		if !body.Recursive {
+			parent := path.Dir(parsed.relPath)
+			if parent != "." && !directoryExists(parent, entries) {
+				return badRequest("parent directory does not exist")
+			}
+		}
+		return h.materializeDirs(tx, skill.ID, parsed.relPath, entries)
+	})
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *Handler) DeletePath(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	parsed, err := parseRemotePath(r.URL.Query().Get("path"))
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	if parsed.level != pathLevelSkill {
+		writeHTTPError(w, badRequest("path must include category and skill name"))
+		return
+	}
 	if parsed.relPath == "" {
-		writeHTTPError(w, badRequest("cannot delete skill root"))
+		if !truthy(r.URL.Query().Get("permanent")) || !truthy(r.URL.Query().Get("confirm")) {
+			writeHTTPError(w, badRequest("permanent delete requires permanent=true and confirm=true"))
+			return
+		}
+		skill, err := h.trashedSkillForPath(r.Context(), userID, parsed)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				if _, activeErr := h.skillForPath(r.Context(), userID, parsed); activeErr == nil {
+					writeHTTPError(w, badRequest("skill must be in trash before permanent delete"))
+					return
+				}
+			}
+			writeHTTPError(w, err)
+			return
+		}
+		svc := skillservice.NewSkillService(skillservice.SkillServiceDeps{
+			DB:        h.db,
+			BlobStore: h.blobStore.service,
+			Clock:     h.clock,
+		})
+		if err := svc.PurgeSkill(r.Context(), skillservice.PurgeSkillRequest{SkillID: skill.ID, UserID: userID}); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	taskID := r.URL.Query().Get("task_id")
+	if taskID == "" {
+		skillhttperr.Reply(w, "task_id is required", http.StatusBadRequest)
+		return
+	}
+	skill, err := h.skillForPath(r.Context(), userID, parsed)
+	if err != nil {
+		writeHTTPError(w, err)
 		return
 	}
 	err = h.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
@@ -225,15 +328,75 @@ func (h *Handler) DeletePath(w http.ResponseWriter, r *http.Request) {
 		if target.FromDraft && !target.FromHead {
 			return tx.Where("skill_id = ? AND (path = ? OR path LIKE ?)", skill.ID, parsed.relPath, parsed.relPath+"/%").Delete(&skillDraftEntryRow{}).Error
 		}
-		if err := tx.Where("skill_id = ? AND path LIKE ?", skill.ID, parsed.relPath+"/%").Delete(&skillDraftEntryRow{}).Error; err != nil {
+		return h.deleteMergedPath(tx, skill.ID, parsed.relPath, entries)
+	})
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *Handler) Copy(w http.ResponseWriter, r *http.Request) {
+	userID, taskID, ok := requireWriteParams(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Overwrite bool   `json:"overwrite"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		skillhttperr.Reply(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if body.Overwrite {
+		writeHTTPError(w, badRequest("overwrite is not supported"))
+		return
+	}
+	from, err := parseRemotePath(body.From)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	to, err := parseRemotePath(body.To)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	if from.level != pathLevelSkill || to.level != pathLevelSkill || from.relPath == "" || to.relPath == "" {
+		writeHTTPError(w, badRequest("copy requires package-internal paths"))
+		return
+	}
+	if samePackage(from, to) && to.relPath != from.relPath && strings.HasPrefix(to.relPath, from.relPath+"/") {
+		writeHTTPError(w, badRequest("cannot copy directory into its child"))
+		return
+	}
+	err = h.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		sourceSkill, err := h.skillForPathInDB(r.Context(), tx, userID, from)
+		if err != nil {
 			return err
 		}
-		return tx.Save(&skillDraftEntryRow{
-			SkillID:   skill.ID,
-			Path:      parsed.relPath,
-			Op:        "delete",
-			UpdatedAt: h.clock.Now(),
-		}).Error
+		targetSkill, err := h.skillForPathInDB(r.Context(), tx, userID, to)
+		if err != nil {
+			return err
+		}
+		if err := h.claimTask(r.Context(), tx, targetSkill.ID, userID, taskID); err != nil {
+			return err
+		}
+		sourceEntries, err := h.entriesForSkill(r.Context(), tx, sourceSkill.ID)
+		if err != nil {
+			return err
+		}
+		targetEntries := sourceEntries
+		if sourceSkill.ID != targetSkill.ID {
+			targetEntries, err = h.entriesForSkill(r.Context(), tx, targetSkill.ID)
+			if err != nil {
+				return err
+			}
+		}
+		return h.copyMergedPath(tx, targetSkill.ID, from.relPath, to.relPath, sourceEntries, targetEntries)
 	})
 	if err != nil {
 		writeHTTPError(w, err)
@@ -265,61 +428,102 @@ func (h *Handler) Move(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, err)
 		return
 	}
-	if from.level != pathLevelSkill || to.level != pathLevelSkill || from.relPath == "" || to.relPath == "" {
-		writeHTTPError(w, badRequest("move requires file paths"))
+	if from.level != pathLevelSkill || to.level != pathLevelSkill {
+		writeHTTPError(w, badRequest("move requires skill paths"))
 		return
 	}
-	if from.category != to.category || from.skillName != to.skillName {
-		writeHTTPError(w, badRequest("cross-skill move is not supported"))
+	if from.relPath == "" || to.relPath == "" {
+		if from.relPath == "" && to.relPath == "" {
+			if err := h.movePackageRoot(r.Context(), userID, from, to); err != nil {
+				writeHTTPError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
+		writeHTTPError(w, badRequest("cannot move between package root and file path"))
 		return
 	}
-	if to.relPath != from.relPath && strings.HasPrefix(to.relPath, from.relPath+"/") {
+	if samePackage(from, to) && to.relPath != from.relPath && strings.HasPrefix(to.relPath, from.relPath+"/") {
 		writeHTTPError(w, badRequest("cannot move directory into its child"))
 		return
 	}
-	skill, err := h.skillForPath(r.Context(), userID, from)
+	err = h.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		sourceSkill, err := h.skillForPathInDB(r.Context(), tx, userID, from)
+		if err != nil {
+			return err
+		}
+		targetSkill, err := h.skillForPathInDB(r.Context(), tx, userID, to)
+		if err != nil {
+			return err
+		}
+		if err := h.claimTask(r.Context(), tx, sourceSkill.ID, userID, taskID); err != nil {
+			return err
+		}
+		if sourceSkill.ID != targetSkill.ID {
+			if err := h.claimTask(r.Context(), tx, targetSkill.ID, userID, taskID); err != nil {
+				return err
+			}
+		}
+		sourceEntries, err := h.entriesForSkill(r.Context(), tx, sourceSkill.ID)
+		if err != nil {
+			return err
+		}
+		targetEntries := sourceEntries
+		if sourceSkill.ID != targetSkill.ID {
+			targetEntries, err = h.entriesForSkill(r.Context(), tx, targetSkill.ID)
+			if err != nil {
+				return err
+			}
+		}
+		if err := h.copyMergedPath(tx, targetSkill.ID, from.relPath, to.relPath, sourceEntries, targetEntries); err != nil {
+			return err
+		}
+		return h.deleteMergedPath(tx, sourceSkill.ID, from.relPath, sourceEntries)
+	})
 	if err != nil {
 		writeHTTPError(w, err)
 		return
 	}
-	err = h.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-		if err := h.claimTask(r.Context(), tx, skill.ID, userID, taskID); err != nil {
-			return err
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *Handler) Trash(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	pathValue := r.URL.Query().Get("path")
+	if pathValue == "" {
+		var body struct {
+			Path string `json:"path"`
 		}
-		entries, err := h.entriesForSkill(r.Context(), tx, skill.ID)
-		if err != nil {
-			return err
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			skillhttperr.Reply(w, "invalid json", http.StatusBadRequest)
+			return
 		}
-		target, ok := entries[from.relPath]
-		if !ok {
-			return gorm.ErrRecordNotFound
-		}
-		if _, exists := entries[to.relPath]; exists {
-			return conflict("target already exists")
-		}
-		parent := path.Dir(to.relPath)
-		if parent != "." {
-			if parentEntry, ok := entries[parent]; ok && parentEntry.EntryType != "dir" {
-				return badRequest("target parent does not exist")
-			}
-			if !directoryExists(parent, entries) {
-				return badRequest("target parent does not exist")
-			}
-		}
-		if target.EntryType == "dir" {
-			return h.moveDirectory(tx, skill.ID, from.relPath, to.relPath, entries)
-		}
-		if err := tx.Where("skill_id = ? AND path = ?", skill.ID, from.relPath).Delete(&skillDraftEntryRow{}).Error; err != nil {
-			return err
-		}
-		if target.FromHead {
-			if err := tx.Save(&skillDraftEntryRow{SkillID: skill.ID, Path: from.relPath, Op: "delete", UpdatedAt: h.clock.Now()}).Error; err != nil {
-				return err
-			}
-		}
-		return tx.Save(draftEntryFromMerged(skill.ID, to.relPath, target, h.clock.Now())).Error
-	})
+		pathValue = body.Path
+	}
+	parsed, err := parseRemotePath(pathValue)
 	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	if parsed.level != pathLevelSkill || parsed.relPath != "" {
+		writeHTTPError(w, badRequest("trash requires a skill package root"))
+		return
+	}
+	skill, err := h.skillForPath(r.Context(), userID, parsed)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	svc := skillservice.NewSkillService(skillservice.SkillServiceDeps{
+		DB:        h.db,
+		BlobStore: h.blobStore.service,
+		Clock:     h.clock,
+	})
+	if err := svc.TrashSkill(r.Context(), skillservice.DeleteSkillRequest{SkillID: skill.ID, UserID: userID}); err != nil {
 		writeHTTPError(w, err)
 		return
 	}
@@ -401,9 +605,10 @@ func (h *Handler) writeContent(w http.ResponseWriter, r *http.Request) {
 		if existing, ok := entries[parsed.relPath]; ok && existing.EntryType == "dir" {
 			return badRequest("cannot write file over directory")
 		}
-		for p, entry := range entries {
-			if entry.EntryType == "file" && isAncestorPath(p, parsed.relPath) {
-				return badRequest("parent path is a file")
+		parent := path.Dir(parsed.relPath)
+		if parent != "." {
+			if err := h.materializeDirs(tx, skill.ID, parent, entries); err != nil {
+				return err
 			}
 		}
 		blob, err := h.blobStore.service.Put(r.Context(), tx, parsed.relPath, data, h.clock)
@@ -445,14 +650,28 @@ func (h *Handler) resolveSkillPath(r *http.Request, userID string) (remotePath, 
 }
 
 func (h *Handler) skillForPath(ctx context.Context, userID string, parsed remotePath) (skillRow, error) {
+	return h.skillForPathInDB(ctx, h.db, userID, parsed)
+}
+
+func (h *Handler) skillForPathInDB(ctx context.Context, db *gorm.DB, userID string, parsed remotePath) (skillRow, error) {
 	var skill skillRow
-	err := h.db.WithContext(ctx).Where("owner_user_id = ? AND category = ? AND skill_name = ?", userID, parsed.category, parsed.skillName).Take(&skill).Error
+	err := db.WithContext(ctx).
+		Where("owner_user_id = ? AND relative_root = ? AND deleted_at IS NULL", userID, parsed.packageRoot()).
+		Take(&skill).Error
+	return skill, err
+}
+
+func (h *Handler) trashedSkillForPath(ctx context.Context, userID string, parsed remotePath) (skillRow, error) {
+	var skill skillRow
+	err := h.db.WithContext(ctx).
+		Where("owner_user_id = ? AND relative_root = ? AND deleted_at IS NOT NULL", userID, parsed.packageRoot()).
+		Take(&skill).Error
 	return skill, err
 }
 
 func (h *Handler) listCategories(w http.ResponseWriter, r *http.Request, userID string) {
 	var rows []skillRow
-	if err := h.db.WithContext(r.Context()).Where("owner_user_id = ?", userID).Order("category ASC").Find(&rows).Error; err != nil {
+	if err := h.db.WithContext(r.Context()).Where("owner_user_id = ? AND deleted_at IS NULL", userID).Order("category ASC").Find(&rows).Error; err != nil {
 		writeHTTPError(w, err)
 		return
 	}
@@ -469,7 +688,7 @@ func (h *Handler) listCategories(w http.ResponseWriter, r *http.Request, userID 
 
 func (h *Handler) listSkills(w http.ResponseWriter, r *http.Request, userID, category string) {
 	var rows []skillRow
-	if err := h.db.WithContext(r.Context()).Where("owner_user_id = ? AND category = ?", userID, category).Order("skill_name ASC").Find(&rows).Error; err != nil {
+	if err := h.db.WithContext(r.Context()).Where("owner_user_id = ? AND category = ? AND deleted_at IS NULL", userID, category).Order("skill_name ASC").Find(&rows).Error; err != nil {
 		writeHTTPError(w, err)
 		return
 	}
@@ -478,6 +697,58 @@ func (h *Handler) listSkills(w http.ResponseWriter, r *http.Request, userID, cat
 		items = append(items, listItem{Name: row.SkillName, Path: "skills/" + row.Category + "/" + row.SkillName, Type: "dir"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) createEmptyPackage(ctx context.Context, tx *gorm.DB, userID string, parsed remotePath) error {
+	var conflicts int64
+	if err := tx.WithContext(ctx).Model(&skillRow{}).
+		Where("owner_user_id = ? AND relative_root = ? AND deleted_at IS NULL", userID, parsed.packageRoot()).
+		Count(&conflicts).Error; err != nil {
+		return err
+	}
+	if conflicts > 0 {
+		return conflict("skill package already exists")
+	}
+	now := h.clock.Now()
+	skillID := uuid.NewString()
+	revisionID := uuid.NewString()
+	if err := tx.WithContext(ctx).Create(&skillRow{
+		ID:                 skillID,
+		OwnerUserID:        userID,
+		CreateUserID:       userID,
+		Category:           parsed.category,
+		SkillName:          parsed.skillName,
+		Tags:               []byte("[]"),
+		RelativeRoot:       parsed.packageRoot(),
+		SkillMDPath:        "SKILL.md",
+		HeadRevisionID:     &revisionID,
+		Version:            1,
+		AutoEvoApplyStatus: "idle",
+		IsEnabled:          true,
+		UpdateStatus:       "up_to_date",
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}).Error; err != nil {
+		return err
+	}
+	if err := tx.WithContext(ctx).Create(&skillRevisionRow{
+		ID:           revisionID,
+		SkillID:      skillID,
+		RevisionNo:   1,
+		TreeHash:     hashRemoteTree(nil),
+		ChangeSource: "create",
+		CreatedBy:    nullableString(userID),
+		CreatedAt:    now,
+	}).Error; err != nil {
+		return err
+	}
+	return tx.WithContext(ctx).Create(&skillDraftRow{
+		SkillID:        skillID,
+		BaseRevisionID: &revisionID,
+		Version:        1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}).Error
 }
 
 func (h *Handler) claimTask(ctx context.Context, tx *gorm.DB, skillID, userID, taskID string) error {
@@ -577,33 +848,129 @@ func (h *Handler) entriesForSkill(ctx context.Context, db *gorm.DB, skillID stri
 	return entries, nil
 }
 
-func (h *Handler) moveDirectory(tx *gorm.DB, skillID, from, to string, entries map[string]mergedEntry) error {
-	moved := false
+func (h *Handler) materializeDirs(tx *gorm.DB, skillID, dir string, entries map[string]mergedEntry) error {
+	if dir == "" || dir == "." {
+		return nil
+	}
+	parts := strings.Split(dir, "/")
+	current := ""
+	for _, part := range parts {
+		if current == "" {
+			current = part
+		} else {
+			current = current + "/" + part
+		}
+		if entry, ok := entries[current]; ok {
+			if entry.EntryType != "dir" {
+				return conflict("parent path is a file")
+			}
+			continue
+		}
+		row := &skillDraftEntryRow{
+			SkillID:   skillID,
+			Path:      current,
+			Op:        "upsert",
+			EntryType: "dir",
+			FileType:  "directory",
+			Mode:      0o755,
+			UpdatedAt: h.clock.Now(),
+		}
+		if err := tx.Save(row).Error; err != nil {
+			return err
+		}
+		entries[current] = mergedEntry{Path: current, EntryType: "dir", FileType: "directory", Mode: 0o755, FromDraft: true}
+	}
+	return nil
+}
+
+func (h *Handler) copyMergedPath(tx *gorm.DB, targetSkillID, from, to string, sourceEntries, targetEntries map[string]mergedEntry) error {
+	source, ok := sourceEntries[from]
+	if !ok {
+		return gorm.ErrRecordNotFound
+	}
+	parent := path.Dir(to)
+	if parent != "." {
+		if err := h.materializeDirs(tx, targetSkillID, parent, targetEntries); err != nil {
+			return err
+		}
+	}
+	moved := h.entriesUnderPath(from, to, source, sourceEntries)
+	for _, entry := range moved {
+		if _, exists := targetEntries[entry.Path]; exists {
+			return conflict("target already exists")
+		}
+	}
+	for _, entry := range moved {
+		if err := tx.Save(draftEntryFromMerged(targetSkillID, entry.Path, entry, h.clock.Now())).Error; err != nil {
+			return err
+		}
+		targetEntries[entry.Path] = entry
+	}
+	return nil
+}
+
+func (h *Handler) entriesUnderPath(from, to string, source mergedEntry, entries map[string]mergedEntry) []mergedEntry {
+	moved := []mergedEntry{}
 	for p, entry := range entries {
 		if p != from && !isDescendantPath(from, p) {
 			continue
 		}
 		rel := strings.TrimPrefix(p, from)
-		newPath := to + rel
-		if _, exists := entries[newPath]; exists {
-			return conflict("target already exists")
-		}
-		if entry.FromHead {
-			if err := tx.Save(&skillDraftEntryRow{SkillID: skillID, Path: p, Op: "delete", UpdatedAt: h.clock.Now()}).Error; err != nil {
-				return err
-			}
-		} else if err := tx.Where("skill_id = ? AND path = ?", skillID, p).Delete(&skillDraftEntryRow{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Save(draftEntryFromMerged(skillID, newPath, entry, h.clock.Now())).Error; err != nil {
-			return err
-		}
-		moved = true
+		entry.Path = to + rel
+		moved = append(moved, entry)
 	}
-	if !moved {
+	if len(moved) == 0 {
+		source.Path = to
+		moved = append(moved, source)
+	}
+	sort.Slice(moved, func(i, j int) bool { return moved[i].Path < moved[j].Path })
+	return moved
+}
+
+func (h *Handler) deleteMergedPath(tx *gorm.DB, skillID, relPath string, entries map[string]mergedEntry) error {
+	target, ok := entries[relPath]
+	if !ok {
 		return gorm.ErrRecordNotFound
 	}
-	return nil
+	if target.FromDraft && !target.FromHead {
+		return tx.Where("skill_id = ? AND (path = ? OR path LIKE ?)", skillID, relPath, relPath+"/%").Delete(&skillDraftEntryRow{}).Error
+	}
+	if err := tx.Where("skill_id = ? AND path LIKE ?", skillID, relPath+"/%").Delete(&skillDraftEntryRow{}).Error; err != nil {
+		return err
+	}
+	return tx.Save(&skillDraftEntryRow{
+		SkillID:   skillID,
+		Path:      relPath,
+		Op:        "delete",
+		UpdatedAt: h.clock.Now(),
+	}).Error
+}
+
+func (h *Handler) movePackageRoot(ctx context.Context, userID string, from, to remotePath) error {
+	return h.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		skill, err := h.skillForPathInDB(ctx, tx, userID, from)
+		if err != nil {
+			return err
+		}
+		var conflicts int64
+		if err := tx.Model(&skillRow{}).
+			Where("owner_user_id = ? AND relative_root = ? AND deleted_at IS NULL AND id <> ?", userID, to.packageRoot(), skill.ID).
+			Count(&conflicts).Error; err != nil {
+			return err
+		}
+		if conflicts > 0 {
+			return conflict("target skill package already exists")
+		}
+		if err := tx.Model(&skillRow{}).Where("id = ? AND deleted_at IS NULL", skill.ID).Updates(map[string]any{
+			"category":      to.category,
+			"skill_name":    to.skillName,
+			"relative_root": to.packageRoot(),
+			"updated_at":    h.clock.Now(),
+		}).Error; err != nil {
+			return err
+		}
+		return skillsearch.RebuildSkillTx(ctx, tx, skill.ID, h.clock.Now())
+	})
 }
 
 func (h *Handler) blobData(blob skillBlobRow) ([]byte, error) {
@@ -646,6 +1013,14 @@ type remotePath struct {
 	category  string
 	skillName string
 	relPath   string
+}
+
+func (p remotePath) packageRoot() string {
+	return path.Join(p.category, p.skillName)
+}
+
+func samePackage(a, b remotePath) bool {
+	return a.category == b.category && a.skillName == b.skillName
 }
 
 func parseRemotePath(raw string) (remotePath, error) {
@@ -768,6 +1143,31 @@ func draftEntryFromMerged(skillID, newPath string, entry mergedEntry, now time.T
 	}
 }
 
+func hashRemoteTree(entries []skillRevisionEntryRow) string {
+	lines := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		hash := ""
+		if entry.BlobHash != nil {
+			hash = *entry.BlobHash
+		}
+		lines = append(lines, entry.Path+"\x00"+entry.EntryType+"\x00"+hash)
+	}
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+func nullableString(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
+}
+
+func truthy(v string) bool {
+	return strings.EqualFold(strings.TrimSpace(v), "true")
+}
+
 func requireUser(w http.ResponseWriter, r *http.Request) (string, bool) {
 	userID := r.URL.Query().Get("user_id")
 	if userID == "" {
@@ -821,10 +1221,6 @@ func badRequest(message string) error {
 
 func conflict(message string) error { return httpError{status: http.StatusConflict, message: message} }
 
-func isAncestorPath(ancestor, child string) bool {
-	return child != ancestor && strings.HasPrefix(child, ancestor+"/")
-}
-
 func isDescendantPath(parent, child string) bool {
 	return child != parent && strings.HasPrefix(child, parent+"/")
 }
@@ -838,11 +1234,32 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now() }
 
 type skillRow struct {
-	ID             string  `gorm:"column:id;type:varchar(36);primaryKey"`
-	OwnerUserID    string  `gorm:"column:owner_user_id;type:text;not null"`
-	Category       string  `gorm:"column:category;type:text;not null"`
-	SkillName      string  `gorm:"column:skill_name;type:text;not null"`
-	HeadRevisionID *string `gorm:"column:head_revision_id;type:varchar(36)"`
+	ID                 string     `gorm:"column:id;type:varchar(36);primaryKey"`
+	OwnerUserID        string     `gorm:"column:owner_user_id;type:text;not null"`
+	OwnerUserName      string     `gorm:"column:owner_user_name;type:text;not null;default:''"`
+	CreateUserID       string     `gorm:"column:create_user_id;type:text;not null"`
+	CreateUserName     string     `gorm:"column:create_user_name;type:text;not null;default:''"`
+	Category           string     `gorm:"column:category;type:text;not null"`
+	SkillName          string     `gorm:"column:skill_name;type:text;not null"`
+	Description        string     `gorm:"column:description;type:text"`
+	Tags               []byte     `gorm:"column:tags;type:json"`
+	RelativeRoot       string     `gorm:"column:relative_root;type:text;not null"`
+	SkillMDPath        string     `gorm:"column:skill_md_path;type:text;not null;default:'SKILL.md'"`
+	HeadRevisionID     *string    `gorm:"column:head_revision_id;type:varchar(36)"`
+	Version            int64      `gorm:"column:version;not null;default:1"`
+	AutoEvo            bool       `gorm:"column:auto_evo;not null;default:false"`
+	AutoEvoApplyStatus string     `gorm:"column:auto_evo_apply_status;type:text;not null;default:'idle'"`
+	AutoEvoGeneration  int64      `gorm:"column:auto_evo_generation;not null;default:0"`
+	AutoEvoStartedAt   *time.Time `gorm:"column:auto_evo_started_at"`
+	AutoEvoFinishedAt  *time.Time `gorm:"column:auto_evo_finished_at"`
+	AutoEvoError       string     `gorm:"column:auto_evo_error;type:text;not null;default:''"`
+	IsEnabled          bool       `gorm:"column:is_enabled;not null;default:true"`
+	UpdateStatus       string     `gorm:"column:update_status;type:text;not null;default:'up_to_date'"`
+	Ext                []byte     `gorm:"column:ext;type:json"`
+	DeletedAt          *time.Time `gorm:"column:deleted_at"`
+	DeletedBy          *string    `gorm:"column:deleted_by;type:text"`
+	CreatedAt          time.Time  `gorm:"column:created_at;not null"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at;not null"`
 }
 
 func (skillRow) TableName() string { return "skills" }
@@ -860,6 +1277,22 @@ type skillBlobRow struct {
 }
 
 func (skillBlobRow) TableName() string { return "skill_blobs" }
+
+type skillRevisionRow struct {
+	ID               string    `gorm:"column:id;type:varchar(36);primaryKey"`
+	SkillID          string    `gorm:"column:skill_id;type:varchar(36);not null"`
+	ParentRevisionID *string   `gorm:"column:parent_revision_id;type:varchar(36)"`
+	RevisionNo       int64     `gorm:"column:revision_no;not null"`
+	TreeHash         string    `gorm:"column:tree_hash;type:text;not null"`
+	Message          string    `gorm:"column:message;type:text"`
+	ChangeSource     string    `gorm:"column:change_source;type:text;not null;default:'draft_commit'"`
+	SourceRefType    string    `gorm:"column:source_ref_type;type:text;not null;default:''"`
+	SourceRefID      string    `gorm:"column:source_ref_id;type:text;not null;default:''"`
+	CreatedBy        *string   `gorm:"column:created_by;type:varchar(36)"`
+	CreatedAt        time.Time `gorm:"column:created_at;not null"`
+}
+
+func (skillRevisionRow) TableName() string { return "skill_revisions" }
 
 type skillRevisionEntryRow struct {
 	RevisionID string  `gorm:"column:revision_id;type:varchar(36);primaryKey"`

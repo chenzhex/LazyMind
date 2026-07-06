@@ -97,6 +97,11 @@ type DeleteSkillRequest struct {
 	UserID  string
 }
 
+type PurgeSkillRequest struct {
+	SkillID string
+	UserID  string
+}
+
 type DiscardDraftRequest struct {
 	SkillID string
 	UserID  string
@@ -222,6 +227,8 @@ type skillRow struct {
 	IsEnabled             bool       `gorm:"column:is_enabled;not null;default:true"`
 	UpdateStatus          string     `gorm:"column:update_status;type:text;not null;default:'up_to_date'"`
 	Ext                   []byte     `gorm:"column:ext;type:json"`
+	DeletedAt             *time.Time `gorm:"column:deleted_at"`
+	DeletedBy             *string    `gorm:"column:deleted_by;type:text"`
 	CreatedAt             time.Time  `gorm:"column:created_at;not null"`
 	UpdatedAt             time.Time  `gorm:"column:updated_at;not null"`
 }

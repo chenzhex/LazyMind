@@ -63,7 +63,7 @@ func EnableBuiltinSkill(w http.ResponseWriter, r *http.Request) {
 
 	var existing orm.SkillV2Skill
 	err := db.WithContext(r.Context()).
-		Where("owner_user_id = ? AND origin_builtin_skill_uid = ?", userID, uid).
+		Where("owner_user_id = ? AND origin_builtin_skill_uid = ? AND deleted_at IS NULL", userID, uid).
 		Order("created_at ASC").
 		Take(&existing).Error
 	if err == nil {

@@ -26,6 +26,8 @@ type SkillV2Skill struct {
 	IsEnabled             bool       `gorm:"column:is_enabled;not null;default:true"`
 	UpdateStatus          string     `gorm:"column:update_status;type:varchar(32);not null;default:'up_to_date'"`
 	Ext                   []byte     `gorm:"column:ext;type:json"`
+	DeletedAt             *time.Time `gorm:"column:deleted_at"`
+	DeletedBy             *string    `gorm:"column:deleted_by;type:varchar(255)"`
 	CreatedAt             time.Time  `gorm:"column:created_at;not null"`
 	UpdatedAt             time.Time  `gorm:"column:updated_at;not null"`
 }

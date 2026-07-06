@@ -395,8 +395,11 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/remote-fs/exists", []string{"qa.read"}, skillv2handler.RemoteFSExists)
 	handleAPI(r, "GET", "/remote-fs/content", []string{"qa.read"}, skillv2handler.RemoteFSContent)
 	handleAPI(r, "PUT", "/remote-fs/content", []string{"qa.write"}, skillv2handler.RemoteFSContent)
+	handleAPI(r, "POST", "/remote-fs/dir", []string{"qa.write"}, skillv2handler.RemoteFSDir)
 	handleAPI(r, "DELETE", "/remote-fs/path", []string{"qa.write"}, skillv2handler.RemoteFSDelete)
+	handleAPI(r, "POST", "/remote-fs/copy", []string{"qa.write"}, skillv2handler.RemoteFSCopy)
 	handleAPI(r, "POST", "/remote-fs/move", []string{"qa.write"}, skillv2handler.RemoteFSMove)
+	handleAPI(r, "POST", "/remote-fs/trash", []string{"qa.write"}, skillv2handler.RemoteFSTrash)
 
 	// ----- ACL（Knowledge basetextPermission） -----
 	handleAPI(r, "GET", "/kb/list", []string{"document.read"}, acl.ListKB)

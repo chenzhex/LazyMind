@@ -141,8 +141,8 @@ func TestCommitDraft_ReplacedBlobCleanupRespectsReferences(t *testing.T) {
 	if _, err := service.CommitDraft(context.Background(), CommitDraftRequest{SkillID: "skill1", UserID: "user_001", DraftVersion: 1}); err != nil {
 		t.Fatalf("CommitDraft returned error: %v", err)
 	}
-	if got := testutil.CountRows(t, db, "skill_blobs", "hash = ?", "h_skill_rev1"); got != 0 {
-		t.Fatalf("unreferenced old blob count = %d, want 0", got)
+	if got := testutil.CountRows(t, db, "skill_blobs", "hash = ?", "h_skill_rev1"); got != 1 {
+		t.Fatalf("historical revision blob count = %d, want 1", got)
 	}
 
 	testutil.SeedSkillWithRevision(t, db, "skill2", "rev_other")

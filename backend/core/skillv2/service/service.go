@@ -105,7 +105,7 @@ func (s *SkillService) PatchSkill(ctx context.Context, req PatchSkillRequest) (P
 	var out PatchSkillResponse
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var skill skillRow
-		if err := tx.Where("id = ?", req.SkillID).Take(&skill).Error; err != nil {
+		if err := tx.Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", req.SkillID, req.UserID).Take(&skill).Error; err != nil {
 			return err
 		}
 
@@ -132,7 +132,7 @@ func (s *SkillService) PatchSkill(ctx context.Context, req PatchSkillRequest) (P
 			if req.IsEnabled != nil {
 				updates["is_enabled"] = *req.IsEnabled
 			}
-			if err := tx.Model(&skillRow{}).Where("id = ?", req.SkillID).Updates(updates).Error; err != nil {
+			if err := tx.Model(&skillRow{}).Where("id = ? AND deleted_at IS NULL", req.SkillID).Updates(updates).Error; err != nil {
 				return err
 			}
 			if err := skillsearch.RebuildSkillTx(ctx, tx, req.SkillID, s.clock.Now()); err != nil {
@@ -212,7 +212,7 @@ func (s *SkillService) PatchSkill(ctx context.Context, req PatchSkillRequest) (P
 		if req.IsEnabled != nil {
 			updates["is_enabled"] = *req.IsEnabled
 		}
-		if err := tx.Model(&skillRow{}).Where("id = ?", req.SkillID).Updates(updates).Error; err != nil {
+		if err := tx.Model(&skillRow{}).Where("id = ? AND deleted_at IS NULL", req.SkillID).Updates(updates).Error; err != nil {
 			return err
 		}
 		if err := s.resetDraft(tx, req.SkillID, revisionID); err != nil {
@@ -228,9 +228,39 @@ func (s *SkillService) PatchSkill(ctx context.Context, req PatchSkillRequest) (P
 }
 
 func (s *SkillService) DeleteSkill(ctx context.Context, req DeleteSkillRequest) error {
+	return s.TrashSkill(ctx, req)
+}
+
+func (s *SkillService) TrashSkill(ctx context.Context, req DeleteSkillRequest) error {
+	now := s.clock.Now()
+	updates := map[string]any{
+		"deleted_at": now,
+		"updated_at": now,
+	}
+	if req.UserID != "" {
+		updates["deleted_by"] = req.UserID
+	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var skill skillRow
-		if err := tx.Where("id = ? AND owner_user_id = ?", req.SkillID, req.UserID).Take(&skill).Error; err != nil {
+		if err := tx.Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", req.SkillID, req.UserID).Take(&skill).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&skillRow{}).Where("id = ? AND deleted_at IS NULL", req.SkillID).Updates(updates).Error; err != nil {
+			return err
+		}
+		if tx.Migrator().HasTable(&skillSearchIndexRow{}) {
+			if err := tx.Where("skill_id = ?", req.SkillID).Delete(&skillSearchIndexRow{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *SkillService) PurgeSkill(ctx context.Context, req PurgeSkillRequest) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var skill skillRow
+		if err := tx.Where("id = ? AND owner_user_id = ? AND deleted_at IS NOT NULL", req.SkillID, req.UserID).Take(&skill).Error; err != nil {
 			return err
 		}
 		var revisions []string
@@ -306,7 +336,7 @@ func skillBlobReferenced(tx *gorm.DB, hash string) (bool, error) {
 
 func (s *SkillService) ListSkills(ctx context.Context, req ListSkillsRequest) (ListSkillsResponse, error) {
 	var rows []skillRow
-	if err := s.db.WithContext(ctx).Where("owner_user_id = ?", req.UserID).Order("created_at ASC, id ASC").Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("owner_user_id = ? AND deleted_at IS NULL", req.UserID).Order("created_at ASC, id ASC").Find(&rows).Error; err != nil {
 		return ListSkillsResponse{}, err
 	}
 	items := make([]SkillSummary, 0, len(rows))
@@ -322,7 +352,11 @@ func (s *SkillService) ListSkills(ctx context.Context, req ListSkillsRequest) (L
 
 func (s *SkillService) GetSkill(ctx context.Context, req GetSkillRequest) (SkillDetail, error) {
 	var row skillRow
-	if err := s.db.WithContext(ctx).Where("id = ?", req.SkillID).Take(&row).Error; err != nil {
+	query := s.db.WithContext(ctx).Where("id = ? AND deleted_at IS NULL", req.SkillID)
+	if req.UserID != "" {
+		query = query.Where("owner_user_id = ?", req.UserID)
+	}
+	if err := query.Take(&row).Error; err != nil {
 		return SkillDetail{}, err
 	}
 	summary, err := s.summaryFor(ctx, row)
@@ -382,7 +416,7 @@ func (s *SkillService) DiscardDraft(ctx context.Context, req DiscardDraftRequest
 	var out DiscardDraftResponse
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var skill skillRow
-		if err := tx.Where("id = ? AND owner_user_id = ?", req.SkillID, req.UserID).Take(&skill).Error; err != nil {
+		if err := tx.Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", req.SkillID, req.UserID).Take(&skill).Error; err != nil {
 			return err
 		}
 		if skill.HeadRevisionID == nil {
@@ -476,7 +510,7 @@ func (s *SkillService) AcceptReview(ctx context.Context, req AcceptReviewRequest
 		}
 		if nextName != "" || nextCategory != "" {
 			var skill skillRow
-			if err := tx.Where("id = ?", req.SkillID).Take(&skill).Error; err != nil {
+			if err := tx.Where("id = ? AND deleted_at IS NULL", req.SkillID).Take(&skill).Error; err != nil {
 				return err
 			}
 			if nextName == "" {
@@ -490,7 +524,7 @@ func (s *SkillService) AcceptReview(ctx context.Context, req AcceptReviewRequest
 		if strings.TrimSpace(req.Description) != "" {
 			updates["description"] = strings.TrimSpace(req.Description)
 		}
-		if err := tx.Model(&skillRow{}).Where("id = ?", req.SkillID).Updates(updates).Error; err != nil {
+		if err := tx.Model(&skillRow{}).Where("id = ? AND deleted_at IS NULL", req.SkillID).Updates(updates).Error; err != nil {
 			return err
 		}
 		if err := skillsearch.RebuildSkillTx(ctx, tx, req.SkillID, s.clock.Now()); err != nil {
@@ -754,7 +788,7 @@ func (s *SkillService) upsertDraftFiles(ctx context.Context, tx *gorm.DB, skillI
 
 func (s *SkillService) commitFilesAsNewHead(ctx context.Context, tx *gorm.DB, skillID, userID, changeSource string, files map[string][]byte) (string, error) {
 	var skill skillRow
-	if err := tx.Where("id = ?", skillID).Take(&skill).Error; err != nil {
+	if err := tx.Where("id = ? AND deleted_at IS NULL", skillID).Take(&skill).Error; err != nil {
 		return "", err
 	}
 	entriesByPath := map[string]skillRevisionEntryRow{}
@@ -827,7 +861,7 @@ func (s *SkillService) commitFilesAsNewHead(ctx context.Context, tx *gorm.DB, sk
 			return "", err
 		}
 	}
-	if err := tx.Model(&skillRow{}).Where("id = ?", skillID).Updates(map[string]any{
+	if err := tx.Model(&skillRow{}).Where("id = ? AND deleted_at IS NULL", skillID).Updates(map[string]any{
 		"head_revision_id": revisionID,
 		"version":          gorm.Expr("version + 1"),
 		"updated_at":       s.clock.Now(),
@@ -895,7 +929,7 @@ func (s *SkillService) filesForRevision(ctx context.Context, tx *gorm.DB, revisi
 
 func (s *SkillService) entriesForHead(ctx context.Context, skillID string) ([]skillRevisionEntryRow, error) {
 	var skill skillRow
-	if err := s.db.WithContext(ctx).Where("id = ?", skillID).Take(&skill).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("id = ? AND deleted_at IS NULL", skillID).Take(&skill).Error; err != nil {
 		return nil, err
 	}
 	if skill.HeadRevisionID == nil {

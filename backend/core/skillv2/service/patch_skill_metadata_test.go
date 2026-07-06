@@ -96,7 +96,7 @@ func seedSkillWithHeadRevision(t *testing.T, db *gorm.DB, skillID, revisionID st
 	}).Error; err != nil {
 		t.Fatalf("seed revision: %v", err)
 	}
-	blobHash := "h_skill_v1"
+	blobHash := "h_skill_" + revisionID
 	if err := db.Create(&testSkillV2BlobRow{
 		Hash:           blobHash,
 		Size:           12,

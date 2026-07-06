@@ -332,7 +332,7 @@ func copyHeadRevision(ctx context.Context, tx *gorm.DB, sourceSkillID, ownerUser
 		return "", "", fmt.Errorf("source skill has no head revision")
 	}
 	var conflicts int64
-	if err := tx.Model(&skillRow{}).Where("owner_user_id = ? AND category = ? AND skill_name = ?", ownerUserID, source.Category, source.SkillName).Count(&conflicts).Error; err != nil {
+	if err := tx.Model(&skillRow{}).Where("owner_user_id = ? AND category = ? AND skill_name = ? AND deleted_at IS NULL", ownerUserID, source.Category, source.SkillName).Count(&conflicts).Error; err != nil {
 		return "", "", err
 	}
 	if conflicts > 0 {

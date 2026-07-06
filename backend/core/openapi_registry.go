@@ -1216,9 +1216,41 @@ type remoteFSQueryParams struct {
 	Encoding string `query:"encoding,omitempty" enum:"raw,base64"`
 }
 
+type remoteFSTaskQueryParams struct {
+	UserID string `query:"user_id"`
+	TaskID string `query:"task_id" required:"true"`
+}
+
+type remoteFSUserQueryParams struct {
+	UserID string `query:"user_id"`
+}
+
+type remoteFSDeleteQueryParams struct {
+	UserID    string `query:"user_id"`
+	Path      string `query:"path" required:"true"`
+	TaskID    string `query:"task_id,omitempty"`
+	Permanent bool   `query:"permanent,omitempty"`
+	Confirm   bool   `query:"confirm,omitempty"`
+}
+
+type remoteFSDirOpenAPIRequest struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+
+type remoteFSCopyOpenAPIRequest struct {
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Overwrite bool   `json:"overwrite"`
+}
+
 type remoteFSMoveOpenAPIRequest struct {
 	From string `json:"from"`
 	To   string `json:"to"`
+}
+
+type remoteFSTrashOpenAPIRequest struct {
+	Path string `json:"path"`
 }
 
 type remoteFSItemOpenAPIResponse struct {
@@ -2611,21 +2643,48 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem write result", okOpenAPIResponse{})},
 		},
 		{
+			Method:      "POST",
+			Path:        "/remote-fs/dir",
+			Summary:     "Create remote skill filesystem directory or empty package",
+			Tags:        []string{"remote-fs"},
+			QueryParams: remoteFSTaskQueryParams{},
+			RequestBody: jsonBodyOf(remoteFSDirOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem mkdir result", okOpenAPIResponse{})},
+		},
+		{
 			Method:      "DELETE",
 			Path:        "/remote-fs/path",
 			Summary:     "Delete remote skill filesystem path",
 			Tags:        []string{"remote-fs"},
-			QueryParams: remoteFSQueryParams{},
+			QueryParams: remoteFSDeleteQueryParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem delete result", okOpenAPIResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/remote-fs/copy",
+			Summary:     "Copy remote skill filesystem path",
+			Tags:        []string{"remote-fs"},
+			QueryParams: remoteFSTaskQueryParams{},
+			RequestBody: jsonBodyOf(remoteFSCopyOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem copy result", okOpenAPIResponse{})},
 		},
 		{
 			Method:      "POST",
 			Path:        "/remote-fs/move",
 			Summary:     "Move remote skill filesystem path",
 			Tags:        []string{"remote-fs"},
-			QueryParams: remoteFSQueryParams{},
+			QueryParams: remoteFSTaskQueryParams{},
 			RequestBody: jsonBodyOf(remoteFSMoveOpenAPIRequest{}, true),
 			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem move result", okOpenAPIResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/remote-fs/trash",
+			Summary:     "Trash remote skill package",
+			Tags:        []string{"remote-fs"},
+			QueryParams: remoteFSUserQueryParams{},
+			RequestBody: jsonBodyOf(remoteFSTrashOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem trash result", okOpenAPIResponse{})},
 		},
 		{
 			Method:      "GET",

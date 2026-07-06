@@ -192,7 +192,7 @@ func TestRemoteFSMoveToBaseExistingPath_Returns409(t *testing.T) {
 	}
 }
 
-func TestRemoteFSMoveToMissingParent_Returns400Or404(t *testing.T) {
+func TestRemoteFSMoveToMissingParent_MaterializesParent(t *testing.T) {
 	db := testutil.NewTestDB(t)
 	testutil.SeedSkillWithRevision(t, db, "skill1", "rev1")
 	testutil.SeedDraftEntry(t, db, "skill1", "references/a.md", "upsert", "file", "h_a")
@@ -201,11 +201,14 @@ func TestRemoteFSMoveToMissingParent_Returns400Or404(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"from": "skills/research/论文精读/references/a.md", "to": "skills/research/论文精读/missing-dir/a.md"})
 	rec := httptest.NewRecorder()
 	handler.Move(rec, httptest.NewRequest(http.MethodPost, remoteMoveURL("user_001", "task1"), bytes.NewReader(body)))
-	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
-		t.Fatalf("status=%d body=%s, want 400 or 404", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
-	if got := testutil.CountRows(t, db, "skill_draft_entries", "skill_id = ? AND path = ?", "skill1", "missing-dir/a.md"); got != 0 {
-		t.Fatalf("unexpected move overlay count = %d", got)
+	if got := testutil.CountRows(t, db, "skill_draft_entries", "skill_id = ? AND path = ? AND entry_type = ?", "skill1", "missing-dir", "dir"); got != 1 {
+		t.Fatalf("materialized parent count = %d, want 1", got)
+	}
+	if got := testutil.CountRows(t, db, "skill_draft_entries", "skill_id = ? AND path = ?", "skill1", "missing-dir/a.md"); got != 1 {
+		t.Fatalf("move overlay count = %d, want 1", got)
 	}
 }
 

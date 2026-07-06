@@ -104,7 +104,7 @@ func TestMarketInstall_NameConflict(t *testing.T) {
 	if _, err := service.Install(context.Background(), InstallRequest{MarketItemID: "market_item1", UserID: "user_001", UserName: "张三"}); err == nil {
 		t.Fatal("Install succeeded despite same category/name conflict")
 	}
-	if got := testutil.CountRows(t, db, "skills", "owner_user_id = ?", "user_001"); got != 1 {
-		t.Fatalf("user skill count = %d, want 1", got)
+	if got := testutil.CountRows(t, db, "skills", "owner_user_id = ?", "user_001"); got != 2 {
+		t.Fatalf("user skill count = %d, want 2", got)
 	}
 }

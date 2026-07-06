@@ -11,17 +11,22 @@ func SeedSkillWithRevision(t *testing.T, db *TestDB, skillID, revisionID string)
 	now := TimeFixture()
 	tags, _ := json.Marshal([]string{"paper"})
 	head := revisionID
+	category := "research"
+	skillName := "论文精读"
+	if skillID != "skill1" {
+		skillName = skillName + "-" + skillID
+	}
 	MustCreate(t, db, &SkillRow{
 		ID:                 skillID,
 		OwnerUserID:        "user_001",
 		OwnerUserName:      "张三",
 		CreateUserID:       "user_001",
 		CreateUserName:     "张三",
-		Category:           "research",
-		SkillName:          "论文精读",
+		Category:           category,
+		SkillName:          skillName,
 		Description:        "用于阅读和总结论文的技能",
 		Tags:               tags,
-		RelativeRoot:       "research/论文精读",
+		RelativeRoot:       category + "/" + skillName,
 		SkillMDPath:        "SKILL.md",
 		HeadRevisionID:     &head,
 		Version:            1,

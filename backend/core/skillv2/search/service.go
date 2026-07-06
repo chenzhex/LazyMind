@@ -67,7 +67,7 @@ func RebuildSkillTx(ctx context.Context, tx *gorm.DB, skillID string, now time.T
 	if err := tx.WithContext(ctx).Where("id = ?", skillID).Take(&skill).Error; err != nil {
 		return err
 	}
-	if skill.HeadRevisionID == nil {
+	if skill.DeletedAt != nil || skill.HeadRevisionID == nil {
 		err := tx.WithContext(ctx).Where("skill_id = ?", skillID).Delete(&indexRow{}).Error
 		if isMissingIndexTable(err) {
 			return nil
@@ -93,10 +93,10 @@ func RebuildSkillTx(ctx context.Context, tx *gorm.DB, skillID string, now time.T
 
 func (s *Service) ensureFresh(ctx context.Context, skillID string) error {
 	var skill skillRow
-	if err := s.db.WithContext(ctx).Select("id", "head_revision_id").Where("id = ?", skillID).Take(&skill).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("id", "head_revision_id", "deleted_at").Where("id = ?", skillID).Take(&skill).Error; err != nil {
 		return err
 	}
-	if skill.HeadRevisionID == nil {
+	if skill.DeletedAt != nil || skill.HeadRevisionID == nil {
 		return s.DeleteSkill(ctx, skillID)
 	}
 	var row indexRow
@@ -118,7 +118,7 @@ func containsHeadText(ctx context.Context, db *gorm.DB, skillID, keyword string)
 	if err := db.WithContext(ctx).Where("id = ?", skillID).Take(&skill).Error; err != nil {
 		return false, err
 	}
-	if skill.HeadRevisionID == nil {
+	if skill.DeletedAt != nil || skill.HeadRevisionID == nil {
 		return false, nil
 	}
 	content, err := searchContentForRevision(ctx, db, skill, *skill.HeadRevisionID)
@@ -169,13 +169,14 @@ type indexRow struct {
 func (indexRow) TableName() string { return "skill_search_indexes" }
 
 type skillRow struct {
-	ID             string  `gorm:"column:id;type:varchar(36);primaryKey"`
-	OwnerUserID    string  `gorm:"column:owner_user_id;type:varchar(255);not null"`
-	Category       string  `gorm:"column:category;type:varchar(128);not null"`
-	SkillName      string  `gorm:"column:skill_name;type:varchar(255);not null"`
-	Description    string  `gorm:"column:description;type:text"`
-	Tags           []byte  `gorm:"column:tags;type:json"`
-	HeadRevisionID *string `gorm:"column:head_revision_id;type:varchar(36)"`
+	ID             string     `gorm:"column:id;type:varchar(36);primaryKey"`
+	OwnerUserID    string     `gorm:"column:owner_user_id;type:varchar(255);not null"`
+	Category       string     `gorm:"column:category;type:varchar(128);not null"`
+	SkillName      string     `gorm:"column:skill_name;type:varchar(255);not null"`
+	Description    string     `gorm:"column:description;type:text"`
+	Tags           []byte     `gorm:"column:tags;type:json"`
+	HeadRevisionID *string    `gorm:"column:head_revision_id;type:varchar(36)"`
+	DeletedAt      *time.Time `gorm:"column:deleted_at"`
 }
 
 func (skillRow) TableName() string { return "skills" }
