@@ -33,6 +33,8 @@ def _model_config_path_post_action(resolved_path):
 # All LAZYMIND_* environment variables are registered here.
 config = Config(prefix='LAZYMIND', home='~/.lazyllm_rag')
 _LAZYMIND_ROOT = os.path.dirname(__file__)
+config.add('runtime_mode', str, 'cloud', 'RUNTIME_MODE',
+           description='LazyMind runtime mode profile: cloud or local.')
 
 # ---------------------------------------------------------------------------
 # Chat

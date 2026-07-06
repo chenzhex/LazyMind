@@ -32,8 +32,12 @@ const (
 	localChatPortEnvVar           = "LAZYMIND_LOCAL_CHAT_PORT"
 	localEvoPortEnvVar            = "LAZYMIND_LOCAL_EVO_PORT"
 	localMilvusPortEnvVar         = "LAZYMIND_LOCAL_MILVUS_PORT"
+	localMilvusLiteDBPathEnvVar   = "LAZYMIND_LOCAL_MILVUS_DB_PATH"
 	localOpenSearchPortEnvVar     = "LAZYMIND_LOCAL_OPENSEARCH_PORT"
 	localEnableEvoEnvVar          = "LAZYMIND_LOCAL_ENABLE_EVO"
+	routerPortPoolStartEnvVar     = "LAZYMIND_ROUTER_PORT_POOL_START"
+	routerPortPoolEndEnvVar       = "LAZYMIND_ROUTER_PORT_POOL_END"
+	routerPortsPerInstanceEnvVar  = "LAZYMIND_ROUTER_PORTS_PER_INSTANCE"
 	frontendPortEnvVar            = "LAZYMIND_FRONTEND_PORT"
 	authServicePortEnvVar         = "LAZYMIND_AUTH_SERVICE_PORT"
 	authServicePythonEnvVar       = "LAZYMIND_AUTH_SERVICE_PYTHON"
@@ -64,6 +68,8 @@ const (
 	defaultLocalWorkerPort        = 18005
 	defaultLocalMilvusPort        = 19530
 	defaultLocalOpenSearchPort    = 19200
+	defaultRouterPortPoolStart    = 18100
+	defaultRouterPortsPerInstance = 100
 	stateFileName                 = "runtime-state.json"
 	composeGeneratedFileName      = "process-compose.generated.yaml"
 	serviceEndpointsJSONName      = "service-endpoints.json"
@@ -96,6 +102,7 @@ const (
 	algoProcessName               = "lazyllm-algo"
 	chatProcessName               = "chat"
 	evoProcessName                = "evo-api"
+	milvusLiteProcessName         = "milvus-lite"
 )
 
 type RuntimePaths struct {
@@ -135,6 +142,9 @@ type RuntimePaths struct {
 	AlgoLog                  string
 	ChatLog                  string
 	EvoLog                   string
+	MilvusLiteLog            string
+	MilvusLitePIDFile        string
+	MilvusLiteDBPath         string
 	LocalProxyBin            string
 	CaddyBin                 string
 	LocalProxyConfig         string
@@ -153,6 +163,7 @@ type RuntimeConfig struct {
 	Profile            string
 	RepoRoot           string
 	RuntimeRoot        string
+	ModeProfile        RuntimeModeProfileConfig
 	ProcessComposePort int
 	FrontendPort       int
 	LocalProxy         LocalProxyConfig
@@ -187,6 +198,19 @@ type FileWatcherConfig struct {
 	HostPathStyle string
 }
 
+type RuntimeModeProfileConfig struct {
+	Name        string
+	VectorStore VectorStoreConfig
+}
+
+type VectorStoreConfig struct {
+	Engine         string
+	Endpoint       string
+	Port           int
+	ManagedProcess bool
+	DBPath         string
+}
+
 type AlgorithmConfig struct {
 	PostgresPort   int
 	DocPort        int
@@ -195,7 +219,6 @@ type AlgorithmConfig struct {
 	WorkerPort     int
 	ChatPort       int
 	EvoPort        int
-	MilvusPort     int
 	OpenSearchPort int
 	EnableEvo      bool
 }
@@ -384,6 +407,19 @@ func defaultFileWatcherBaseRoot(repoRoot string) string {
 	return filepath.Clean(filepath.Join(repoRoot, raw))
 }
 
+func localRuntimeModeProfile(milvusPort int, milvusLiteDBPath string) RuntimeModeProfileConfig {
+	return RuntimeModeProfileConfig{
+		Name: "local",
+		VectorStore: VectorStoreConfig{
+			Engine:         "milvus-lite",
+			Endpoint:       "http://127.0.0.1:" + strconv.Itoa(milvusPort),
+			Port:           milvusPort,
+			ManagedProcess: true,
+			DBPath:         milvusLiteDBPath,
+		},
+	}
+}
+
 func defaultAuthServicePortValue() int {
 	if v := os.Getenv(localProxyAuthHostPortEnvVar); v != "" {
 		return envPort(localProxyAuthHostPortEnvVar, defaultLocalProxyAuthHostPort)
@@ -513,6 +549,9 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 		AlgoLog:                  filepath.Join(runtimeRoot, "logs", algoProcessName+".log"),
 		ChatLog:                  filepath.Join(runtimeRoot, "logs", chatProcessName+".log"),
 		EvoLog:                   filepath.Join(runtimeRoot, "logs", evoProcessName+".log"),
+		MilvusLiteLog:            filepath.Join(runtimeRoot, "logs", milvusLiteProcessName+".log"),
+		MilvusLitePIDFile:        filepath.Join(runtimeRoot, "run", milvusLiteProcessName+".pid"),
+		MilvusLiteDBPath:         filepath.Join(runtimeRoot, "stores", "milvus", "lazymind.db"),
 		LocalProxyBin:            filepath.Join(runtimeRoot, "bin", "local-proxy"),
 		CaddyBin:                 filepath.Join(runtimeRoot, "bin", "caddy"),
 		LocalProxyConfig:         filepath.Join(root, localProxyConfigName),
@@ -543,10 +582,12 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 	openSearchPort := ports.envOrAvailable(localOpenSearchPortEnvVar, defaultLocalOpenSearchPort)
 	chatPort := ports.firstEnvOrAvailable([]string{localChatPortEnvVar, localProxyChatHostPortEnvVar}, defaultLocalProxyChatHostPort)
 	evoPort := ports.firstEnvOrAvailable([]string{localEvoPortEnvVar, localProxyEvoHostPortEnvVar}, defaultLocalProxyEvoHostPort)
+	milvusLiteDBPath := filepath.Clean(envText(localMilvusLiteDBPathEnvVar, p.MilvusLiteDBPath))
 	return RuntimeConfig{
 		Profile:            profile,
 		RepoRoot:           p.RepoRoot,
 		RuntimeRoot:        runtimeRoot,
+		ModeProfile:        localRuntimeModeProfile(milvusPort, milvusLiteDBPath),
 		ProcessComposePort: processComposePort,
 		FrontendPort:       frontendPort,
 		CaddyVersion:       envText(caddyVersionEnvVar, defaultCaddyVersion),
@@ -567,7 +608,6 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 			WorkerPort:     workerPort,
 			ChatPort:       chatPort,
 			EvoPort:        evoPort,
-			MilvusPort:     milvusPort,
 			OpenSearchPort: openSearchPort,
 			EnableEvo:      envBool(localEnableEvoEnvVar, false),
 		},
@@ -604,6 +644,7 @@ func (p RuntimePaths) EnsureAllDirs() error {
 		filepath.Dir(p.AlgorithmVenv),
 		p.AlgorithmHome,
 		p.AlgorithmPIDDir,
+		filepath.Dir(p.MilvusLiteDBPath),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
