@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,6 +32,9 @@ func TestCoreServiceBuildUsesBackendCore(t *testing.T) {
 	if err := manager.buildCore(context.Background(), paths); err != nil {
 		t.Fatalf("build core: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(repo, coreSourceDirName, "docs", "swagger.json")); err != nil {
+		t.Fatalf("expected local swagger embed placeholder: %v", err)
+	}
 	runner.assertCommandCount(1)
 }
 
@@ -52,13 +57,27 @@ func TestCoreServiceEnvUsesLocalEndpoints(t *testing.T) {
 	assertEnvContains(t, env, "LAZYMIND_OFFICE_CONVERT_URL=http://127.0.0.1:18082/v1/office/to-pdf")
 }
 
-func TestCoreServiceWaitForDatabaseUsesPgIsReady(t *testing.T) {
+func TestCoreServiceWaitForDatabaseUsesPsql(t *testing.T) {
 	repo := t.TempDir()
 	writeComposeFixture(t, repo)
 	cfg, paths, err := NewRuntimeConfig(defaultProfileValue(), repo)
 	if err != nil {
 		t.Fatalf("runtime config: %v", err)
 	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	cfg.Algorithm.PostgresPort = port
 	runner := &fakeRunner{t: t}
 	manager := NewCoreServiceManager(runner)
 	runner.handlers = append(runner.handlers, func(cmd Command) (CommandResult, error) {
@@ -69,14 +88,15 @@ func TestCoreServiceWaitForDatabaseUsesPgIsReady(t *testing.T) {
 			"exec",
 			"-T",
 			"db",
-			"pg_isready",
+			"psql",
 			"-U", "root",
 			"-d", "core",
+			"-c", "SELECT 1",
 		)
 		if cmd.Dir != repo {
-			t.Fatalf("unexpected pg_isready dir %q", cmd.Dir)
+			t.Fatalf("unexpected psql dir %q", cmd.Dir)
 		}
-		return CommandResult{Stdout: "db:5432 - accepting connections\n"}, nil
+		return CommandResult{Stdout: " ?column?\n----------\n        1\n"}, nil
 	})
 
 	if err := manager.waitForCoreDatabase(context.Background(), cfg, paths); err != nil {
@@ -98,14 +118,14 @@ func TestCoreServiceWaitForDatabaseReportsLastError(t *testing.T) {
 	coreServiceDBWaitTimeout = time.Nanosecond
 	t.Cleanup(func() { coreServiceDBWaitTimeout = previousTimeout })
 	runner.handlers = append(runner.handlers, func(cmd Command) (CommandResult, error) {
-		return CommandResult{Stderr: "database system is starting up"}, errors.New("pg_isready failed")
+		return CommandResult{Stderr: "database system is starting up"}, errors.New("psql failed")
 	})
 
 	err = manager.waitForCoreDatabase(context.Background(), cfg, paths)
 	if err == nil {
 		t.Fatal("expected wait database error")
 	}
-	if !strings.Contains(err.Error(), "pg_isready failed") {
+	if !strings.Contains(err.Error(), "psql failed") {
 		t.Fatalf("expected last runner error in message, got %v", err)
 	}
 }

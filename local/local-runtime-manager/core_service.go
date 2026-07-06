@@ -87,6 +87,9 @@ func (m *CoreServiceManager) buildCore(ctx context.Context, paths RuntimePaths) 
 	if err := os.MkdirAll(filepath.Dir(paths.CoreBin), 0o755); err != nil {
 		return err
 	}
+	if err := ensureCoreSwaggerEmbed(paths); err != nil {
+		return err
+	}
 	goBin := strings.TrimSpace(os.Getenv("GO"))
 	if goBin == "" {
 		goBin = "go"
@@ -100,6 +103,19 @@ func (m *CoreServiceManager) buildCore(ctx context.Context, paths RuntimePaths) 
 		return fmt.Errorf("build core failed: %w (%s)", err, strings.TrimSpace(res.Stderr))
 	}
 	return nil
+}
+
+func ensureCoreSwaggerEmbed(paths RuntimePaths) error {
+	swaggerPath := filepath.Join(paths.RepoRoot, coreSourceDirName, "docs", "swagger.json")
+	if _, err := os.Stat(swaggerPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(swaggerPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(swaggerPath, []byte("{}\n"), 0o644)
 }
 
 func (m *CoreServiceManager) Down(ctx context.Context, cfg RuntimeConfig, paths RuntimePaths) error {
@@ -214,19 +230,23 @@ func (m *CoreServiceManager) waitForCoreDatabase(ctx context.Context, cfg Runtim
 				"exec",
 				"-T",
 				"db",
-				"pg_isready",
+				"psql",
 				"-U", "root",
 				"-d", "core",
+				"-c", "SELECT 1",
 			},
 			Dir: paths.RepoRoot,
 		})
-		if err == nil && strings.Contains(res.Stdout+res.Stderr, "accepting connections") {
-			return nil
-		}
-		if err != nil {
-			lastErr = err
+		if err == nil {
+			if err := postgresHostPortReady(ctx, cfg.Algorithm.PostgresPort); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
 		} else if stderr := strings.TrimSpace(res.Stderr); stderr != "" {
-			lastErr = fmt.Errorf("%s", stderr)
+			lastErr = fmt.Errorf("%w: %s", err, stderr)
+		} else {
+			lastErr = err
 		}
 		select {
 		case <-ctx.Done():
