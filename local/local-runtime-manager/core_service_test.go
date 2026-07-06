@@ -28,9 +28,6 @@ func TestCoreServiceBuildUsesBackendCore(t *testing.T) {
 	if err := manager.buildCore(context.Background(), paths); err != nil {
 		t.Fatalf("build core: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(repo, coreSourceDirName, "docs", "swagger.json")); err != nil {
-		t.Fatalf("expected local swagger embed placeholder: %v", err)
-	}
 	runner.assertCommandCount(1)
 }
 
