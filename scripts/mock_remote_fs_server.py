@@ -16,12 +16,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-def _ok(data):
-    return json.dumps({'code': 0, 'data': data}).encode()
+def _json(data):
+    return json.dumps(data).encode()
 
 
-def _err(message, code=1):
-    return json.dumps({'code': code, 'message': message}).encode()
+def _err(message):
+    return json.dumps({'message': message}).encode()
 
 
 class RemoteFSHandler(BaseHTTPRequestHandler):
@@ -47,37 +47,37 @@ class RemoteFSHandler(BaseHTTPRequestHandler):
 
         if endpoint == '/remote-fs/exists':
             target = self.root / path_param if path_param else self.root
-            self._send(_ok({'exists': target.exists()}))
+            self._send(_json({'exists': target.exists()}))
 
         elif endpoint == '/remote-fs/info':
             target = self.root / path_param if path_param else self.root
             if not target.exists():
-                self._send(_err(f'path does not exist: {path_param}'), 200)
+                self._send(_err(f'path does not exist: {path_param}'), 404)
                 return
-            self._send(_ok({
-                'name': path_param,
-                'type': 'directory' if target.is_dir() else 'file',
+            self._send(_json({
+                'path': path_param,
+                'type': 'dir' if target.is_dir() else 'file',
                 'size': target.stat().st_size if target.is_file() else 0,
             }))
 
         elif endpoint == '/remote-fs/list':
             target = self.root / path_param if path_param else self.root
             if not target.exists():
-                self._send(_err(f'path does not exist: {path_param}'), 200)
+                self._send(_err(f'path does not exist: {path_param}'), 404)
                 return
-            entries = []
-            names = []
+            items = []
             for child in sorted(target.iterdir()):
-                # Return the full path from root (not just the basename)
                 rel = str(child.relative_to(self.root))
-                names.append(rel)
                 if detail:
-                    entries.append({
-                        'name': rel,
-                        'type': 'directory' if child.is_dir() else 'file',
+                    items.append({
+                        'name': child.name,
+                        'path': rel,
+                        'type': 'dir' if child.is_dir() else 'file',
                         'size': child.stat().st_size if child.is_file() else 0,
                     })
-            self._send(_ok({'entries': entries, 'names': names}))
+                else:
+                    items.append({'name': child.name, 'path': rel})
+            self._send(_json({'items': items}))
 
         elif endpoint == '/remote-fs/content':
             target = self.root / path_param if path_param else self.root
@@ -97,7 +97,7 @@ class RemoteFSHandler(BaseHTTPRequestHandler):
             self.wfile.write(content)
 
         else:
-            body = _err(f'unknown endpoint: {endpoint}', 404)
+            body = _err(f'unknown endpoint: {endpoint}')
             self._send(body, 404)
 
 

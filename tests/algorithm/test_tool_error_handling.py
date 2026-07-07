@@ -39,21 +39,33 @@ def test_kb_keyword_search_maps_target_by_type(monkeypatch):
     assert calls[1]['doc_id'] == 'doc-1'
 
 
-def test_skill_editor_returns_error_result_for_skill_index_exception(monkeypatch):
-    def raise_unexpected(_base_dir):
-        raise RuntimeError('skill index unavailable')
+def test_skill_editor_returns_error_result_for_skill_file_exception(monkeypatch):
+    def raise_unexpected(*args, **kwargs):
+        raise RuntimeError('skill files unavailable')
 
     monkeypatch.setattr(skill_editor_mod.lazyllm, 'globals', {'agentic_config': {}})
-    monkeypatch.setattr(skill_editor_mod, 'list_all_skill_entries', raise_unexpected)
+    monkeypatch.setattr(skill_editor_mod, 'list_skill_files', raise_unexpected)
 
-    result = skill_editor_mod.skill_editor(
+    result = skill_editor_mod.SkillEditorToolGroup().modify_skill(
         'existing',
-        'modify',
         'coding',
         operations=[{'op': 'replace_text', 'old': 'old', 'new': 'new'}],
     )
 
     assert result['success'] is False
-    assert result['tool'] == 'skill_editor'
-    assert result['error']['type'] == 'RuntimeError'
-    assert 'skill index unavailable' in result['error']['detail']
+    assert result['tool'] == 'modify_skill'
+    assert result['error']['reason'] == 'Failed to load or edit skill package: skill files unavailable'
+
+
+def test_skill_editor_tool_group_exposes_action_specific_schemas():
+    group = skill_editor_mod.SkillEditorToolGroup()
+    create_tool = MethodModuleTool(group, 'create_skill')
+    modify_tool = MethodModuleTool(group, 'modify_skill')
+
+    assert create_tool.name == 'SkillEditorToolGroup_create_skill'
+    assert modify_tool.name == 'SkillEditorToolGroup_modify_skill'
+    create_fields = set(create_tool.params_schema.model_fields)
+    modify_fields = set(modify_tool.params_schema.model_fields)
+
+    assert create_fields == {'name', 'category', 'content'}
+    assert modify_fields == {'name', 'category', 'operations', 'reason'}

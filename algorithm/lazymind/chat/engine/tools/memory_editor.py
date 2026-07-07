@@ -94,12 +94,15 @@ def memory_editor(
             - ``{"op": "replace_text", "old": "...", "new": "..."}``:
               replace the first exact ``old`` substring with ``new``. Prefer
               this whenever the current content is non-empty, including when
-              adding a new entry to an existing section.
+              adding a new entry to an existing section. If the exact text
+              anchor fails because of formatting, retry with a better anchor.
             - ``{"op": "replace_all", "content": "..."}``: replace the
-              full original target text with ``content``. Use this only when
-              the current content is empty, no exact substring can safely
-              anchor the edit, or the update needs global deduplication,
-              conflict resolution, or broader reorganization.
+              full original target text with ``content``. This is not a
+              fallback for failed ``replace_text`` attempts. Use it only when
+              the user explicitly asks to replace the full text, the current
+              content is empty, or the update truly needs global deduplication,
+              conflict resolution, or broader reorganization. Preserve all
+              still-valid existing content.
     """
     raw_target = str(target).strip()
     if raw_target not in {'memory', 'user_preference'}:
