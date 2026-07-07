@@ -289,6 +289,9 @@ func (b *schemaBuilder) inlineSchemaForType(t reflect.Type) map[string]any {
 			if description := strings.TrimSpace(field.Tag.Get("desc")); description != "" {
 				propertySchema["description"] = description
 			}
+			if field.Tag.Get("openapi_nullable") == "true" {
+				propertySchema["nullable"] = true
+			}
 			properties[name] = propertySchema
 			if field.Tag.Get("required") == "true" || (!omitEmpty && !isOptionalField(field.Type)) {
 				required = append(required, name)
@@ -616,6 +619,7 @@ type listModelProviderGroupModelsOpenAPIItem struct {
 	GroupName                string `json:"group_name"`
 	BaseURL                  string `json:"base_url"`
 	IsDefault                bool   `json:"is_default"`
+	MaxInputTokens           *int64 `json:"max_input_tokens" desc:"Maximum model input length in tokens; null when unknown" openapi_nullable:"true"`
 }
 
 type listModelProviderGroupModelsOpenAPIResponse struct {
@@ -2069,7 +2073,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/model_providers/models",
 			Summary:     "List current user's models by model_type",
-			Description: "Requires query model_type (e.g. llm, embedding). Returns all non-deleted user_model_provider_group_models for the current user with that model_type across all providers and groups. Ordered by user_model_provider_id, group id, then name. Same items as GET .../groups/{group_id}/models.",
+			Description: "Requires query model_type (e.g. llm, embedding). Returns all non-deleted user_model_provider_group_models for the current user with that model_type across all providers and groups. Each item includes nullable max_input_tokens, the catalog model's maximum input length in tokens; custom or unknown models return null. Ordered by user_model_provider_id, group id, then name. Same items as GET .../groups/{group_id}/models.",
 			Tags:        []string{"model_providers"},
 			QueryParams: listUserModelsByModelTypeQueryParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Models list", listModelProviderGroupModelsOpenAPIResponse{})},
@@ -2133,7 +2137,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/model_providers/{model_provider_id}/groups/{group_id}/models",
 			Summary:     "List models under a connection group",
-			Description: "Lists non-deleted user_model_provider_group_models for the group. Each item includes is_default (true when copied from default_models seeding; false for user-added models).",
+			Description: "Lists non-deleted user_model_provider_group_models for the group. Each item includes is_default (true when copied from default_models seeding; false for user-added models) and nullable max_input_tokens, the catalog model's maximum input length in tokens. Custom or unknown models return null.",
 			Tags:        []string{"model_providers"},
 			PathParams:  modelProviderGroupByIDPathParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Group models list", listModelProviderGroupModelsOpenAPIResponse{})},

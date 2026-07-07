@@ -567,6 +567,7 @@ func seedGroupModelsFromDefaults(
 			ProviderName:             d.ProviderName,
 			Name:                     d.Name,
 			ModelType:                d.ModelType,
+			MaxInputTokens:           d.MaxInputTokens,
 			IsDefault:                true,
 			BaseModel: orm.BaseModel{
 				CreateUserID:   userID,
