@@ -22,14 +22,9 @@ from .skill_identity import (
 from .skill_remote_store import (
     create_remote_skill,
     list_skill_files,
-    read_skill_file,
     remove_remote_skill,
-    remove_skill_file,
     rename_skill_package,
     replace_skill_package_files,
-    skill_file_path,
-    skill_package_dir,
-    write_skill_file,
 )
 from .skill_validation import (
     normalize_skill_category,
@@ -105,9 +100,7 @@ __all__ = [
     'parse_user_preference_frontmatter',
     'post_core_api',
     'prepare_vocab_candidates',
-    'read_skill_file',
     'remove_remote_skill',
-    'remove_skill_file',
     'rename_skill_package',
     'replace_skill_package_files',
     'resolve_index',
@@ -117,8 +110,6 @@ __all__ = [
     'safe_evaluate_expression',
     'serialize_vocab_backend_actions',
     'skill_identity_from_content',
-    'skill_file_path',
-    'skill_package_dir',
     'summarize_vocab_action_for_log',
     'summarize_vocab_candidate_for_log',
     'summarize_vocab_suggestion_for_log',
@@ -129,5 +120,4 @@ __all__ = [
     'validate_skill_content',
     'validate_skill_name',
     'validate_user_preference_content',
-    'write_skill_file',
 ]

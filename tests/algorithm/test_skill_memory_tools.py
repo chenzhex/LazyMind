@@ -2,6 +2,7 @@ import importlib
 
 memory_mod = importlib.import_module('lazymind.chat.engine.tools.memory_editor')
 skill_editor_mod = importlib.import_module('lazymind.chat.engine.tools.skill_editor')
+skill_remote_store_mod = importlib.import_module('lazymind.chat.engine.tools.infra.skill_remote_store')
 
 
 def test_memory_editor_operations_write_memory_review(monkeypatch):
@@ -82,14 +83,23 @@ def test_skill_editor_create_modify_remove_core_paths(monkeypatch):
     create_calls = []
     remove_calls = []
     replace_calls = []
+    remote_fs = object()
 
     monkeypatch.setattr(
         skill_editor_mod.lazyllm,
         'globals',
         {'agentic_config': {'user_id': 'user-1', 'session_id': 'session-1'}},
     )
-    monkeypatch.setattr(skill_editor_mod, 'create_remote_skill', lambda *args: create_calls.append(args))
-    monkeypatch.setattr(skill_editor_mod, 'remove_remote_skill', lambda *args: remove_calls.append(args))
+    monkeypatch.setattr(
+        skill_editor_mod,
+        'create_remote_skill',
+        lambda *args, **kwargs: create_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        skill_editor_mod,
+        'remove_remote_skill',
+        lambda *args, **kwargs: remove_calls.append((args, kwargs)),
+    )
 
     existing_content = (
         '---\n'
@@ -102,13 +112,14 @@ def test_skill_editor_create_modify_remove_core_paths(monkeypatch):
     monkeypatch.setattr(
         skill_editor_mod,
         'list_skill_files',
-        lambda category, name: {
+        lambda category, name, **kwargs: {
             'SKILL.md': existing_content,
             'references/old.md': 'old reference\n',
         },
     )
 
-    def fake_replace_skill_package_files(category, name, before, after):
+    def fake_replace_skill_package_files(category, name, before, after, **kwargs):
+        assert kwargs == {'fs': remote_fs}
         replace_calls.append((category, name, before, after))
         return {
             'written': sorted(path for path in after if before.get(path) != after.get(path)),
@@ -125,7 +136,7 @@ def test_skill_editor_create_modify_remove_core_paths(monkeypatch):
         '---\n'
         'Use this skill for tests.\n'
     )
-    tool_group = skill_editor_mod.SkillEditorToolGroup()
+    tool_group = skill_editor_mod.SkillEditorToolGroup(remote_fs=remote_fs)
     create_result = tool_group.create_skill(
         'new_skill',
         category='drafts',
@@ -172,8 +183,8 @@ def test_skill_editor_create_modify_remove_core_paths(monkeypatch):
         'status': 'removed',
         'message': 'Skill was removed and is no longer active.',
     }
-    assert create_calls == [('drafts', 'new_skill', content)]
-    assert remove_calls == [('writing', 'existing')]
+    assert create_calls == [(('drafts', 'new_skill', content), {'fs': remote_fs})]
+    assert remove_calls == [(('writing', 'existing'), {'fs': remote_fs})]
     assert replace_calls == [
         (
             'writing',
@@ -187,6 +198,33 @@ def test_skill_editor_create_modify_remove_core_paths(monkeypatch):
                 'scripts/check.py': 'print("ok")\n',
             },
         ),
+    ]
+
+
+def test_skill_remote_store_create_mkdirs_and_remove_trashes():
+    calls = []
+
+    class FakeRemoteFS:
+        def mkdir(self, path, create_parents=True):
+            calls.append(('mkdir', path, create_parents))
+
+        def write(self, path, content):
+            calls.append(('write', path, content))
+
+        def trash(self, path):
+            calls.append(('trash', path))
+
+    fs = FakeRemoteFS()
+
+    create_result = skill_remote_store_mod.create_remote_skill('drafts', 'new-skill', 'content', fs=fs)
+    remove_result = skill_remote_store_mod.remove_remote_skill('drafts', 'new-skill', fs=fs)
+
+    assert create_result['action'] == 'create'
+    assert remove_result['action'] == 'remove'
+    assert calls == [
+        ('mkdir', 'remote://skills/drafts/new-skill', True),
+        ('write', 'remote://skills/drafts/new-skill/SKILL.md', 'content'),
+        ('trash', 'remote://skills/drafts/new-skill'),
     ]
 
 
@@ -219,6 +257,7 @@ def test_skill_editor_rejects_missing_skill_without_write(monkeypatch):
 
 def test_skill_editor_renames_package(monkeypatch):
     rename_calls = []
+    remote_fs = object()
     existing_content = (
         '---\n'
         'name: existing\n'
@@ -231,7 +270,7 @@ def test_skill_editor_renames_package(monkeypatch):
     monkeypatch.setattr(
         skill_editor_mod,
         'list_skill_files',
-        lambda category, name: {'SKILL.md': existing_content, 'references/doc.md': 'doc\n'},
+        lambda category, name, **kwargs: {'SKILL.md': existing_content, 'references/doc.md': 'doc\n'},
     )
     monkeypatch.setattr(
         skill_editor_mod,
@@ -239,7 +278,7 @@ def test_skill_editor_renames_package(monkeypatch):
         lambda *args, **kwargs: rename_calls.append((args, kwargs)),
     )
 
-    result = skill_editor_mod.SkillEditorToolGroup().rename_skill(
+    result = skill_editor_mod.SkillEditorToolGroup(remote_fs=remote_fs).rename_skill(
         'existing',
         category='writing',
         new_name='renamed',
@@ -251,5 +290,6 @@ def test_skill_editor_renames_package(monkeypatch):
     assert result['result']['old'] == {'category': 'writing', 'name': 'existing'}
     assert result['result']['new'] == {'category': 'drafts', 'name': 'renamed'}
     assert rename_calls[0][0][:4] == ('writing', 'existing', 'drafts', 'renamed')
+    assert rename_calls[0][1]['fs'] is remote_fs
     assert 'name: renamed' in rename_calls[0][1]['skill_content']
     assert 'category: drafts' in rename_calls[0][1]['skill_content']

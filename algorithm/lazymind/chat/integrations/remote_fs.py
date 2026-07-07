@@ -132,10 +132,17 @@ class RemoteFS(LazyLLMFSBase):
         return bool(data.get('exists'))
 
     def makedirs(self, path: str, exist_ok: bool = True) -> None:
-        return
+        self.mkdir(path, create_parents=True)
 
     def mkdir(self, path: str, create_parents: bool = True, **kwargs) -> None:
-        return
+        self._request(
+            'POST',
+            'dir',
+            json={
+                'path': self._normalize_path(path),
+                'recursive': bool(create_parents),
+            },
+        )
 
     def rm(self, path: str, recursive: bool = False, maxdepth: Optional[int] = None) -> None:
         self._request(
@@ -173,6 +180,13 @@ class RemoteFS(LazyLLMFSBase):
                 'from': self._normalize_path(path1),
                 'to': self._normalize_path(path2),
             },
+        )
+
+    def trash(self, path: str) -> None:
+        self._request(
+            'POST',
+            'trash',
+            json={'path': self._normalize_path(path)},
         )
 
     def open(

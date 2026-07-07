@@ -94,11 +94,11 @@ def test_remote_fs_omits_session_id_when_not_available(monkeypatch):
     ]
 
 
-def test_remote_fs_write_and_rm_use_core_api(monkeypatch):
+def test_remote_fs_write_mkdir_rm_and_trash_use_core_api(monkeypatch):
     calls = []
 
     def fake_request(method, url, params, timeout, **kwargs):
-        calls.append((method, url, params, timeout, kwargs.get('data')))
+        calls.append((method, url, params, timeout, kwargs.get('data'), kwargs.get('json')))
         return _Response({'ok': True})
 
     monkeypatch.setattr('lazymind.chat.integrations.remote_fs.requests.request', fake_request)
@@ -108,16 +108,27 @@ def test_remote_fs_write_and_rm_use_core_api(monkeypatch):
     )
 
     fs = RemoteFS(base_url='http://core:8000', timeout=3)
+    fs.mkdir('remote://skills/a/b', create_parents=True)
     fs.write('remote://skills/a/b/SKILL.md', 'hello')
     fs.rm('remote://skills/a/b', recursive=True)
+    fs.trash('remote://skills/a/b')
 
     assert calls == [
+        (
+            'POST',
+            'http://core:8000/remote-fs/dir',
+            {'user_id': 'user-1', 'task_id': 'sid-1'},
+            3,
+            None,
+            {'path': 'skills/a/b', 'recursive': True},
+        ),
         (
             'PUT',
             'http://core:8000/remote-fs/content',
             {'path': 'skills/a/b/SKILL.md', 'user_id': 'user-1', 'task_id': 'sid-1'},
             3,
             b'hello',
+            None,
         ),
         (
             'DELETE',
@@ -125,6 +136,15 @@ def test_remote_fs_write_and_rm_use_core_api(monkeypatch):
             {'path': 'skills/a/b', 'recursive': 'true', 'user_id': 'user-1', 'task_id': 'sid-1'},
             3,
             None,
+            None,
+        ),
+        (
+            'POST',
+            'http://core:8000/remote-fs/trash',
+            {'user_id': 'user-1', 'task_id': 'sid-1'},
+            3,
+            None,
+            {'path': 'skills/a/b'},
         ),
     ]
 

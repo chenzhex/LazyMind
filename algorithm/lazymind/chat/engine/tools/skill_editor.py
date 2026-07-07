@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional
 
 import lazyllm
 
+from lazymind.chat.integrations.remote_fs import RemoteFS
 from lazymind.chat.engine.tools.infra import (
     create_remote_skill,
     list_skill_files,
@@ -27,6 +28,9 @@ class SkillEditorToolGroup:
     """Create, modify, rename, and remove reusable skill packages."""
 
     __public_apis__ = ['create_skill', 'modify_skill', 'rename_skill', 'remove_skill']
+
+    def __init__(self, remote_fs: Optional[RemoteFS] = None):
+        self.remote_fs = remote_fs or RemoteFS()
 
     def create_skill(self, name: str, category: Optional[str], content: str) -> Dict[str, Any]:
         """Create a new reusable skill from full SKILL.md content.
@@ -66,7 +70,7 @@ class SkillEditorToolGroup:
                 'SKILL.md frontmatter name/category must match the tool name/category for create.'
             )
         try:
-            create_remote_skill(content_category, content_name, content or '')
+            create_remote_skill(content_category, content_name, content or '', fs=self.remote_fs)
         except Exception as exc:
             return tool_error('create_skill', f'Failed to create skill package: {exc}')
         return tool_success('create_skill', {
@@ -116,7 +120,7 @@ class SkillEditorToolGroup:
         try:
             from lazymind.rewrite.base import UnprocessableContentError
 
-            current_files = list_skill_files(normalized_category, name)
+            current_files = list_skill_files(normalized_category, name, fs=self.remote_fs)
             edited_files, operation_payload = apply_skill_package_operations(
                 current_files,
                 operations,
@@ -142,6 +146,7 @@ class SkillEditorToolGroup:
                 name,
                 current_files,
                 edited_files,
+                fs=self.remote_fs,
             )
         except Exception as exc:
             return tool_error('modify_skill', f'Failed to persist skill package changes: {exc}')
@@ -204,7 +209,7 @@ class SkillEditorToolGroup:
             return tool_error('rename_skill', 'rename_skill requires a different new_name or new_category.')
 
         try:
-            current_files = list_skill_files(normalized_category, name)
+            current_files = list_skill_files(normalized_category, name, fs=self.remote_fs)
             skill_content = current_files.get('SKILL.md') or ''
             renamed_content = rewrite_skill_identity(skill_content, target_category, target_name)
         except Exception as exc:
@@ -220,6 +225,7 @@ class SkillEditorToolGroup:
                 target_category,
                 target_name,
                 skill_content=renamed_content,
+                fs=self.remote_fs,
             )
         except Exception as exc:
             return tool_error('rename_skill', f'Failed to rename skill package: {exc}')
@@ -254,7 +260,7 @@ class SkillEditorToolGroup:
         lazyllm.LOG.info(f'[remove_skill] lookup category={normalized_category!r} name={name!r}')
 
         try:
-            remove_remote_skill(normalized_category, name)
+            remove_remote_skill(normalized_category, name, fs=self.remote_fs)
         except Exception as exc:
             return tool_error('remove_skill', f'Failed to remove skill package: {exc}')
         return tool_success('remove_skill', {
