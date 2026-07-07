@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import ast
 import json
 import math
 import re
@@ -13,10 +12,13 @@ from urllib.parse import quote, urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
+from tenacity import AsyncRetrying, retry_if_result, stop_after_attempt, wait_random_exponential
 
 DEFAULT_DISABLED_TOOLS = tuple(
     'temp_kb calculator wikipedia web_search academic_search url_fetch multimodal image_generator image_editor '
-    'vocab_learn read_memory memory_editor skill_editor local_fs feishu notion'.split()
+    'vocab_learn read_memory memory_editor skill_editor local_fs feishu notion '
+    'schedule create_schedule list_schedules cancel_schedule update_schedule trigger_schedule '
+    'ask_user create_subagent list_subagents read_user_attachment find_user_attachment mcp plugin'.split()
 )
 EVO_EVAL_MEMORY = (
     'Evo evaluation request: use the knowledge-base tool as the evidence source, '
@@ -24,25 +26,51 @@ EVO_EVAL_MEMORY = (
     'and do not ask the user or schedule tasks.'
 )
 DELTA_KEYS = ('delta', 'answer_delta', 'content_delta', 'text')
-FINAL_ANSWER_KEYS = ('answer', 'message', 'text', 'result', 'content')
+EXPLICIT_ANSWER_KEYS = ('answer', 'message', 'result', 'content')
 SOURCE_KEYS = ('sources', 'source_documents', 'retrieved_contexts', 'contexts', 'documents')
-TOOL_RESULT = re.compile(r'<tool_result>(.*?)</tool_result>', re.S)
+TOOL_TAG = re.compile(r'<(?P<tag>tool_call|tool_result)(?:\s[^>]*)?>(?P<body>.*?)</(?P=tag)>', re.S)
 CONTROL_TAG = re.compile(r'<(?:tp|trp|tool_call|tool_result)(?:\s[^>]*)?>.*?</(?:tp|trp|tool_call|tool_result)>', re.S)
 TRACE_ID = re.compile(r'^[0-9a-f]{32}$')
 SSE_FIELD = re.compile(r'^[A-Za-z][A-Za-z0-9_-]*:')
-TOOL_ERROR_MARKERS = (
+TOOL_DIAGNOSTIC_KEYS = ('tool_error', 'tool_errors', 'kb_errors', 'tool_result', 'tool_results')
+DIAGNOSTIC_FRAME_KEY = '_evo_process_diagnostic'
+PROCESS_DIAGNOSTIC_MARKERS = (
+    'disabled_tools',
+    'disabled tools',
     '[tool error]',
-    'moduleexecutionerror',
-    'connectionreseterror',
-    'connection broken',
-    'readtimeout',
-    'connecttimeout',
-    'max retries exceeded',
-    'httpconnectionpool',
+    'tool error',
+    'tool execution failed',
+    'tool disabled',
+    'permission',
+    'forbidden',
+    'unauthorized',
+    'not allowed',
+    'scope',
 )
+MESSAGE_DIAGNOSTIC_MARKERS = (
+    'disabled_tools',
+    'disabled tools',
+    '[tool error]',
+    'tool execution failed',
+    'tool disabled',
+)
+PROCESS_DIAGNOSTIC_FIELDS = (
+    'msg',
+    'error',
+    'exception',
+    'traceback',
+    'detail',
+    'reason',
+    'name',
+    'tool_name',
+)
+STRUCTURED_SCAN_MAX_ITEMS = 20_000
+STREAM_CLOSE_TIMEOUT_SECONDS = 0.1
 
 DEFAULT_CASE_DEADLINE_SECONDS = 300.0
 DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS = 60.0
+DEFAULT_MAX_ATTEMPTS = 5
+DEFAULT_RETRY_WAIT_MAX_SECONDS = 2.0
 ROUTER_ADMIN_TIMEOUT_SECONDS = 10.0
 
 
@@ -64,6 +92,8 @@ class RouterChatRequest:
     pool_timeout_seconds: float = 5.0
     case_deadline_seconds: float = DEFAULT_CASE_DEADLINE_SECONDS
     first_frame_timeout_seconds: float = DEFAULT_FIRST_FRAME_TIMEOUT_SECONDS
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    retry_wait_max_seconds: float = DEFAULT_RETRY_WAIT_MAX_SECONDS
 
 
 def call_router_chat(request: RouterChatRequest) -> dict[str, Any]:
@@ -88,30 +118,63 @@ async def async_call_router_chat(request: RouterChatRequest) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         return _failed({}, _target_from_raw(request), 'chat_config_error', str(exc))
 
+    attempts = 0
     deadline = time.monotonic() + normalized.case_deadline_seconds
+
+    async def attempt_once() -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _failed({}, _target(normalized), 'chat_timeout', 'chat retry budget exhausted before next attempt')
+        attempt_request = normalized if attempts == 1 else _retry_request(normalized)
+        attempt_request = replace(
+            attempt_request,
+            case_deadline_seconds=remaining,
+            first_frame_timeout_seconds=min(attempt_request.first_frame_timeout_seconds, remaining),
+        )
+        return await _call_router_chat_once(attempt_request)
+
+    wait_strategy = wait_random_exponential(multiplier=0.25, max=normalized.retry_wait_max_seconds)
+
+    def wait_with_deadline(state: Any) -> float:
+        return min(float(wait_strategy(state)), max(0.0, deadline - time.monotonic()))
+
+    retryer = AsyncRetrying(
+        stop=stop_after_attempt(normalized.max_attempts),
+        wait=wait_with_deadline,
+        retry=retry_if_result(_retryable_chat_result),
+        retry_error_callback=_retry_exhausted_result,
+        reraise=False,
+    )
+    result = await retryer(attempt_once)
+    if attempts > 1:
+        result = dict(result) | {'chat_attempt_count': attempts}
+    return result
+
+
+async def _call_router_chat_once(request: RouterChatRequest) -> dict[str, Any]:
+    deadline = time.monotonic() + request.case_deadline_seconds
     timeout = httpx.Timeout(
-        connect=normalized.connect_timeout_seconds,
-        write=normalized.write_timeout_seconds,
+        connect=request.connect_timeout_seconds,
+        write=request.write_timeout_seconds,
         read=None,
-        pool=normalized.pool_timeout_seconds,
+        pool=request.pool_timeout_seconds,
     )
 
     try:
-        return await asyncio.wait_for(
-            _call_router_chat(normalized, timeout, deadline),
-            timeout=normalized.case_deadline_seconds,
-        )
+        return await _call_router_chat(request, timeout, deadline)
     except asyncio.TimeoutError:
         return _failed(
             {},
-            _target(normalized),
+            _target(request),
             'chat_timeout',
             'chat stream exceeded case deadline after 0 frame(s)',
         )
     except httpx.HTTPError as exc:
-        return _failed({}, _target(normalized), 'chat_transport_error', str(exc))
+        return _failed({}, _target(request), 'chat_transport_error', str(exc))
     except Exception as exc:
-        return _failed({}, _target(normalized), 'chat_unknown_error', f'{type(exc).__name__}: {exc}')
+        return _failed({}, _target(request), 'chat_unknown_error', f'{type(exc).__name__}: {exc}')
 
 
 async def _call_router_chat(
@@ -121,23 +184,36 @@ async def _call_router_chat(
 ) -> dict[str, Any]:
     target = _target(request)
     payload = _payload(request)
-    stream: dict[str, Any] = {'frames': [], 'answer': '', 'finished': False}
+    stream: dict[str, Any] = {
+        'frames': [],
+        'answer': '',
+        'finished': False,
+    }
     pending_data_lines: list[str] = []
     line_task: asyncio.Task[str] | None = None
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        algorithm_target = await _verify_algorithm(client, request, target)
+        algorithm_target = await _verify_algorithm(client, request, target, deadline)
         if isinstance(algorithm_target.get('chat_error'), Mapping):
             return algorithm_target
         target = algorithm_target
-        async with client.stream(
+        first_frame_deadline = time.monotonic() + request.first_frame_timeout_seconds
+        stream_cm = client.stream(
             'POST',
             request.router_chat_url,
             json=payload,
             headers={'Accept': 'text/event-stream', 'Content-Type': 'application/json'},
-        ) as response:
+        )
+        try:
+            response = await asyncio.wait_for(
+                stream_cm.__aenter__(),
+                timeout=_remaining_seconds(deadline, first_frame_deadline, False),
+            )
+        except asyncio.TimeoutError:
+            return _timeout_failure(stream, target)
+        try:
             if response.status_code != 200:
-                return _failed(stream, target, 'chat_http_error', await _http_error(response))
+                return _failed(stream, target, 'chat_http_error', await _http_error(response, deadline))
 
             routed = response.headers.get('X-Algorithm-Id', '').strip()
             if not routed:
@@ -156,12 +232,13 @@ async def _call_router_chat(
                 target = target | {'routed_instance_host': routed_instance}
 
             lines = response.aiter_lines()
-            first_frame_deadline = time.monotonic() + request.first_frame_timeout_seconds
             try:
                 while True:
                     remaining = _remaining_seconds(deadline, first_frame_deadline, bool(stream['frames']))
                     if remaining <= 0:
-                        await response.aclose()
+                        await _cancel_line_task(line_task)
+                        line_task = None
+                        await _close_response(response)
                         return _timeout_failure(stream, target)
                     if line_task is None:
                         line_task = asyncio.create_task(lines.__anext__())
@@ -184,9 +261,40 @@ async def _call_router_chat(
                     if accepted is not None:
                         return accepted
             finally:
-                if line_task is not None and not line_task.done():
-                    line_task.cancel()
-                    await asyncio.gather(line_task, return_exceptions=True)
+                await _cancel_line_task(line_task)
+        finally:
+            await _exit_stream(stream_cm)
+
+
+async def _cancel_line_task(line_task: asyncio.Task[str] | None) -> None:
+    if line_task is not None and not line_task.done():
+        line_task.cancel()
+        done, _ = await asyncio.wait({line_task}, timeout=STREAM_CLOSE_TIMEOUT_SECONDS)
+        if done:
+            await asyncio.gather(line_task, return_exceptions=True)
+        else:
+            line_task.add_done_callback(_consume_task_result)
+
+
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except BaseException:
+        pass
+
+
+async def _close_response(response: Any) -> None:
+    try:
+        await asyncio.wait_for(response.aclose(), timeout=STREAM_CLOSE_TIMEOUT_SECONDS)
+    except Exception:
+        pass
+
+
+async def _exit_stream(stream_cm: Any) -> None:
+    try:
+        await asyncio.wait_for(stream_cm.__aexit__(None, None, None), timeout=STREAM_CLOSE_TIMEOUT_SECONDS)
+    except Exception:
+        pass
 
 
 def _normalize_request(request: RouterChatRequest) -> RouterChatRequest:
@@ -201,6 +309,10 @@ def _normalize_request(request: RouterChatRequest) -> RouterChatRequest:
     kb_ids = tuple(dict.fromkeys(str(item).strip() for item in request.kb_ids if str(item).strip()))
     if not kb_ids:
         raise ValueError('kb_ids is required')
+    disabled_tools = tuple(dict.fromkeys((
+        *DEFAULT_DISABLED_TOOLS,
+        *(str(item).strip() for item in (request.disabled_tools or ()) if str(item).strip()),
+    )))
     trace_id = str(request.trace_id or uuid4().hex).strip().lower()
     if not TRACE_ID.fullmatch(trace_id):
         raise ValueError('trace_id must be a 32-character lowercase hex string')
@@ -218,6 +330,7 @@ def _normalize_request(request: RouterChatRequest) -> RouterChatRequest:
         conversation_id=conversation_id,
         user_id=user_id,
         history=history,
+        disabled_tools=disabled_tools,
         connect_timeout_seconds=_positive_number(request.connect_timeout_seconds, 'connect_timeout_seconds'),
         write_timeout_seconds=_positive_number(request.write_timeout_seconds, 'write_timeout_seconds'),
         pool_timeout_seconds=_positive_number(request.pool_timeout_seconds, 'pool_timeout_seconds'),
@@ -226,6 +339,8 @@ def _normalize_request(request: RouterChatRequest) -> RouterChatRequest:
             request.first_frame_timeout_seconds,
             'first_frame_timeout_seconds',
         ),
+        max_attempts=_int_between(request.max_attempts, 'max_attempts', 1, 5),
+        retry_wait_max_seconds=_non_negative_number(request.retry_wait_max_seconds, 'retry_wait_max_seconds'),
     )
 
 
@@ -290,18 +405,33 @@ def _accept_payload(
     try:
         frame = json.loads(text)
     except json.JSONDecodeError:
-        return _failed(stream, target, 'chat_protocol_error', f'non-json SSE data: {text[:120]}')
+        return _failed(dict(stream) | {'answer': ''}, target, 'chat_protocol_error',
+                       'non-json SSE data')
     if not isinstance(frame, Mapping):
-        return _failed(stream, target, 'chat_protocol_error', 'SSE JSON is not an object')
+        return _failed(dict(stream) | {'answer': ''}, target, 'chat_protocol_error',
+                       'SSE JSON is not an object')
 
-    stream['frames'].append(dict(frame))
     data = frame.get('data') if isinstance(frame.get('data'), Mapping) else frame
+    tool_diagnostic = _is_tool_diagnostic(data) or _is_process_diagnostic(frame)
+    stored_frame = dict(frame)
+    if tool_diagnostic:
+        stored_frame[DIAGNOSTIC_FRAME_KEY] = True
+    stream['frames'].append(stored_frame)
     codes = [value for value in (frame.get('code'), data.get('code')) if value is not None]
     status = str(data.get('status') or '').upper()
-    if any(code not in (200, '200') for code in codes) or status == 'FAILED':
+    if (any(_code_failed(code) for code in codes) or status == 'FAILED') and not tool_diagnostic:
         message = data.get('msg') or frame.get('msg') or data.get('message') or status
-        return _failed(stream, target, 'chat_business_error', str(message))
-    stream['answer'] += str(next((data[key] for key in DELTA_KEYS if data.get(key)), ''))
+        return _failed(dict(stream) | {'answer': ''}, target, 'chat_business_error', str(message))
+    delta = _delta_text(data)
+    if not tool_diagnostic:
+        explicit_answer = _last([data], EXPLICIT_ANSWER_KEYS)
+        if explicit_answer:
+            stream['explicit_answer'] = str(explicit_answer)
+        if delta:
+            stream['answer'] += delta
+    else:
+        stream['answer'] = ''
+        stream.pop('explicit_answer', None)
     if status == 'FINISHED':
         stream['finished'] = True
         return _normalize(target, stream)
@@ -310,23 +440,34 @@ def _accept_payload(
 
 def _normalize(target: Mapping[str, Any], stream: Mapping[str, Any]) -> dict[str, Any]:
     frames = [
-        frame.get('data') if isinstance(frame.get('data'), Mapping) else frame
+        frame
         for frame in stream.get('frames', [])
         if isinstance(frame, Mapping)
     ]
-    raw_answer = str(stream.get('answer') or _last(frames, FINAL_ANSWER_KEYS)).strip()
-    if not stream.get('finished'):
-        return _failed(stream, target, 'chat_protocol_error', 'stream ended before FINISHED')
-    if not raw_answer:
-        return _failed(stream, target, 'chat_protocol_error', 'stream finished without answer text')
-    tool_errors = extract_chat_tool_errors(frames, raw_answer)
-    sources = _sources(frames, raw_answer)
-    contexts, doc_ids, chunk_ids = _source_refs(sources, target)
+    answer_frames = [_frame_data(frame) for frame in _answer_candidate_frames(frames)]
+    raw_answer = str(
+        stream.get('explicit_answer')
+        or _last(answer_frames, EXPLICIT_ANSWER_KEYS)
+        or stream.get('answer')
+        or _last(answer_frames, ('text',))
+    ).strip()
     answer = _answer_text(raw_answer)
+    if not stream.get('finished'):
+        return _failed(
+            dict(stream) | {'answer': ''},
+            target,
+            'chat_protocol_error',
+            'stream ended before FINISHED',
+        )
+    sources = _sources(answer_frames)
+    contexts, doc_ids, chunk_ids = _source_refs(sources, target)
+    if not answer:
+        return _failed(dict(stream) | {'answer': ''}, target, 'chat_no_answer',
+                       'stream finished without final answer text')
     return {
         'status': 'ok',
         'answer': answer,
-        'trace_id': str(_last(frames, ('trace_id',)) or target.get('trace_id') or ''),
+        'trace_id': str(target.get('trace_id') or ''),
         'algorithm_id': str(target.get('algorithm_id') or ''),
         'routed_algorithm_id': str(target.get('routed_algorithm_id') or ''),
         'routed_instance_host': str(target.get('routed_instance_host') or ''),
@@ -334,11 +475,19 @@ def _normalize(target: Mapping[str, Any], stream: Mapping[str, Any]) -> dict[str
         'doc_ids': _unique(doc_ids),
         'chunk_ids': _unique(chunk_ids),
         'sources': sources,
-        'tool_errors': tool_errors,
-        'frames': list(stream.get('frames') or []),
+        'tool_errors': [],
+        'frames': [],
         'chat_error': None,
         'target': dict(target),
     }
+
+
+def _answer_candidate_frames(frames: Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, Any]]:
+    last_tool_index = -1
+    for index, frame in enumerate(frames):
+        if _is_diagnostic_frame(frame):
+            last_tool_index = index
+    return frames[last_tool_index + 1:] if last_tool_index >= 0 else frames
 
 
 def _failed(
@@ -359,10 +508,109 @@ def _failed(
         'chunk_ids': [],
         'sources': [],
         'tool_errors': [],
-        'frames': list(stream.get('frames') or []),
+        'frames': [],
         'chat_error': {'type': error_type, 'message': message},
         'target': dict(target),
     }
+
+
+def _retry_request(request: RouterChatRequest) -> RouterChatRequest:
+    trace_id = uuid4().hex
+    return replace(request, trace_id=trace_id, conversation_id=trace_id)
+
+
+def _retryable_chat_result(result: Mapping[str, Any]) -> bool:
+    chat_error = result.get('chat_error') if isinstance(result.get('chat_error'), Mapping) else {}
+    error_type = str(chat_error.get('type') or '')
+    if error_type == 'chat_no_answer':
+        return True
+    return False
+
+
+def _retry_exhausted_result(state: Any) -> dict[str, Any]:
+    result = state.outcome.result()
+    if not _retryable_chat_result(result):
+        return dict(result)
+    target = result.get('target') if isinstance(result.get('target'), Mapping) else {}
+    empty_result = dict(result) | {'answer': ''}
+    failed = _failed(empty_result, target, 'chat_no_answer_retry_exhausted',
+                     'chat stream repeatedly finished without final answer text')
+    return failed | {'retry_exhausted': True}
+
+
+def _code_failed(value: Any) -> bool:
+    return str(value).strip() != '200'
+
+
+def _delta_text(data: Mapping[str, Any]) -> str:
+    return str(next((data[key] for key in DELTA_KEYS if data.get(key)), ''))
+
+
+def _is_tool_diagnostic(data: Mapping[str, Any]) -> bool:
+    name = str(data.get('name') or data.get('tool_name') or data.get('tool') or '').lower()
+    has_tool_payload = any(data.get(key) for key in TOOL_DIAGNOSTIC_KEYS)
+    has_tool_tag_text = any(TOOL_TAG.search(str(data.get(key) or '')) for key in DELTA_KEYS)
+    has_tool_identity = bool(
+        name
+        or data.get('tool_call_id')
+        or data.get('tool_call')
+        or has_tool_payload
+        or has_tool_tag_text
+    )
+    if not has_tool_identity:
+        return False
+    if has_tool_tag_text or has_tool_payload or data.get('error') or data.get('exception') or data.get('traceback'):
+        return True
+    return 'tool' in name or name.startswith('kb_') or '_kb_' in name
+
+
+def _is_process_diagnostic(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return _has_process_marker(value)
+    data = _frame_data(value)
+    fields = [
+        source[key]
+        for source in (value, data)
+        for key in PROCESS_DIAGNOSTIC_FIELDS
+        if source.get(key)
+    ]
+    if _has_process_marker(fields):
+        return True
+    codes = [item for item in (value.get('code'), data.get('code')) if item is not None]
+    status = str(value.get('status') or data.get('status') or '').upper()
+    messages = [source['message'] for source in (value, data) if source.get('message')]
+    if _has_process_marker(messages, MESSAGE_DIAGNOSTIC_MARKERS) or any(
+        _is_permission_denied_message(message) for message in messages
+    ):
+        return True
+    failed = any(_code_failed(code) for code in codes) or status == 'FAILED'
+    return failed and _has_process_marker([*messages, _delta_text(data)])
+
+
+def _has_process_marker(value: Any, markers: Sequence[str] = PROCESS_DIAGNOSTIC_MARKERS) -> bool:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str).lower()
+    except (TypeError, ValueError):
+        text = str(value or '').lower()
+    return any(marker in text for marker in markers)
+
+
+def _is_permission_denied_message(value: Any) -> bool:
+    text = str(value or '').strip().lower().rstrip('.!')
+    return text == 'permission denied' or text.startswith(('permission denied by ', 'permission denied:'))
+
+
+def _frame_data(frame: Mapping[str, Any]) -> Mapping[str, Any]:
+    data = frame.get('data') if isinstance(frame.get('data'), Mapping) else frame
+    return data if isinstance(data, Mapping) else {}
+
+
+def _is_diagnostic_frame(frame: Mapping[str, Any]) -> bool:
+    return (
+        bool(frame.get(DIAGNOSTIC_FRAME_KEY))
+        or _is_tool_diagnostic(_frame_data(frame))
+        or _is_process_diagnostic(frame)
+    )
 
 
 def _target(request: RouterChatRequest) -> dict[str, Any]:
@@ -381,14 +629,19 @@ async def _verify_algorithm(
     client: httpx.AsyncClient,
     request: RouterChatRequest,
     target: Mapping[str, Any],
+    deadline: float,
 ) -> dict[str, Any]:
+    remaining = max(0.0, deadline - time.monotonic())
+    if remaining <= 0:
+        return _failed({}, target, 'router_algorithm_timeout', 'algorithm detail request exceeded case deadline')
+    timeout = min(ROUTER_ADMIN_TIMEOUT_SECONDS, remaining)
     try:
         response = await asyncio.wait_for(
             client.get(_algorithm_url(request.router_admin_url, request.algorithm_id)),
-            timeout=ROUTER_ADMIN_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
-        message = f'algorithm detail request exceeded {ROUTER_ADMIN_TIMEOUT_SECONDS:g}s'
+        message = f'algorithm detail request exceeded {timeout:g}s'
         return _failed({}, target, 'router_algorithm_timeout', message)
     except httpx.HTTPError as exc:
         return _failed({}, target, 'router_algorithm_transport_error', str(exc))
@@ -429,63 +682,47 @@ def _target_from_raw(request: RouterChatRequest) -> dict[str, Any]:
     }
 
 
-def _sources(frames: Sequence[Mapping[str, Any]], answer: str) -> list[dict[str, Any]]:
+def _sources(frames: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
     for data in frames:
         for key in SOURCE_KEYS:
             _collect_sources(data.get(key), sources)
-        for key in ('tool_result', 'tool_results'):
-            _collect_sources(data.get(key), sources)
-        _collect_tool_result_sources(str(data.get('text') or ''), sources)
-    for match in TOOL_RESULT.finditer(answer):
-        _collect_sources(_parse_structured(match.group(1)), sources)
     return [dict(source) for source in sources]
 
 
 def _collect_sources(value: Any, sources: list[dict[str, Any]]) -> None:
-    value = _parse_structured(value)
-    if isinstance(value, Mapping):
-        if _source_like(value):
-            sources.append(dict(value))
-        for key in SOURCE_KEYS:
-            _collect_sources(value.get(key), sources)
-        items = value.get('items')
-        if isinstance(items, list):
-            for item in items:
-                _collect_sources(item, sources)
-        for key in ('result', 'data', 'tool_result', 'tool_results'):
-            _collect_sources(value.get(key), sources)
-    elif isinstance(value, list):
-        for item in value:
-            _collect_sources(item, sources)
+    stack: list[Any] = [value]
+    scanned = 0
+    while stack and scanned < STRUCTURED_SCAN_MAX_ITEMS:
+        current = stack.pop()
+        scanned += 1
+        if isinstance(current, Mapping):
+            if _source_like(current):
+                sources.append(dict(current))
+        elif isinstance(current, list):
+            stack.extend(reversed(current))
 
 
 def _source_like(value: Mapping[str, Any]) -> bool:
     metadata = value.get('global_metadata')
     metadata = metadata if isinstance(metadata, Mapping) else {}
     has_text = any(value.get(key) for key in ('content', 'text', 'chunk'))
-    has_ref = any(value.get(key) for key in ('doc_id', 'docid', 'document_id', 'chunk_id', 'chunkid', 'uid', 'id'))
-    return bool(has_text and (has_ref or metadata.get('docid') or metadata.get('core_document_id')))
-
-
-def _collect_tool_result_sources(text: str, sources: list[dict[str, Any]]) -> None:
-    for match in TOOL_RESULT.finditer(text or ''):
-        _collect_sources(match.group(1), sources)
-
-
-def _parse_structured(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    text = value.strip()
-    if not text or text[0] not in '{[':
-        return value
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        try:
-            return ast.literal_eval(text)
-        except (SyntaxError, ValueError):
-            return value
+    has_ref = any(
+        value.get(key) or metadata.get(key)
+        for key in (
+            'doc_id',
+            'docid',
+            'document_id',
+            'core_document_id',
+            'chunk_id',
+            'chunkid',
+            'segment_id',
+            'segement_id',
+            'uid',
+            'id',
+        )
+    )
+    return bool(has_text and has_ref)
 
 
 def _answer_text(raw_answer: str) -> str:
@@ -542,85 +779,36 @@ def _source_refs(
     return contexts, doc_ids, chunk_ids
 
 
-def extract_chat_tool_errors(frames: Sequence[Mapping[str, Any]], answer: str = '') -> list[Any]:
-    errors = []
-    for data in frames:
-        for key in ('tool_error', 'tool_errors', 'kb_errors'):
-            if data.get(key):
-                errors.append(data[key])
-        for key in ('tool_result', 'tool_results'):
-            _collect_tool_errors(data.get(key), errors)
-        _collect_tool_result_tags(str(data.get('text') or ''), errors)
-    _collect_tool_result_tags(answer, errors)
-    return errors
+async def _http_error(response: httpx.Response, deadline: float) -> str:
+    chunks: list[bytes] = []
+    total = 0
 
+    async def read_limited() -> None:
+        nonlocal total
+        async for chunk in response.aiter_bytes():
+            if not chunk:
+                continue
+            remaining = 512 - total
+            if remaining <= 0:
+                return
+            chunks.append(chunk[:remaining])
+            total += min(len(chunk), remaining)
+            if total >= 512:
+                return
 
-def _collect_tool_errors(value: Any, errors: list[Any]) -> None:
-    parsed = _parse_structured(value)
-    if parsed is not value:
-        _collect_tool_errors(parsed, errors)
-        return
-    if isinstance(value, Mapping):
-        if _mapping_is_tool_error(value):
-            errors.append(dict(value))
-            return
-        for key in ('tool_error', 'tool_errors', 'kb_errors', 'error', 'exception', 'traceback'):
-            if value.get(key):
-                _collect_tool_errors(value[key], errors)
-        result = value.get('result')
-        if isinstance(result, str):
-            _collect_tool_errors(result, errors)
-        elif isinstance(result, Mapping) and _mapping_is_tool_error(result):
-            errors.append(dict(result))
-    elif isinstance(value, list):
-        for item in value:
-            _collect_tool_errors(item, errors)
-    elif _looks_like_tool_error(value):
-        errors.append(str(value))
-
-
-def _collect_tool_result_tags(text: str, errors: list[Any]) -> None:
-    for match in TOOL_RESULT.finditer(text or ''):
-        try:
-            payload = json.loads(match.group(1))
-        except json.JSONDecodeError:
-            continue
-        _collect_tool_errors(payload, errors)
-
-
-def _looks_like_tool_error(value: Any) -> bool:
-    text = _error_text(value)
-    return bool(text) and any(marker in text.lower() for marker in TOOL_ERROR_MARKERS)
-
-
-def _mapping_is_tool_error(value: Mapping[str, Any]) -> bool:
-    if value.get('success') is False:
-        return True
-    status = str(value.get('status') or '').strip().lower()
-    if status in {'error', 'failed', 'fail'}:
-        return True
-    return _looks_like_tool_error(value.get('error') or value.get('exception') or value.get('traceback'))
-
-
-def _error_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, Mapping):
-        return json.dumps(value, ensure_ascii=False, default=str)
-    if isinstance(value, list):
-        return json.dumps(value, ensure_ascii=False, default=str)
-    return str(value or '').strip()
-
-
-async def _http_error(response: httpx.Response) -> str:
-    body = (await response.aread()).decode(errors='replace').strip()
+    timeout = max(0.001, deadline - time.monotonic())
+    try:
+        await asyncio.wait_for(read_limited(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return f'HTTP {response.status_code}: <error body read timed out>'
+    body = b''.join(chunks).decode(errors='replace').strip()
     suffix = f': {body[:300]}' if body else ''
     return f'HTTP {response.status_code}{suffix}'
 
 
 def _timeout_failure(stream: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, Any]:
     frames = [
-        frame.get('data') if isinstance(frame.get('data'), Mapping) else frame
+        _frame_data(frame)
         for frame in stream.get('frames', [])
         if isinstance(frame, Mapping)
     ]
@@ -632,9 +820,7 @@ def _timeout_failure(stream: Mapping[str, Any], target: Mapping[str, Any]) -> di
         parts.append(f'last_status={last["status"]}')
     if last.get('code') is not None:
         parts.append(f'last_code={last["code"]}')
-    if stream.get('answer'):
-        parts.append(f'answer_chars={len(str(stream["answer"]))}')
-    return _failed(stream, target, 'chat_timeout', '; '.join(parts))
+    return _failed(dict(stream) | {'answer': ''}, target, 'chat_timeout', '; '.join(parts))
 
 
 def _remaining_seconds(deadline: float, first_frame_deadline: float, has_frames: bool) -> float:
@@ -683,6 +869,20 @@ def _positive_number(value: Any, field: str) -> float:
     number = float(value)
     if not math.isfinite(number) or number <= 0:
         raise ValueError(f'{field} must be a positive finite number')
+    return number
+
+
+def _non_negative_number(value: Any, field: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f'{field} must be a non-negative finite number')
+    return number
+
+
+def _int_between(value: Any, field: str, low: int, high: int) -> int:
+    number = int(value)
+    if number < low or number > high:
+        raise ValueError(f'{field} must be between {low} and {high}')
     return number
 
 

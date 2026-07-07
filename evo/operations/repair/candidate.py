@@ -21,6 +21,9 @@ PUBLIC_SERVICE_KEYS = {
     'status',
     'service_kind',
     'algorithm_id',
+    'router_chat_url',
+    'router_admin_url',
+    'code_path',
 }
 
 
@@ -56,6 +59,7 @@ def validate_candidate_patch(
     safe_emit(trace, 'candidate.service_started', status='started', attempt=attempt,
           payload={'case_count': len(selected)})
     service: Mapping[str, Any] | None = None
+    cleanup_service = True
     try:
         service = candidate_service(candidate_config, patch, ctx)
     except Exception as exc:
@@ -174,6 +178,7 @@ def validate_candidate_patch(
                         'goodcase_guard_status', 'recommended_action')
         })
         accepted, reason = _candidate_gate(comparison, candidate_summary, delta)
+        cleanup_service = not accepted
         return {
             'status': 'accepted' if accepted else 'rejected',
             'accepted': accepted,
@@ -183,7 +188,8 @@ def validate_candidate_patch(
             'analysis_delta': delta,
         }
     finally:
-        _cleanup_candidate_service(service, trace=trace, attempt=attempt)
+        if cleanup_service:
+            _cleanup_candidate_service(service, trace=trace, attempt=attempt)
 
 
 def _cleanup_candidate_service(
@@ -196,6 +202,8 @@ def _cleanup_candidate_service(
         return {'status': 'skipped', 'reason': 'missing_service'}
     if service.get('status') != 'ready':
         return {'status': 'skipped', 'reason': 'service_not_ready'}
+    if service.get('cleanup_allowed') is not True:
+        return {'status': 'skipped', 'reason': 'cleanup_not_owned'}
     registered = service.get('register_response') if isinstance(service.get('register_response'), Mapping) else {}
     if registered.get('reused') is True:
         return {'status': 'skipped', 'reason': 'reused_service'}

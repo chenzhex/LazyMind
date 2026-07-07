@@ -1404,6 +1404,52 @@ func TestUpdateThreadStepFromEventDoneCompletesRunningStep(t *testing.T) {
 	}
 }
 
+func TestUpdateThreadStepFromEventDonePreservesPausedStatus(t *testing.T) {
+	db := newAgentTestDB(t)
+	stepID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
+		EventName: "done",
+		RawFrame:  `{"type":"done","stage":"eval","status":"paused","step_id":"` + stepID + `"}`,
+	}); err != nil {
+		t.Fatalf("update paused done step returned error: %v", err)
+	}
+
+	var step orm.AgentThreadStep
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepID).First(&step).Error; err != nil {
+		t.Fatalf("load step: %v", err)
+	}
+	if step.Status != "paused" || !step.Active {
+		t.Fatalf("expected paused active step, got status=%q active=%v", step.Status, step.Active)
+	}
+	if step.EndedAt != nil {
+		t.Fatalf("paused step must not set ended_at")
+	}
+}
+
+func TestUpdateThreadStepFromEventDoesNotCompleteStepFromProgressAction(t *testing.T) {
+	db := newAgentTestDB(t)
+	stepID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
+		EventName: "eval.answer",
+		RawFrame:  `{"stage":"eval","action":"completed","artifact_id":"eval.rag_answer","step_id":"` + stepID + `"}`,
+	}); err != nil {
+		t.Fatalf("update eval answer progress returned error: %v", err)
+	}
+
+	var step orm.AgentThreadStep
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepID).First(&step).Error; err != nil {
+		t.Fatalf("load step: %v", err)
+	}
+	if step.Status != "running" || !step.Active {
+		t.Fatalf("expected progress event to keep step running, got status=%q active=%v", step.Status, step.Active)
+	}
+	if step.EndedAt != nil {
+		t.Fatalf("progress event must not set ended_at")
+	}
+}
+
 func TestUpdateThreadStepFromEventKeepsOnlyLatestRunningStepActive(t *testing.T) {
 	db := newAgentTestDB(t)
 	stepOneID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"

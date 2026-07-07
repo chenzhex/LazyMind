@@ -6,6 +6,9 @@ from typing import Any
 from .errors import EXTERNAL_CHAT_FAILURE_TYPES
 
 TARGET_STATUS_RANK = {'resolved': 3, 'improved': 2, 'unchanged': 1, 'regressed': 0}
+EXTERNAL_CANDIDATE_STOP_REASONS = frozenset(
+    f'candidate_eval_stopped:{error}' for error in EXTERNAL_CHAT_FAILURE_TYPES
+)
 
 
 def patch_base_decision(
@@ -24,6 +27,11 @@ def patch_base_decision(
         service = candidate.get('service') if isinstance(candidate.get('service'), Mapping) else {}
         health = service.get('healthcheck') if isinstance(service.get('healthcheck'), Mapping) else {}
         htype = _text(health.get('type'))
+        retryable = {'router_timeout'}
+        if htype in retryable:
+            if _best_can_fork(best):
+                return {'action': 'fork_from_best_attempt', 'reason': 'previous attempt has best target topology'}
+            return {'action': 'rollback_to_baseline', 'reason': f'candidate_service_retryable:{htype}'}
         external = {
             'ConnectError',
             'ConnectTimeout',
@@ -75,17 +83,11 @@ def select_best_attempt(best: Mapping[str, Any], attempt: Mapping[str, Any]) -> 
 
 
 def _router_chat_failure(row: Mapping[str, Any]) -> bool:
-    values = (
-        _text(row.get('failure_type')),
-        _text(row.get('reason')),
-        _text(row.get('chat_error_type')),
-        _text(row.get('chat_error_message')),
-    )
-    return any(
-        value in EXTERNAL_CHAT_FAILURE_TYPES
-        or value.startswith('candidate_route_')
-        or any(value.startswith(f'{error}:') for error in EXTERNAL_CHAT_FAILURE_TYPES)
-        for value in values
+    reason = _text(row.get('reason'))
+    chat_error_type = _text(row.get('chat_error_type'))
+    return (
+        chat_error_type in EXTERNAL_CHAT_FAILURE_TYPES
+        or reason in EXTERNAL_CANDIDATE_STOP_REASONS
     )
 
 
