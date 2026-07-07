@@ -1209,28 +1209,34 @@ type diffTreeOpenAPIResponse struct {
 	CacheWritten bool                      `json:"cache_written"`
 }
 
+type remoteFSListQueryParams struct {
+	UserID string `query:"user_id" required:"true" desc:"Required. Target user id used to resolve skills owned by the user."`
+	Path   string `query:"path" required:"true" desc:"RemoteFS path. Use skills for categories, skills/<category> for package list, or skills/<category>/<skill_name>[/rel_path] for package content."`
+	TaskID string `query:"task_id,omitempty" desc:"Optional for skills root/category list; required when path enters a package. Prefix review_ reads/writes existing draft, org_ is skill organization, other values are skill_editor session ids."`
+}
+
 type remoteFSQueryParams struct {
-	UserID   string `query:"user_id"`
-	Path     string `query:"path" required:"true"`
-	TaskID   string `query:"task_id,omitempty"`
-	Encoding string `query:"encoding,omitempty" enum:"raw,base64"`
+	UserID   string `query:"user_id" required:"true" desc:"Required. Target user id used to resolve skills owned by the user."`
+	Path     string `query:"path" required:"true" desc:"RemoteFS package path: skills/<category>/<skill_name>[/rel_path]."`
+	TaskID   string `query:"task_id" required:"true" desc:"Required package content task id. Prefix review_ reads/writes existing draft, org_ is skill organization, other values are skill_editor session ids."`
+	Encoding string `query:"encoding,omitempty" enum:"raw,base64" desc:"Optional content encoding for GET /remote-fs/content."`
 }
 
 type remoteFSTaskQueryParams struct {
-	UserID string `query:"user_id"`
-	TaskID string `query:"task_id" required:"true"`
+	UserID string `query:"user_id" required:"true" desc:"Required. Target user id used to resolve skills owned by the user."`
+	TaskID string `query:"task_id" required:"true" desc:"Required mutation task id. Prefix review_ writes existing draft, org_ is skill organization, other values are skill_editor session ids."`
 }
 
 type remoteFSUserQueryParams struct {
-	UserID string `query:"user_id"`
+	UserID string `query:"user_id" required:"true" desc:"Required. Target user id used to resolve skills owned by the user."`
 }
 
 type remoteFSDeleteQueryParams struct {
-	UserID    string `query:"user_id"`
-	Path      string `query:"path" required:"true"`
-	TaskID    string `query:"task_id,omitempty"`
-	Permanent bool   `query:"permanent,omitempty"`
-	Confirm   bool   `query:"confirm,omitempty"`
+	UserID    string `query:"user_id" required:"true" desc:"Required. Target user id used to resolve skills owned by the user."`
+	Path      string `query:"path" required:"true" desc:"RemoteFS path to delete."`
+	TaskID    string `query:"task_id,omitempty" desc:"Required for package-internal delete; not required for confirmed permanent package purge."`
+	Permanent bool   `query:"permanent,omitempty" desc:"Required true for package root physical purge."`
+	Confirm   bool   `query:"confirm,omitempty" desc:"Required true for package root physical purge."`
 }
 
 type remoteFSDirOpenAPIRequest struct {
@@ -2605,14 +2611,16 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/remote-fs/list",
 			Summary:     "List remote skill filesystem path",
+			Description: "List skills root/category without task_id, or list package content with task-aware view selection.",
 			Tags:        []string{"remote-fs"},
-			QueryParams: remoteFSQueryParams{},
+			QueryParams: remoteFSListQueryParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem list", remoteFSListOpenAPIResponse{})},
 		},
 		{
 			Method:      "GET",
 			Path:        "/remote-fs/info",
 			Summary:     "Get remote skill filesystem path info",
+			Description: "Package paths require task_id so RemoteFS can choose publish view, current task draft view, or review draft view.",
 			Tags:        []string{"remote-fs"},
 			QueryParams: remoteFSQueryParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem info", remoteFSInfoOpenAPIResponse{})},
@@ -2621,6 +2629,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/remote-fs/exists",
 			Summary:     "Check remote skill filesystem path exists",
+			Description: "Package paths require task_id so RemoteFS can choose publish view, current task draft view, or review draft view.",
 			Tags:        []string{"remote-fs"},
 			QueryParams: remoteFSQueryParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Remote filesystem exists", remoteFSExistsOpenAPIResponse{})},
@@ -2629,6 +2638,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/remote-fs/content",
 			Summary:     "Read remote skill filesystem content",
+			Description: "Reads package content using task_id semantics: review_ sees existing draft, org_ and editor session ids see publish unless they own the current draft.",
 			Tags:        []string{"remote-fs"},
 			QueryParams: remoteFSQueryParams{},
 			Responses:   map[int]openAPIResponse{200: rawResp("Remote filesystem raw content")},
@@ -2637,6 +2647,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "PUT",
 			Path:        "/remote-fs/content",
 			Summary:     "Write remote skill filesystem content",
+			Description: "Writes raw body bytes into the task draft. review_ may write an existing draft without changing draft ownership; org_ and editor session ids conflict with another task draft.",
 			Tags:        []string{"remote-fs"},
 			QueryParams: remoteFSQueryParams{},
 			RequestBody: &openAPIBody{Required: true, ContentType: "application/octet-stream", Schema: schemaSource{Inline: map[string]any{"type": "string", "format": "binary"}}},

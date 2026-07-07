@@ -120,6 +120,28 @@ func TestRemoteFSList_NamespaceLevels(t *testing.T) {
 	}
 }
 
+func TestRemoteFSList_TaskIDRequiredOnlyInsidePackage(t *testing.T) {
+	db := testutil.NewTestDB(t)
+	testutil.SeedSkillWithRevision(t, db, "skill1", "rev1")
+	handler := NewHandler(HandlerDeps{DB: db.DB, BlobStore: NewBlobStore(db.DB, NewLocalObjectStore(t.TempDir()))})
+
+	root := httptest.NewRecorder()
+	handler.List(root, httptest.NewRequest(http.MethodGet, "/remote-fs/list?path=skills&user_id=user_001", nil))
+	if root.Code != http.StatusOK {
+		t.Fatalf("root list status=%d body=%s, want 200", root.Code, root.Body.String())
+	}
+	category := httptest.NewRecorder()
+	handler.List(category, httptest.NewRequest(http.MethodGet, "/remote-fs/list?path=skills/research&user_id=user_001", nil))
+	if category.Code != http.StatusOK {
+		t.Fatalf("category list status=%d body=%s, want 200", category.Code, category.Body.String())
+	}
+	pkg := httptest.NewRecorder()
+	handler.List(pkg, httptest.NewRequest(http.MethodGet, "/remote-fs/list?path=skills/research/论文精读&user_id=user_001", nil))
+	if pkg.Code != http.StatusBadRequest {
+		t.Fatalf("package list status=%d body=%s, want 400", pkg.Code, pkg.Body.String())
+	}
+}
+
 func TestRemoteFSContent_DirectoryReturns400(t *testing.T) {
 	db := testutil.NewTestDB(t)
 	testutil.SeedSkillWithRevision(t, db, "skill1", "rev1")
@@ -195,6 +217,9 @@ func TestRemoteFSMoveToBaseExistingPath_Returns409(t *testing.T) {
 func TestRemoteFSMoveToMissingParent_MaterializesParent(t *testing.T) {
 	db := testutil.NewTestDB(t)
 	testutil.SeedSkillWithRevision(t, db, "skill1", "rev1")
+	if err := db.Model(&testutil.SkillDraftRow{}).Where("skill_id = ?", "skill1").Update("task_id", "task1").Error; err != nil {
+		t.Fatalf("seed task_id: %v", err)
+	}
 	testutil.SeedDraftEntry(t, db, "skill1", "references/a.md", "upsert", "file", "h_a")
 	handler := NewHandler(HandlerDeps{DB: db.DB, BlobStore: NewBlobStore(db.DB, NewLocalObjectStore(t.TempDir()))})
 

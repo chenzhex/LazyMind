@@ -296,6 +296,10 @@ func Tree(w http.ResponseWriter, r *http.Request) {
 }
 
 func File(w http.ResponseWriter, r *http.Request) {
+	readFile(w, r, false)
+}
+
+func readFile(w http.ResponseWriter, r *http.Request, notFoundAsOK bool) {
 	db, skillID, _, ok := requireOwnedSkill(w, r)
 	if !ok {
 		return
@@ -307,6 +311,10 @@ func File(w http.ResponseWriter, r *http.Request) {
 	}
 	file, err := newSkillService(db).ReadFile(r.Context(), skillservice.FileRef{SkillID: skillID, RefType: "head", Path: filePath})
 	if err != nil {
+		if notFoundAsOK && isReadFileNotFound(err) {
+			replyServiceErrorOK(w, err)
+			return
+		}
 		replyServiceError(w, err)
 		return
 	}
@@ -369,7 +377,7 @@ func FSExists(w http.ResponseWriter, r *http.Request) {
 }
 
 func FSContent(w http.ResponseWriter, r *http.Request) {
-	File(w, r)
+	readFile(w, r, true)
 }
 
 func FSDownload(w http.ResponseWriter, r *http.Request) {
@@ -1379,6 +1387,25 @@ func decodeOptionalJSON(r *http.Request, v any) error {
 
 func replyServiceError(w http.ResponseWriter, err error) {
 	skillhttperr.ReplyError(w, err)
+}
+
+func replyServiceErrorOK(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	sem := skillhttperr.ForError(err)
+	appErr := common.ResolveAppError(sem.Message, sem.Status)
+	data := map[string]any{"code": sem.Code}
+	if appErr.Detail != nil {
+		data["detail"] = appErr.Detail
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(common.APIResponse{Code: appErr.Code, Message: appErr.Message, Data: data})
+}
+
+func isReadFileNotFound(err error) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(err.Error())), "file not found:")
 }
 
 func replyError(w http.ResponseWriter, message string, status int) {

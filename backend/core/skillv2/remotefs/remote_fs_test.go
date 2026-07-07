@@ -124,6 +124,9 @@ func TestRemoteFSMovePath_UpdatesTaskViewAndKeepsBlobHash(t *testing.T) {
 	db := testutil.NewTestDB(t)
 	testutil.SeedSkillWithRevision(t, db, "skill1", "rev1")
 	testutil.SeedTextBlob(t, db, "h1", "# old\n")
+	if err := db.Model(&testutil.SkillDraftRow{}).Where("skill_id = ?", "skill1").Update("task_id", "task1").Error; err != nil {
+		t.Fatalf("seed task_id: %v", err)
+	}
 	testutil.SeedDraftEntry(t, db, "skill1", "references/old.md", "upsert", "file", "h1")
 	handler := NewHandler(HandlerDeps{DB: db.DB, BlobStore: NewBlobStore(db.DB, NewLocalObjectStore(t.TempDir()))})
 

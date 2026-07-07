@@ -109,12 +109,16 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		h.listSkills(w, r, userID, parsed.category)
 		return
 	}
+	task, ok := requireTask(w, r)
+	if !ok {
+		return
+	}
 	skill, err := h.skillForPath(r.Context(), userID, parsed)
 	if err != nil {
 		writeHTTPError(w, err)
 		return
 	}
-	entries, err := h.entriesForSkill(r.Context(), h.db, skill.ID)
+	entries, err := h.entriesForSkillView(r.Context(), h.db, skill.ID, task)
 	if err != nil {
 		writeHTTPError(w, err)
 		return
@@ -137,12 +141,16 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"path": parsed.raw, "type": "dir"})
 		return
 	}
+	task, ok := requireTask(w, r)
+	if !ok {
+		return
+	}
 	skill, err := h.skillForPath(r.Context(), userID, parsed)
 	if err != nil {
 		writeHTTPError(w, err)
 		return
 	}
-	entry, err := h.entryForPath(r.Context(), skill.ID, parsed.relPath)
+	entry, err := h.entryForPath(r.Context(), h.db, skill.ID, parsed.relPath, task)
 	if err != nil {
 		writeHTTPError(w, err)
 		return
@@ -169,6 +177,10 @@ func (h *Handler) Exists(w http.ResponseWriter, r *http.Request) {
 	}
 	exists := true
 	if parsed.level == pathLevelSkill {
+		task, ok := requireTask(w, r)
+		if !ok {
+			return
+		}
 		skill, err := h.skillForPath(r.Context(), userID, parsed)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -177,7 +189,7 @@ func (h *Handler) Exists(w http.ResponseWriter, r *http.Request) {
 				writeHTTPError(w, err)
 				return
 			}
-		} else if _, err := h.entryForPath(r.Context(), skill.ID, parsed.relPath); err != nil {
+		} else if _, err := h.entryForPath(r.Context(), h.db, skill.ID, parsed.relPath, task); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				exists = false
 			} else {
@@ -201,7 +213,7 @@ func (h *Handler) Content(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Dir(w http.ResponseWriter, r *http.Request) {
-	userID, taskID, ok := requireWriteParams(w, r)
+	userID, task, ok := requireWriteParams(w, r)
 	if !ok {
 		return
 	}
@@ -236,10 +248,10 @@ func (h *Handler) Dir(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if err := h.claimTask(r.Context(), tx, skill.ID, userID, taskID); err != nil {
+		if err := h.claimTask(r.Context(), tx, skill.ID, userID, task); err != nil {
 			return err
 		}
-		entries, err := h.entriesForSkill(r.Context(), tx, skill.ID)
+		entries, err := h.entriesForSkillView(r.Context(), tx, skill.ID, task)
 		if err != nil {
 			return err
 		}
@@ -303,9 +315,8 @@ func (h *Handler) DeletePath(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
-	taskID := r.URL.Query().Get("task_id")
-	if taskID == "" {
-		skillhttperr.Reply(w, "task_id is required", http.StatusBadRequest)
+	task, ok := requireTask(w, r)
+	if !ok {
 		return
 	}
 	skill, err := h.skillForPath(r.Context(), userID, parsed)
@@ -314,10 +325,10 @@ func (h *Handler) DeletePath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = h.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-		if err := h.claimTask(r.Context(), tx, skill.ID, userID, taskID); err != nil {
+		if err := h.claimTask(r.Context(), tx, skill.ID, userID, task); err != nil {
 			return err
 		}
-		entries, err := h.entriesForSkill(r.Context(), tx, skill.ID)
+		entries, err := h.entriesForSkillView(r.Context(), tx, skill.ID, task)
 		if err != nil {
 			return err
 		}
@@ -338,7 +349,7 @@ func (h *Handler) DeletePath(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Copy(w http.ResponseWriter, r *http.Request) {
-	userID, taskID, ok := requireWriteParams(w, r)
+	userID, task, ok := requireWriteParams(w, r)
 	if !ok {
 		return
 	}
@@ -382,16 +393,16 @@ func (h *Handler) Copy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if err := h.claimTask(r.Context(), tx, targetSkill.ID, userID, taskID); err != nil {
+		if err := h.claimTask(r.Context(), tx, targetSkill.ID, userID, task); err != nil {
 			return err
 		}
-		sourceEntries, err := h.entriesForSkill(r.Context(), tx, sourceSkill.ID)
+		sourceEntries, err := h.entriesForSkillView(r.Context(), tx, sourceSkill.ID, task)
 		if err != nil {
 			return err
 		}
 		targetEntries := sourceEntries
 		if sourceSkill.ID != targetSkill.ID {
-			targetEntries, err = h.entriesForSkill(r.Context(), tx, targetSkill.ID)
+			targetEntries, err = h.entriesForSkillView(r.Context(), tx, targetSkill.ID, task)
 			if err != nil {
 				return err
 			}
@@ -406,7 +417,7 @@ func (h *Handler) Copy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Move(w http.ResponseWriter, r *http.Request) {
-	userID, taskID, ok := requireWriteParams(w, r)
+	userID, task, ok := requireWriteParams(w, r)
 	if !ok {
 		return
 	}
@@ -457,21 +468,21 @@ func (h *Handler) Move(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if err := h.claimTask(r.Context(), tx, sourceSkill.ID, userID, taskID); err != nil {
+		if err := h.claimTask(r.Context(), tx, sourceSkill.ID, userID, task); err != nil {
 			return err
 		}
 		if sourceSkill.ID != targetSkill.ID {
-			if err := h.claimTask(r.Context(), tx, targetSkill.ID, userID, taskID); err != nil {
+			if err := h.claimTask(r.Context(), tx, targetSkill.ID, userID, task); err != nil {
 				return err
 			}
 		}
-		sourceEntries, err := h.entriesForSkill(r.Context(), tx, sourceSkill.ID)
+		sourceEntries, err := h.entriesForSkillView(r.Context(), tx, sourceSkill.ID, task)
 		if err != nil {
 			return err
 		}
 		targetEntries := sourceEntries
 		if sourceSkill.ID != targetSkill.ID {
-			targetEntries, err = h.entriesForSkill(r.Context(), tx, targetSkill.ID)
+			targetEntries, err = h.entriesForSkillView(r.Context(), tx, targetSkill.ID, task)
 			if err != nil {
 				return err
 			}
@@ -535,12 +546,16 @@ func (h *Handler) readContent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	task, ok := requireTask(w, r)
+	if !ok {
+		return
+	}
 	parsed, skill, err := h.resolveSkillPath(r, userID)
 	if err != nil {
 		writeHTTPError(w, err)
 		return
 	}
-	entry, err := h.entryForPath(r.Context(), skill.ID, parsed.relPath)
+	entry, err := h.entryForPath(r.Context(), h.db, skill.ID, parsed.relPath, task)
 	if err != nil {
 		writeHTTPError(w, err)
 		return
@@ -576,7 +591,7 @@ func (h *Handler) readContent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) writeContent(w http.ResponseWriter, r *http.Request) {
-	userID, taskID, ok := requireWriteParams(w, r)
+	userID, task, ok := requireWriteParams(w, r)
 	if !ok {
 		return
 	}
@@ -595,10 +610,10 @@ func (h *Handler) writeContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = h.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-		if err := h.claimTask(r.Context(), tx, skill.ID, userID, taskID); err != nil {
+		if err := h.claimTask(r.Context(), tx, skill.ID, userID, task); err != nil {
 			return err
 		}
-		entries, err := h.entriesForSkill(r.Context(), tx, skill.ID)
+		entries, err := h.entriesForSkillView(r.Context(), tx, skill.ID, task)
 		if err != nil {
 			return err
 		}
@@ -751,23 +766,25 @@ func (h *Handler) createEmptyPackage(ctx context.Context, tx *gorm.DB, userID st
 	}).Error
 }
 
-func (h *Handler) claimTask(ctx context.Context, tx *gorm.DB, skillID, userID, taskID string) error {
+func (h *Handler) claimTask(ctx context.Context, tx *gorm.DB, skillID, userID string, task remoteTask) error {
 	var draft skillDraftRow
 	if err := tx.WithContext(ctx).Where("skill_id = ?", skillID).Take(&draft).Error; err != nil {
 		return err
 	}
-	var overlayCount int64
-	if err := tx.WithContext(ctx).Model(&skillDraftEntryRow{}).Where("skill_id = ?", skillID).Count(&overlayCount).Error; err != nil {
+	overlayCount, err := h.draftOverlayCount(ctx, tx, skillID)
+	if err != nil {
 		return err
 	}
-	if overlayCount > 0 && draft.TaskID != "" && draft.TaskID != taskID {
+	if task.Mode != remoteTaskModeReview && overlayCount > 0 && draft.TaskID != task.ID {
 		return conflict("draft belongs to another task")
 	}
 	updates := map[string]any{
-		"task_id":          taskID,
 		"version":          gorm.Expr("version + 1"),
 		"updated_at":       h.clock.Now(),
 		"draft_updated_at": h.clock.Now(),
+	}
+	if task.Mode != remoteTaskModeReview || overlayCount == 0 {
+		updates["task_id"] = task.ID
 	}
 	if userID != "" {
 		updates["updated_by"] = userID
@@ -775,11 +792,15 @@ func (h *Handler) claimTask(ctx context.Context, tx *gorm.DB, skillID, userID, t
 	return tx.WithContext(ctx).Model(&skillDraftRow{}).Where("skill_id = ?", skillID).Updates(updates).Error
 }
 
-func (h *Handler) entryForPath(ctx context.Context, skillID, relPath string) (mergedEntry, error) {
-	entries, err := h.entriesForSkill(ctx, h.db, skillID)
+func (h *Handler) entryForPath(ctx context.Context, db *gorm.DB, skillID, relPath string, task remoteTask) (mergedEntry, error) {
+	entries, err := h.entriesForSkillView(ctx, db, skillID, task)
 	if err != nil {
 		return mergedEntry{}, err
 	}
+	return entryFromEntries(entries, relPath)
+}
+
+func entryFromEntries(entries map[string]mergedEntry, relPath string) (mergedEntry, error) {
 	if relPath == "" {
 		return mergedEntry{Path: "", EntryType: "dir", FileType: "directory"}, nil
 	}
@@ -790,32 +811,45 @@ func (h *Handler) entryForPath(ctx context.Context, skillID, relPath string) (me
 	return entry, nil
 }
 
+func (h *Handler) entriesForSkillView(ctx context.Context, db *gorm.DB, skillID string, task remoteTask) (map[string]mergedEntry, error) {
+	useDraft, err := h.useDraftView(ctx, db, skillID, task)
+	if err != nil {
+		return nil, err
+	}
+	if useDraft {
+		return h.entriesForSkill(ctx, db, skillID)
+	}
+	return h.publishedEntriesForSkill(ctx, db, skillID)
+}
+
+func (h *Handler) useDraftView(ctx context.Context, db *gorm.DB, skillID string, task remoteTask) (bool, error) {
+	var draft skillDraftRow
+	if err := db.WithContext(ctx).Where("skill_id = ?", skillID).Take(&draft).Error; err != nil {
+		return false, err
+	}
+	overlayCount, err := h.draftOverlayCount(ctx, db, skillID)
+	if err != nil {
+		return false, err
+	}
+	if overlayCount == 0 {
+		return false, nil
+	}
+	if task.Mode == remoteTaskModeReview {
+		return true, nil
+	}
+	return draft.TaskID == task.ID, nil
+}
+
+func (h *Handler) draftOverlayCount(ctx context.Context, db *gorm.DB, skillID string) (int64, error) {
+	var count int64
+	err := db.WithContext(ctx).Model(&skillDraftEntryRow{}).Where("skill_id = ?", skillID).Count(&count).Error
+	return count, err
+}
+
 func (h *Handler) entriesForSkill(ctx context.Context, db *gorm.DB, skillID string) (map[string]mergedEntry, error) {
-	var skill skillRow
-	if err := db.WithContext(ctx).Where("id = ?", skillID).Take(&skill).Error; err != nil {
+	entries, err := h.publishedEntriesForSkill(ctx, db, skillID)
+	if err != nil {
 		return nil, err
-	}
-	if skill.HeadRevisionID == nil {
-		return nil, fmt.Errorf("skill has no head revision")
-	}
-	var rows []skillRevisionEntryRow
-	if err := db.WithContext(ctx).Where("revision_id = ?", *skill.HeadRevisionID).Order("path ASC").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	entries := make(map[string]mergedEntry, len(rows))
-	for _, row := range rows {
-		hash := row.BlobHash
-		entries[row.Path] = mergedEntry{
-			Path:      row.Path,
-			EntryType: row.EntryType,
-			BlobHash:  hash,
-			Size:      row.Size,
-			Mime:      row.Mime,
-			FileType:  row.FileType,
-			Binary:    row.Binary,
-			Mode:      row.Mode,
-			FromHead:  true,
-		}
 	}
 	var overlays []skillDraftEntryRow
 	if err := db.WithContext(ctx).Where("skill_id = ?", skillID).Order("path ASC").Find(&overlays).Error; err != nil {
@@ -843,6 +877,36 @@ func (h *Handler) entriesForSkill(ctx context.Context, db *gorm.DB, skillID stri
 			Mode:      overlay.Mode,
 			FromHead:  previous.FromHead,
 			FromDraft: true,
+		}
+	}
+	return entries, nil
+}
+
+func (h *Handler) publishedEntriesForSkill(ctx context.Context, db *gorm.DB, skillID string) (map[string]mergedEntry, error) {
+	var skill skillRow
+	if err := db.WithContext(ctx).Where("id = ?", skillID).Take(&skill).Error; err != nil {
+		return nil, err
+	}
+	if skill.HeadRevisionID == nil {
+		return nil, fmt.Errorf("skill has no head revision")
+	}
+	var rows []skillRevisionEntryRow
+	if err := db.WithContext(ctx).Where("revision_id = ?", *skill.HeadRevisionID).Order("path ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	entries := make(map[string]mergedEntry, len(rows))
+	for _, row := range rows {
+		hash := row.BlobHash
+		entries[row.Path] = mergedEntry{
+			Path:      row.Path,
+			EntryType: row.EntryType,
+			BlobHash:  hash,
+			Size:      row.Size,
+			Mime:      row.Mime,
+			FileType:  row.FileType,
+			Binary:    row.Binary,
+			Mode:      row.Mode,
+			FromHead:  true,
 		}
 	}
 	return entries, nil
@@ -1006,6 +1070,30 @@ const (
 	pathLevelCategory
 	pathLevelSkill
 )
+
+type remoteTaskMode int
+
+const (
+	remoteTaskModeEditor remoteTaskMode = iota
+	remoteTaskModeReview
+	remoteTaskModeOrg
+)
+
+type remoteTask struct {
+	ID   string
+	Mode remoteTaskMode
+}
+
+func parseRemoteTask(taskID string) remoteTask {
+	switch {
+	case strings.HasPrefix(taskID, "review_"):
+		return remoteTask{ID: taskID, Mode: remoteTaskModeReview}
+	case strings.HasPrefix(taskID, "org_"):
+		return remoteTask{ID: taskID, Mode: remoteTaskModeOrg}
+	default:
+		return remoteTask{ID: taskID, Mode: remoteTaskModeEditor}
+	}
+}
 
 type remotePath struct {
 	raw       string
@@ -1177,17 +1265,25 @@ func requireUser(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return userID, true
 }
 
-func requireWriteParams(w http.ResponseWriter, r *http.Request) (string, string, bool) {
-	userID, ok := requireUser(w, r)
-	if !ok {
-		return "", "", false
-	}
+func requireTask(w http.ResponseWriter, r *http.Request) (remoteTask, bool) {
 	taskID := r.URL.Query().Get("task_id")
 	if taskID == "" {
 		skillhttperr.Reply(w, "task_id is required", http.StatusBadRequest)
-		return "", "", false
+		return remoteTask{}, false
 	}
-	return userID, taskID, true
+	return parseRemoteTask(taskID), true
+}
+
+func requireWriteParams(w http.ResponseWriter, r *http.Request) (string, remoteTask, bool) {
+	userID, ok := requireUser(w, r)
+	if !ok {
+		return "", remoteTask{}, false
+	}
+	task, ok := requireTask(w, r)
+	if !ok {
+		return "", remoteTask{}, false
+	}
+	return userID, task, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
