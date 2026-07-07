@@ -1,0 +1,227 @@
+.graph-canvas-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  outline: none;
+
+  .react-flow {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+// Step node card
+.step-node {
+  width: 100%;
+  min-width: 90px;
+  height: auto;
+  min-height: 64px;
+  background: #fff;
+  border: 1.5px solid #d9d9d9;
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+  overflow: hidden;
+
+  &.is-selected {
+    border-color: #1677ff;
+    box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.18);
+  }
+
+  &.has-error {
+    border-color: #ff4d4f;
+    box-shadow: 0 0 0 2px rgba(255, 77, 79, 0.15);
+  }
+
+  &.is-skippable {
+    border-style: dashed;
+    border-color: #faad14;
+  }
+}
+
+.step-node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.step-node-id {
+  font-size: 10px;
+  color: #8c8c8c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.step-node-mode-tag {
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.step-node-badges {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.step-node-badge {
+  font-size: 12px;
+  line-height: 1;
+  cursor: default;
+  user-select: none;
+
+  &--choice {
+    color: #722ed1;
+  }
+
+  &--parallel {
+    color: #1677ff;
+  }
+
+  &--skip {
+    color: #faad14;
+  }
+}
+
+.step-node-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1f1f1f;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-node-handle {
+  width: 10px;
+  height: 10px;
+  background: #1677ff;
+  border: 2px solid #fff;
+}
+
+// Terminal nodes — card style (like step nodes)
+.terminal-node {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 18px;
+  background: #fff;
+  border: 1.5px solid #d9d9d9;
+  border-radius: 10px;
+  pointer-events: all;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  min-width: 64px;
+}
+
+.terminal-node--start {
+  border-color: #1677ff;
+}
+
+.terminal-node--end {
+  border-color: #389e0d;
+}
+
+.terminal-node-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1f1f1f;
+  letter-spacing: 0.02em;
+}
+
+// Transition edge label
+.transition-edge-label {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #595959;
+  cursor: pointer;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: border-color 0.15s;
+
+  &:hover {
+    border-color: #1677ff;
+    color: #1677ff;
+  }
+
+  &.has-error {
+    border-color: #ff4d4f;
+    color: #cf1322;
+  }
+}
+
+.transition-edge-label-empty {
+  color: #bfbfbf;
+  font-style: italic;
+}
+
+// Static label shown when edge is not selected/hovered but has a condition
+.transition-edge-label-static {
+  background: transparent;
+  padding: 2px 4px;
+  font-size: 11px;
+  color: #8c8c8c;
+  pointer-events: none;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+// Output slot chips inside step node
+.step-node-outputs {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 3px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+
+.step-node-outputs-prefix {
+  font-size: 10px;
+  color: #8c8c8c;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-right: 1px;
+}
+
+.step-node-output-chip {
+  display: inline-block;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: #f0f5ff;
+  color: #2f54eb;
+  border: 1px solid #adc6ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 90px;
+  cursor: default;
+
+  &--more {
+    background: #fafafa;
+    color: #595959;
+    border-color: #d9d9d9;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+}

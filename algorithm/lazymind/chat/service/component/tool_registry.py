@@ -20,14 +20,16 @@ from lazyllm.tools.tools.search import (
 
 from lazymind.chat.engine.tools import (
     KBToolGroup,
+    ExternalDBToolGroup,
     LocalFSToolGroup,
+    SystemQueryToolGroup,
     calculator,
     image_editor,
     image_generator,
     kb_tmp_search,
     memory_editor,
     read_memory,
-    skill_editor,
+    SkillEditorToolGroup,
     url_fetch,
     vision_extractor,
     vocab_learn,
@@ -91,6 +93,18 @@ DEFAULT_TOOLS: list[ToolGroupConfig] = [
         description='从用户上传的临时文件中搜索相关内容',
         instance=kb_tmp_search,
         key_source=_temp_kb_key_source,
+    ),
+    ToolGroupConfig(
+        name='system_query',
+        label='系统数据查询',
+        description='只读查询 LazyMind 知识库、文档、数据源和关联统计',
+        instance=SystemQueryToolGroup(),
+    ),
+    ToolGroupConfig(
+        name='external_db',
+        label='外部数据库查询',
+        description='只读查看已配置外部数据库 schema，并执行只读 SELECT/WITH 查询',
+        instance=ExternalDBToolGroup(),
     ),
     ToolGroupConfig(
         name='calculator',
@@ -167,7 +181,7 @@ DEFAULT_TOOLS: list[ToolGroupConfig] = [
         name='skill_editor',
         label='技能编辑',
         description='创建、修改和删除技能',
-        instance=skill_editor,
+        instance=SkillEditorToolGroup(),
     ),
     ToolGroupConfig(
         name='local_fs',

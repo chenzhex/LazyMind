@@ -19,6 +19,7 @@ import UserManagement from "@/modules/admin/pages/user";
 import GroupManagement from "@/modules/admin/pages/group";
 import GroupDetail from "@/modules/admin/pages/group/detail.tsx";
 import DataSourceManagement from "@/modules/dataSource";
+import DatabaseConnectionsPage from "@/modules/dataSource/database";
 import DataSourceDetail from "@/modules/dataSource/detail";
 import DataSourceFeishuCallback from "@/modules/dataSource/common/feishuCallback";
 import CloudDocumentsPage from "@/modules/modelProvider/pages/CloudDocumentsPage";
@@ -34,6 +35,7 @@ import MemoryReviewPage from "@/modules/memory/pages/review";
 import MemoryGlossaryDetailPage from "@/modules/memory/pages/glossaryDetail";
 import MemorySkillDetailPage from "@/modules/memory/pages/skillDetail";
 import MemoryExperienceDetailPage from "@/modules/memory/pages/experienceDetail";
+import PluginDetailPage from "@/modules/plugin/pages/detail";
 import ModelProviderPage from "@/modules/modelProvider";
 import ModelProvidersPage from "@/modules/modelProvider/pages/ModelProvidersPage";
 import ExternalServicesPage from "@/modules/modelProvider/pages/ExternalServicesPage";
@@ -94,6 +96,7 @@ export default function AppRouter() {
             />
           </Route>
           <Route path="data-sources" element={<DataSourceManagement />} />
+          <Route path="data-sources/database-connections" element={<DatabaseConnectionsPage />} />
           <Route path="data-sources/:id" element={<DataSourceDetail />} />
           <Route path="dataset-management" element={<DatasetListPage />} />
           <Route
@@ -156,6 +159,8 @@ export default function AppRouter() {
             />
             <Route path="review/:tab/:itemId" element={<MemoryReviewPage />} />
           </Route>
+          <Route path="memory-management/plugins" element={<Navigate to="/memory-management/skills" replace />} />
+          <Route path="memory-management/plugins/:pluginId" element={<PluginDetailPage />} />
           {runtimeFeatures.hideEvo ? (
             <Route
               path="self-evolution/*"

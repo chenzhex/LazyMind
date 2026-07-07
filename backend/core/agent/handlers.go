@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
@@ -70,7 +70,10 @@ type threadStepResponse struct {
 
 type upstreamProxyResponse struct {
 	Body        any
+	BodyBytes   []byte
 	ContentType string
+	Header      http.Header
+	StatusCode  int
 }
 
 type threadFlowStatusResponse struct {
@@ -299,26 +302,8 @@ func ListThreadRecords(w http.ResponseWriter, r *http.Request) {
 }
 
 func ListThreadSteps(w http.ResponseWriter, r *http.Request) {
-	db := store.DB()
-	if db == nil {
-		common.ReplyErr(w, "store not initialized", http.StatusInternalServerError)
-		return
-	}
-	threadID := strings.TrimSpace(mux.Vars(r)["thread_id"])
-	if _, err := loadUserThread(db, r, threadID); err != nil {
-		replyThreadLoadError(w, err)
-		return
-	}
-	if err := syncThreadStepsFromUpstream(r.Context(), r, db, threadID); err != nil {
-		common.ReplyErrWithData(w, "sync upstream projection steps failed", map[string]any{"detail": err.Error()}, evoProxyStatusCode(err))
-		return
-	}
-
-	var steps []orm.AgentThreadStep
-	if err := db.Where("thread_id = ?", threadID).
-		Order("order_index ASC, created_at ASC, step_id ASC").
-		Find(&steps).Error; err != nil {
-		common.ReplyErr(w, fmt.Sprintf("%s: %v", "list thread steps failed", err), http.StatusInternalServerError)
+	threadID, ok := ownerCheckedThreadID(w, r)
+	if !ok {
 		return
 	}
 
@@ -482,68 +467,15 @@ func StreamThreadMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	threadID := strings.TrimSpace(mux.Vars(r)["thread_id"])
-	thread, err := loadUserThread(db, r, threadID)
-	if err != nil {
+	if _, err := loadUserThread(db, r, threadID); err != nil {
 		replyThreadLoadError(w, err)
 		return
 	}
-
-	afterID := parseAfterID(r)
-	resumeOnly := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("resume_only")), "1") ||
-		strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("resume_only")), "true")
-
-	var session *activeMessageStream
-	if !resumeOnly {
-		requestPayload, _, err := decodeRequestBody(r)
-		if err != nil {
-			common.ReplyErr(w, fmt.Sprintf("%s: %v", "invalid body", err), http.StatusBadRequest)
-			return
-		}
-		if len(requestPayload) == 0 {
-			common.ReplyErr(w, "messages request body required", http.StatusBadRequest)
-			return
-		}
-		messagePayload := map[string]any{}
-		for _, key := range []string{"message_id", "text", "content"} {
-			if value, ok := requestPayload[key]; ok {
-				messagePayload[key] = value
-			}
-		}
-		if _, ok := messagePayload["content"]; !ok {
-			if value, ok := requestPayload["message"]; ok {
-				messagePayload["content"] = value
-			} else if value, ok := requestPayload["query"]; ok {
-				messagePayload["content"] = value
-			}
-		}
-		requestBytes, err := json.Marshal(messagePayload)
-		if err != nil {
-			common.ReplyErr(w, fmt.Sprintf("%s: %v", "marshal body failed", err), http.StatusInternalServerError)
-			return
-		}
-
-		if err := ensureUserCanActivateThread(r.Context(), db, r, threadID); err != nil {
-			writeUserActiveThreadSSEError(w, threadID, err)
-			return
-		}
-
-		session, err = ensureMessageStream(db, thread, requestBytes, forwardedUpstreamHeaders(r))
-		if err != nil {
-			common.ReplyErr(w, err.Error(), http.StatusConflict)
-			return
-		}
-	} else {
-		session = activeStreams.get(threadID)
-	}
-
-	flusher, ok := ensureSSEHeaders(w)
-	if !ok {
-		common.ReplyErr(w, "streaming not supported", http.StatusInternalServerError)
+	if err := ensureUserCanActivateThread(r.Context(), db, r, threadID); err != nil {
+		writeUserActiveThreadSSEError(w, threadID, err)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-
-	streamMessageRecords(r, w, flusher, db, threadID, afterID, session)
+	proxyEvoResponse(w, r, http.MethodPost, threadProxyPath(threadID, "/messages"), cloneURLValues(r.URL.Query()), r.Body, "text/event-stream")
 }
 
 func StreamThreadEvents(w http.ResponseWriter, r *http.Request) {
@@ -556,12 +488,7 @@ func StreamThreadStepEvents(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "step_id required", http.StatusBadRequest)
 		return
 	}
-	normalizedStepID, err := normalizedProjectionStepID(stepID)
-	if err != nil {
-		common.ReplyErr(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	streamThreadEvents(w, r, normalizedStepID)
+	streamThreadEvents(w, r, stepID)
 }
 
 func normalizedProjectionStepID(stepID string) (string, error) {
@@ -572,136 +499,27 @@ func normalizedProjectionStepID(stepID string) (string, error) {
 	return value.String(), nil
 }
 
-func streamThreadEvents(w http.ResponseWriter, r *http.Request, stepID string) {
-	requestStarted := time.Now()
-	db := store.DB()
-	if db == nil {
-		common.ReplyErr(w, "store not initialized", http.StatusInternalServerError)
-		return
-	}
-
-	threadID := strings.TrimSpace(mux.Vars(r)["thread_id"])
-	loadThreadStarted := time.Now()
-	if _, err := loadUserThread(db, r, threadID); err != nil {
-		log.Logger.Warn().
-			Err(err).
-			Str("thread_id", threadID).
-			Dur("load_thread_elapsed", time.Since(loadThreadStarted)).
-			Dur("request_elapsed", time.Since(requestStarted)).
-			Msg("agent thread events load user thread failed")
-		replyThreadLoadError(w, err)
-		return
-	}
-	writeHeaderStarted := time.Now()
-	flusher, ok := ensureSSEHeaders(w)
+func StreamThreadEventTrace(w http.ResponseWriter, r *http.Request) {
+	threadID, ok := ownerCheckedThreadID(w, r)
 	if !ok {
-		common.ReplyErr(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	log.Logger.Info().
-		Str("thread_id", threadID).
-		Str("sse_endpoint", ":events").
-		Dur("write_header_elapsed", time.Since(writeHeaderStarted)).
-		Dur("request_elapsed", time.Since(requestStarted)).
-		Msg("agent thread events response header written")
+	proxyEvoResponse(w, r, http.MethodGet, threadProxyPath(threadID, "/event-trace:stream"), cloneURLValues(r.URL.Query()), nil, "text/event-stream")
+}
 
-	log.Logger.Info().
-		Str("thread_id", threadID).
-		Dur("load_thread_elapsed", time.Since(loadThreadStarted)).
-		Dur("request_elapsed", time.Since(requestStarted)).
-		Msg("agent thread events load thread completed")
-
-	upstreamURL := newEvoClient(forwardedUpstreamHeaders(r)).EventsStreamURL(threadID, stepID)
-	lastUpstreamEventID := parseUpstreamThreadEventID(r)
-	for {
-		if r.Context().Err() != nil {
-			return
-		}
-
-		openUpstreamStarted := time.Now()
-		log.Logger.Info().
-			Str("thread_id", threadID).
-			Str("upstream_url", upstreamURL).
-			Str("last_upstream_event_id", lastUpstreamEventID).
-			Dur("request_elapsed", time.Since(requestStarted)).
-			Msg("agent thread events opening upstream sse")
-		upstreamCtx, cancelUpstream := context.WithCancel(r.Context())
-		resp, err := openThreadEventsStream(upstreamCtx, r, upstreamURL, lastUpstreamEventID)
-		if err != nil {
-			cancelUpstream()
-			log.Logger.Warn().
-				Err(err).
-				Str("thread_id", threadID).
-				Str("upstream_url", upstreamURL).
-				Str("last_upstream_event_id", lastUpstreamEventID).
-				Dur("open_upstream_elapsed", time.Since(openUpstreamStarted)).
-				Dur("request_elapsed", time.Since(requestStarted)).
-				Msg("agent thread events open upstream sse failed")
-			if !shouldContinueThreadEvents(r.Context(), r, threadID, "open_upstream_failed", err) {
-				return
-			}
-			if !sleepBeforeThreadEventsReconnect(r.Context()) {
-				return
-			}
-			continue
-		}
-		log.Logger.Info().
-			Str("thread_id", threadID).
-			Str("upstream_url", upstreamURL).
-			Str("last_upstream_event_id", lastUpstreamEventID).
-			Int("upstream_status", resp.StatusCode).
-			Str("upstream_content_type", resp.Header.Get("Content-Type")).
-			Dur("open_upstream_elapsed", time.Since(openUpstreamStarted)).
-			Dur("request_elapsed", time.Since(requestStarted)).
-			Msg("agent thread events upstream sse opened")
-
-		flowStopped, monitorDone := monitorThreadEventsFlowStatus(upstreamCtx, cancelUpstream, r, threadID)
-		streamErr := streamUpstreamThreadEvents(
-			upstreamCtx,
-			w,
-			flusher,
-			db,
-			threadID,
-			stepID,
-			resp.Body,
-			&lastUpstreamEventID,
-			func(reason string, cause error) bool {
-				return shouldContinueThreadEvents(r.Context(), r, threadID, reason, cause)
-			},
-		)
-		_ = resp.Body.Close()
-		cancelUpstream()
-		<-monitorDone
-		if errors.Is(streamErr, errThreadEventsDone) {
-			log.Logger.Info().
-				Str("thread_id", threadID).
-				Str("step_id", stepID).
-				Msg("agent thread events stopping after done")
-			return
-		}
-		if streamErr != nil {
-			log.Logger.Warn().Err(streamErr).Str("thread_id", threadID).Msg("consume upstream thread events stream failed")
-		}
-		select {
-		case <-flowStopped:
-			log.Logger.Info().
-				Str("thread_id", threadID).
-				Str("reason", "flow_status_not_running").
-				Msg("agent thread events stopping downstream stream")
-			return
-		default:
-		}
-		if r.Context().Err() != nil {
-			return
-		}
-		if !shouldContinueThreadEvents(r.Context(), r, threadID, "upstream_stream_ended", streamErr) {
-			return
-		}
-		if !sleepBeforeThreadEventsReconnect(r.Context()) {
-			return
-		}
+func streamThreadEvents(w http.ResponseWriter, r *http.Request, stepID string) {
+	threadID, ok := ownerCheckedThreadID(w, r)
+	if !ok {
+		return
 	}
+	query := cloneURLValues(r.URL.Query())
+	if strings.TrimSpace(stepID) != "" {
+		if query == nil {
+			query = url.Values{}
+		}
+		query.Set("step_id", strings.TrimSpace(stepID))
+	}
+	proxyEvoResponse(w, r, http.MethodGet, threadProxyPath(threadID, "/events:stream"), query, nil, "text/event-stream")
 }
 
 func GetThreadResultDatasets(w http.ResponseWriter, r *http.Request) {
@@ -720,6 +538,76 @@ func GetThreadResultDiffs(w http.ResponseWriter, r *http.Request) { getThreadRes
 func GetThreadResultAbtests(w http.ResponseWriter, r *http.Request) {
 	getThreadResults(w, r, "abtests")
 }
+
+func ListThreadGates(w http.ResponseWriter, r *http.Request) {
+	threadID, ok := ownerCheckedThreadID(w, r)
+	if !ok {
+		return
+	}
+	proxyEvoResponse(w, r, http.MethodGet, threadProxyPath(threadID, "/gates"), cloneURLValues(r.URL.Query()), nil, "application/json")
+}
+
+func GetThreadGateContent(w http.ResponseWriter, r *http.Request) {
+	threadID, ok := ownerCheckedThreadID(w, r)
+	if !ok {
+		return
+	}
+	vars := mux.Vars(r)
+	path := fmt.Sprintf(
+		"%s/gates/%s/versions/%s",
+		threadProxyPath(threadID, ""),
+		url.PathEscape(strings.TrimSpace(vars["step"])),
+		url.PathEscape(strings.TrimSpace(vars["version"])),
+	)
+	proxyEvoResponse(w, r, http.MethodGet, path, cloneURLValues(r.URL.Query()), nil, "application/json")
+}
+
+func DownloadThreadGate(w http.ResponseWriter, r *http.Request) {
+	threadID, ok := ownerCheckedThreadID(w, r)
+	if !ok {
+		return
+	}
+	vars := mux.Vars(r)
+	path := fmt.Sprintf(
+		"%s/gates/%s/versions/%s:download",
+		threadProxyPath(threadID, ""),
+		url.PathEscape(strings.TrimSpace(vars["step"])),
+		url.PathEscape(strings.TrimSpace(vars["version"])),
+	)
+	proxyEvoResponse(w, r, http.MethodGet, path, cloneURLValues(r.URL.Query()), nil, "application/octet-stream")
+}
+
+func ListCandidates(w http.ResponseWriter, r *http.Request) {
+	threadID := strings.TrimSpace(r.URL.Query().Get("thread_id"))
+	if threadID == "" {
+		common.ReplyErr(w, "thread_id query is required", http.StatusBadRequest)
+		return
+	}
+	if _, err := loadUserThread(store.DB(), r, threadID); err != nil {
+		replyThreadLoadError(w, err)
+		return
+	}
+	proxyEvoResponse(w, r, http.MethodGet, "/candidates", cloneURLValues(r.URL.Query()), nil, "application/json")
+}
+
+func GetCandidate(w http.ResponseWriter, r *http.Request) {
+	candidateID := decodePathValue(strings.TrimSpace(mux.Vars(r)["candidate_id"]))
+	if candidateID == "" {
+		common.ReplyErr(w, "candidate_id required", http.StatusBadRequest)
+		return
+	}
+	threadID := candidateThreadID(candidateID)
+	if threadID == "" {
+		common.ReplyErr(w, "candidate_id must include thread_id prefix", http.StatusBadRequest)
+		return
+	}
+	if _, err := loadUserThread(store.DB(), r, threadID); err != nil {
+		replyThreadLoadError(w, err)
+		return
+	}
+	proxyEvoResponse(w, r, http.MethodGet, "/candidates/"+url.PathEscape(candidateID), cloneURLValues(r.URL.Query()), nil, "application/json")
+}
+
 func GetThreadFlowStatus(w http.ResponseWriter, r *http.Request) {
 	threadID := strings.TrimSpace(mux.Vars(r)["thread_id"])
 	if threadID == "" {
@@ -836,10 +724,6 @@ func downloadThreadResultCSV(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "unsupported result kind", http.StatusBadRequest)
 		return
 	}
-	if format := strings.TrimSpace(r.URL.Query().Get("format")); format != "" && format != "csv" {
-		common.ReplyErr(w, "only csv download is supported", http.StatusBadRequest)
-		return
-	}
 	if _, err := loadUserThread(store.DB(), r, threadID); err != nil {
 		replyThreadLoadError(w, err)
 		return
@@ -881,6 +765,23 @@ func parsePositiveIntQuery(r *http.Request, name string) (int, error) {
 		return 0, fmt.Errorf("%s must be a positive integer", name)
 	}
 	return value, nil
+}
+
+func candidateThreadID(candidateID string) string {
+	candidateID = decodePathValue(candidateID)
+	threadID, _, _ := strings.Cut(candidateID, ":")
+	if threadID == candidateID {
+		return ""
+	}
+	return strings.TrimSpace(threadID)
+}
+
+func decodePathValue(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		return strings.TrimSpace(decoded)
+	}
+	return raw
 }
 
 func postThreadAction(w http.ResponseWriter, r *http.Request, action string) {
@@ -931,7 +832,60 @@ func postThreadAction(w http.ResponseWriter, r *http.Request, action string) {
 		common.ReplyErrWithData(w, "post thread action failed", map[string]any{"detail": err.Error()}, statusCode)
 		return
 	}
+	if statusCode >= 200 && statusCode < 300 {
+		syncThreadAfterAction(r.Context(), r, threadID, action)
+	} else if action == "start" || action == "retry" || action == "continue" {
+		if finishErr := markUserActiveThreadFinished(store.DB(), threadID); finishErr != nil {
+			log.Logger.Warn().Err(finishErr).Str("thread_id", threadID).Str("action", action).Msg("release active thread after rejected action failed")
+		}
+	}
 	writeProxyResponse(w, proxy)
+}
+
+func syncThreadAfterAction(ctx context.Context, r *http.Request, threadID, action string) {
+	db := store.DB()
+	if db == nil {
+		return
+	}
+	flowStatus, err := fetchThreadFlowStatus(ctx, r, threadID)
+	if err != nil {
+		log.Logger.Warn().Err(err).Str("thread_id", threadID).Str("action", action).Msg("sync thread status after action failed")
+		if action == "cancel" {
+			_ = markUserActiveThreadFinished(db, threadID)
+		}
+		return
+	}
+	updates := map[string]any{"updated_at": time.Now().UTC()}
+	if flowStatus != nil {
+		if status := strings.TrimSpace(flowStatus.Status); status != "" {
+			updates["status"] = status
+		}
+		if currentStep := strings.TrimSpace(flowStatus.CurrentStep); currentStep != "" {
+			updates["current_task_id"] = currentStep
+		}
+	}
+	if len(updates) > 1 {
+		if err := db.Model(&orm.AgentThread{}).Where("thread_id = ?", threadID).Updates(updates).Error; err != nil {
+			log.Logger.Warn().Err(err).Str("thread_id", threadID).Str("action", action).Msg("update local thread status after action failed")
+		}
+	}
+	if action == "cancel" || isTerminalThreadFlowStatus(flowStatus) {
+		if err := markUserActiveThreadFinished(db, threadID); err != nil {
+			log.Logger.Warn().Err(err).Str("thread_id", threadID).Str("action", action).Msg("mark active thread finished after action failed")
+		}
+	}
+}
+
+func isTerminalThreadFlowStatus(flowStatus *threadFlowStatusResponse) bool {
+	if flowStatus == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(flowStatus.Status)) {
+	case "ended", "failed", "cancelled", "canceled", "completed", "succeeded":
+		return true
+	default:
+		return false
+	}
 }
 
 type fetchedThreadEvent struct {
@@ -1630,24 +1584,6 @@ func threadFlowStatusFromEvo(thread *evoThread) *threadFlowStatusResponse {
 		flowStatus.ActiveTaskIDs = []string{flowStatus.CurrentStep}
 	}
 	return flowStatus
-}
-
-func writeProxyResponse(w http.ResponseWriter, proxy *upstreamProxyResponse) {
-	if proxy == nil {
-		common.ReplyOK(w, map[string]any{})
-		return
-	}
-	if strings.Contains(proxy.ContentType, "application/json") {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(proxy.Body)
-		return
-	}
-	if proxy.ContentType != "" {
-		w.Header().Set("Content-Type", proxy.ContentType)
-	} else {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	}
-	_, _ = io.WriteString(w, fmt.Sprint(proxy.Body))
 }
 
 func streamMessageRecords(

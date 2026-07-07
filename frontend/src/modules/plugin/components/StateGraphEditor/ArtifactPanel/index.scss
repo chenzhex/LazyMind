@@ -1,0 +1,199 @@
+.artifact-panel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 300px;
+  height: 100%;
+  background: #fff;
+  border-right: 1px solid #f0f0f0;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.06);
+  display: flex;
+  flex-direction: column;
+  z-index: 10;
+}
+
+.artifact-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+
+.artifact-panel-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #1f1f1f;
+}
+
+.artifact-panel-desc {
+  padding: 8px 16px;
+  font-size: 11px;
+  color: #8c8c8c;
+  border-bottom: 1px solid #f5f5f5;
+  line-height: 1.6;
+  flex-shrink: 0;
+
+  code {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    background: #f5f5f5;
+    padding: 0 4px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: #595959;
+  }
+}
+
+.artifact-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+// Each artifact row: id | fields | delete button
+.artifact-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  transition: border-color 0.15s;
+
+  &:hover {
+    border-color: #d9d9d9;
+  }
+}
+
+.artifact-row-id {
+  flex-shrink: 0;
+  width: 88px;
+  padding-top: 3px; // align with first input row
+
+  code {
+    display: block;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 11px;
+    color: #1677ff;
+    background: #e6f4ff;
+    padding: 2px 6px;
+    border-radius: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.artifact-row-fields {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.artifact-row-main {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.artifact-type-select {
+  width: 80px !important;
+  flex-shrink: 0;
+}
+
+.artifact-label-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.artifact-row-flags {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+
+  .ant-checkbox-wrapper {
+    font-size: 12px;
+    color: #595959;
+  }
+}
+
+.artifact-row-extra {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.artifact-extra-label {
+  font-size: 12px;
+  color: #8c8c8c;
+  white-space: nowrap;
+}
+
+.artifact-summary-input {
+  width: 80px !important;
+}
+
+.artifact-row-delete {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+// Add form
+.artifact-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: #f5f7ff;
+  border: 1px dashed #adc6ff;
+  border-radius: 6px;
+}
+
+.artifact-id-error {
+  font-size: 11px;
+  color: #cf1322;
+}
+
+.artifact-add-row2 {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.artifact-add-flags {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+
+  .ant-checkbox-wrapper {
+    font-size: 12px;
+    color: #595959;
+  }
+}
+
+.artifact-add-extra {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.artifact-add-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.artifact-panel-footer {
+  padding: 10px 12px;
+  border-top: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}

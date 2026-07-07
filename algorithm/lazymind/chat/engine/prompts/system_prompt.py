@@ -8,7 +8,9 @@ from .guidance import (
     DEFAULT_SYSTEM_PROMPT,
     IMAGE_REFERENCE_MARKDOWN_GUIDANCE,
     KNOWLEDGE_EVIDENCE_CITATION_GUIDANCE,
+    SEARCH_GUIDANCE,
     TOOL_CALL_STATUS_GUIDANCE,
+    WEB_SEARCH_GUIDANCE,
 )
 
 _KNOWLEDGE_EVIDENCE_GROUPS = {'kb', 'temp_kb'}
@@ -83,6 +85,14 @@ def build_system_prompt(
                 '## User Profile / Preferences\n'
                 "The following profile entries describe the user's long-term preferences"
                 ' and identity.\n'
+                '`agent_persona` describes the identity, responsibilities, and boundaries'
+                ' the assistant should maintain when replying. If `agent_persona` is'
+                ' set, use it as the assistant identity, including for questions such'
+                ' as "who are you" or "what is your name". If `agent_persona` is not'
+                ' set, the assistant may identify itself as LAZYMIND.\n'
+                '`preferred_name` is how replies should address the user.\n'
+                '`response_style` describes expression habits, length preference, and'
+                ' structure preference.\n'
                 "Apply a preference **only when it is relevant to the user's current"
                 ' intent**.\n'
                 'If a preference conflicts with or is unrelated to what the user is'
@@ -100,7 +110,10 @@ def build_system_prompt(
     if active_groups:
         prompt_parts.append(TOOL_CALL_STATUS_GUIDANCE)
     if active_groups & _KNOWLEDGE_EVIDENCE_GROUPS:
+        prompt_parts.append(SEARCH_GUIDANCE)
         prompt_parts.append(KNOWLEDGE_EVIDENCE_CITATION_GUIDANCE)
+    if 'web_search' in active_groups:
+        prompt_parts.append(WEB_SEARCH_GUIDANCE)
     if (
         files
         or 'image_generator' in active_groups

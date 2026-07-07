@@ -13,7 +13,11 @@ from lazymind.rewrite.base import (
 )
 from lazymind.rewrite.memory import _apply_memory_edit_operations
 from lazymind.rewrite.preference import _apply_user_preference_edit_operations
-from lazymind.review.memory_review.db import insert_memory_review_record
+from lazymind.review.memory_review.db import (
+    find_pending_memory_review_record,
+    insert_memory_review_record,
+    update_memory_review_record,
+)
 
 
 class EditOperation(TypedDict, total=False):
@@ -60,8 +64,7 @@ def memory_editor(
 
     Only claim to have saved, remembered, or recorded something when this tool
     or another durable-write tool was actually called in the same response. If
-    no write tool was called, do not say things like "已保存到记忆",
-    "我会记住你的偏好", "I've saved this", or "I'll remember that".
+    no write tool was called, do not say things like "I've saved this", or "I'll remember that".
 
     The tool applies the supplied JSON edit operations to the original text,
     validates the edited full text, and writes one pending row to the
@@ -75,11 +78,14 @@ def memory_editor(
             For ``'user_preference'``, the edited full text must start with YAML
             frontmatter delimited by ``---`` containing ``agent_persona``,
             ``preferred_name``, and ``response_style``, followed by Markdown body
-            content. ``response_style`` must be empty or exactly one of
-            ``简洁``, ``详细``, ``幽默``, ``正式``, ``concise``, ``detailed``,
-            ``humorous``, or ``formal``; use the Chinese values for Chinese
-            user language and the English values otherwise. Write language,
-            formatting, and workflow preferences in the Markdown body.
+            content. These are the only supported frontmatter fields; put any
+            other user profile data, such as email addresses, account names,
+            roles, habits, or preferences, in the Markdown body. ``agent_persona``
+            describes the identity, responsibilities, and boundaries the agent
+            should maintain when replying. ``preferred_name`` is how replies
+            should address the user. ``response_style`` is a short text
+            describing expression habits, length preference, and structure
+            preference. Each frontmatter value must be 100 characters or less.
             The Markdown body must NOT repeat information already captured
             in the frontmatter fields (agent_persona, preferred_name,
             response_style).
@@ -88,12 +94,15 @@ def memory_editor(
             - ``{"op": "replace_text", "old": "...", "new": "..."}``:
               replace the first exact ``old`` substring with ``new``. Prefer
               this whenever the current content is non-empty, including when
-              adding a new entry to an existing section.
+              adding a new entry to an existing section. If the exact text
+              anchor fails because of formatting, retry with a better anchor.
             - ``{"op": "replace_all", "content": "..."}``: replace the
-              full original target text with ``content``. Use this only when
-              the current content is empty, no exact substring can safely
-              anchor the edit, or the update needs global deduplication,
-              conflict resolution, or broader reorganization.
+              full original target text with ``content``. This is not a
+              fallback for failed ``replace_text`` attempts. Use it only when
+              the user explicitly asks to replace the full text, the current
+              content is empty, or the update truly needs global deduplication,
+              conflict resolution, or broader reorganization. Preserve all
+              still-valid existing content.
     """
     raw_target = str(target).strip()
     if raw_target not in {'memory', 'user_preference'}:
@@ -105,7 +114,21 @@ def memory_editor(
     agentic_config = lazyllm.globals['agentic_config']
     user_id = str(agentic_config.get('user_id') or '').strip()
     session_id = str(agentic_config.get('session_id') or '').strip()
-    current_content = agentic_config.get(raw_target) or ''
+    pending_record = find_pending_memory_review_record(
+        target=raw_target,
+        user_id=user_id,
+    )
+    if session_id and pending_record is not None:
+        return tool_error(
+            'memory_editor',
+            'There is an unresolved pending change; tell user to handle it before submitting another edit.'
+        )
+
+    current_content = (
+        pending_record.get('content', '')
+        if pending_record is not None
+        else agentic_config.get(raw_target) or ''
+    )
     operation_payload = [dict(op) for op in operations]
     try:
         apply_operations = (
@@ -123,14 +146,23 @@ def memory_editor(
     except UnprocessableContentError as exc:
         return tool_error('memory_editor', str(exc))
 
-    insert_memory_review_record(
-        target=raw_target,
-        user_id=user_id,
-        session_id=session_id,
-        source_content=current_content,
-        content=edited_content,
-        operations=operation_payload,
-    )
+    if pending_record is not None:
+        update_memory_review_record(
+            record_id=str(pending_record.get('id') or ''),
+            session_id=session_id or str(pending_record.get('session_id') or ''),
+            source_content=current_content,
+            content=edited_content,
+            operations=list(pending_record.get('operations') or []) + operation_payload,
+        )
+    else:
+        insert_memory_review_record(
+            target=raw_target,
+            user_id=user_id,
+            session_id=session_id,
+            source_content=current_content,
+            content=edited_content,
+            operations=operation_payload,
+        )
     return tool_success('memory_editor', {
         'target': raw_target,
         'status': 'pending_review',

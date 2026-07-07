@@ -272,6 +272,9 @@ func (h *Handler) registerRoutes(mux *http.ServeMux) {
 	routeAPI(mux, "PUT", "/api/scan/sources/{source_id}/bindings/{binding_id}", []string{"scan.write"}, h.updateSourceBinding)
 	routeAPI(mux, "DELETE", "/api/scan/sources/{source_id}/bindings/{binding_id}", []string{"scan.write"}, h.deleteSourceBinding)
 
+	// Append source — add new documents/folders to an existing source.
+	routeAPI(mux, "POST", "/api/scan/sources/{source_id}/append", []string{"scan.write"}, h.appendSource)
+
 	// Source tree / document browse.
 	routeAPI(mux, "POST", "/api/scan/sources/{source_id}/tree/children", []string{"scan.read"}, h.listSourceTreeChildren)
 	routeAPI(mux, "POST", "/api/scan/sources/{source_id}/tree/search", []string{"scan.read"}, h.searchSourceTree)

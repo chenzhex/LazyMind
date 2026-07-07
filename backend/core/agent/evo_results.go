@@ -29,17 +29,23 @@ var artifactGateStep = map[string]string{
 }
 
 func fetchThreadResultProxy(ctx context.Context, r *http.Request, threadID, resultKind string, version int) (*upstreamProxyResponse, int, error) {
-	if _, ok := resultKindGateStep[strings.TrimSpace(resultKind)]; !ok {
+	step, ok := resultKindGateStep[strings.TrimSpace(resultKind)]
+	if !ok {
 		return nil, http.StatusBadRequest, fmt.Errorf("unsupported result kind: %s", resultKind)
 	}
-	_, content, ok, err := fetchThreadResultContent(ctx, r, threadID, resultKind, version)
+	client := newEvoClient(forwardedEvoProxyHeaders(r, "application/json"))
+	_, selected, ok, err := selectGateVersionByStep(ctx, client, threadID, step, version)
 	if err != nil {
 		return nil, evoProxyStatusCode(err), err
 	}
 	if !ok {
 		return nil, http.StatusNotFound, fmt.Errorf("thread result gate not found")
 	}
-	return &upstreamProxyResponse{Body: content.Content, ContentType: "application/json"}, http.StatusOK, nil
+	proxy, err := client.doProxyRaw(ctx, http.MethodGet, gateVersionPath(threadID, step, selected, false), nil, nil)
+	if err != nil {
+		return nil, evoProxyStatusCode(err), err
+	}
+	return proxy, proxyStatusCode(proxy), nil
 }
 
 func fetchThreadResultContent(
@@ -61,28 +67,32 @@ func fetchThreadArtifactProxy(ctx context.Context, r *http.Request, threadID, ar
 	if ref.Base == "" {
 		return nil, http.StatusBadRequest, fmt.Errorf("artifact_id required")
 	}
-	client := newEvoClient(forwardedUpstreamHeaders(r))
-	_, content, ok, err := fetchGateContentByArtifact(ctx, client, threadID, ref.Base, ref.Version)
+	client := newEvoClient(forwardedEvoProxyHeaders(r, "application/json"))
+	_, selected, ok, err := selectGateVersionByArtifact(ctx, client, threadID, ref.Base, ref.Version)
 	if err != nil {
 		return nil, evoProxyStatusCode(err), err
 	}
 	if !ok {
 		return nil, http.StatusNotFound, fmt.Errorf("artifact not found")
 	}
-	return &upstreamProxyResponse{Body: content.Content, ContentType: "application/json"}, http.StatusOK, nil
+	proxy, err := client.doProxyRaw(ctx, http.MethodGet, gateVersionPath(threadID, artifactGateStep[ref.Base], selected, false), nil, nil)
+	if err != nil {
+		return nil, evoProxyStatusCode(err), err
+	}
+	return proxy, proxyStatusCode(proxy), nil
 }
 
-func fetchGateContentByArtifact(
+func selectGateVersionByArtifact(
 	ctx context.Context,
 	client evoClient,
 	threadID, artifactID string,
 	version int,
-) (evoGate, *evoGateContent, bool, error) {
+) (evoGate, int, bool, error) {
 	step := artifactGateStep[strings.TrimSpace(artifactID)]
 	if step == "" {
-		return evoGate{}, nil, false, nil
+		return evoGate{}, 0, false, nil
 	}
-	return fetchGateContentByStep(ctx, client, threadID, step, version)
+	return selectGateVersionByStep(ctx, client, threadID, step, version)
 }
 
 func fetchGateContentByStep(
@@ -91,9 +101,23 @@ func fetchGateContentByStep(
 	threadID, step string,
 	version int,
 ) (evoGate, *evoGateContent, bool, error) {
+	gate, selected, ok, err := selectGateVersionByStep(ctx, client, threadID, step, version)
+	if err != nil || !ok {
+		return gate, nil, ok, err
+	}
+	content, err := client.GetGateContent(ctx, threadID, step, selected)
+	return gate, content, err == nil, err
+}
+
+func selectGateVersionByStep(
+	ctx context.Context,
+	client evoClient,
+	threadID, step string,
+	version int,
+) (evoGate, int, bool, error) {
 	gates, err := client.ListGates(ctx, threadID)
 	if err != nil {
-		return evoGate{}, nil, false, err
+		return evoGate{}, 0, false, err
 	}
 	for _, gate := range gates.Gates {
 		if gate.Step != step {
@@ -104,13 +128,12 @@ func fetchGateContentByStep(
 			var ok bool
 			selected, ok = selectedGateVersion(gate)
 			if !ok {
-				return gate, nil, false, nil
+				return gate, 0, false, nil
 			}
 		}
-		content, err := client.GetGateContent(ctx, threadID, step, selected)
-		return gate, content, err == nil, err
+		return gate, selected, true, nil
 	}
-	return evoGate{}, nil, false, nil
+	return evoGate{}, 0, false, nil
 }
 
 func selectedGateVersion(gate evoGate) (int, bool) {
@@ -147,6 +170,18 @@ func parseArtifactRef(raw string) parsedArtifactRef {
 		}
 	}
 	return result
+}
+
+func gateVersionPath(threadID, step string, version int, download bool) string {
+	suffix := fmt.Sprintf(
+		"/gates/%s/versions/%d",
+		url.PathEscape(strings.TrimSpace(step)),
+		version,
+	)
+	if download {
+		suffix += ":download"
+	}
+	return "/threads/" + url.PathEscape(strings.TrimSpace(threadID)) + suffix
 }
 
 func evoProxyStatusCode(err error) int {
