@@ -395,6 +395,7 @@ def _step_items(thread_id: str, rows: list[dict[str, Any]]) -> list[dict[str, An
                 'order_index': len(by_id),
                 'event_count': 0,
                 'next_step_id': row.get('next_step_id') or '',
+                'version': None,
                 '_completed': False,
             },
         )
@@ -403,6 +404,7 @@ def _step_items(thread_id: str, rows: list[dict[str, Any]]) -> list[dict[str, An
         ref = row['ref']
         if ref.key.artifact_id == C.ROOTS[row['stage']]:
             item['_completed'] = True
+            item['version'] = ref.version
     result = []
     for item in by_id.values():
         completed = bool(item.pop('_completed'))

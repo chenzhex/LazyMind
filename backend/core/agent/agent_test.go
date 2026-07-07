@@ -1420,6 +1420,52 @@ func TestUpdateThreadStepFromEventDoneCompletesRunningStep(t *testing.T) {
 	}
 }
 
+func TestUpdateThreadStepFromEventDonePreservesPausedStatus(t *testing.T) {
+	db := newAgentTestDB(t)
+	stepID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
+		EventName: "done",
+		RawFrame:  `{"type":"done","stage":"eval","status":"paused","step_id":"` + stepID + `"}`,
+	}); err != nil {
+		t.Fatalf("update paused done step returned error: %v", err)
+	}
+
+	var step orm.AgentThreadStep
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepID).First(&step).Error; err != nil {
+		t.Fatalf("load step: %v", err)
+	}
+	if step.Status != "paused" || !step.Active {
+		t.Fatalf("expected paused active step, got status=%q active=%v", step.Status, step.Active)
+	}
+	if step.EndedAt != nil {
+		t.Fatalf("paused step must not set ended_at")
+	}
+}
+
+func TestUpdateThreadStepFromEventDoesNotCompleteStepFromProgressAction(t *testing.T) {
+	db := newAgentTestDB(t)
+	stepID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+
+	if err := updateThreadStepFromEvent(db.DB, "thr_1", stepID, fetchedThreadEvent{
+		EventName: "eval.answer",
+		RawFrame:  `{"stage":"eval","action":"completed","artifact_id":"eval.rag_answer","step_id":"` + stepID + `"}`,
+	}); err != nil {
+		t.Fatalf("update eval answer progress returned error: %v", err)
+	}
+
+	var step orm.AgentThreadStep
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepID).First(&step).Error; err != nil {
+		t.Fatalf("load step: %v", err)
+	}
+	if step.Status != "running" || !step.Active {
+		t.Fatalf("expected progress event to keep step running, got status=%q active=%v", step.Status, step.Active)
+	}
+	if step.EndedAt != nil {
+		t.Fatalf("progress event must not set ended_at")
+	}
+}
+
 func TestUpdateThreadStepFromEventKeepsOnlyLatestRunningStepActive(t *testing.T) {
 	db := newAgentTestDB(t)
 	stepOneID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
@@ -1470,10 +1516,101 @@ func TestListThreadStepsProxiesEvoResponse(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/steps" {
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"thread_id":"thr_1","items":[{"step_id":"generate_image","status":"running"}]}`)
+		_ = json.NewEncoder(w).Encode(evoStepList{
+			ThreadID:     "thr_1",
+			ActiveStepID: stepTwoID,
+			Items: []evoStep{
+				{ThreadID: "thr_1", StepID: stepOneID, Stage: "dataset", Title: "Dataset", Status: "succeeded", Active: false, OrderIndex: 1, EventCount: 2, NextStepID: stepTwoID},
+				{ThreadID: "thr_1", StepID: stepTwoID, Stage: "eval", Title: "Eval", Status: "running", Active: true, OrderIndex: 2, EventCount: 3},
+			},
+			TotalSize: 2,
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/steps", nil)
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+	ListThreadSteps(rec, req)
+
+	var response struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			ThreadID     string               `json:"thread_id"`
+			ActiveStepID string               `json:"active_step_id"`
+			Items        []threadStepResponse `json:"items"`
+			TotalSize    int                  `json:"total_size"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rec.Code != http.StatusOK || response.Code != 0 {
+		t.Fatalf("expected ok response, status=%d code=%d message=%s", rec.Code, response.Code, response.Message)
+	}
+	if response.Data.ActiveStepID != stepTwoID {
+		t.Fatalf("expected active_step_id %s, got %q", stepTwoID, response.Data.ActiveStepID)
+	}
+	if response.Data.TotalSize != 2 || len(response.Data.Items) != 2 {
+		t.Fatalf("unexpected step list response: %#v", response.Data)
+	}
+	if response.Data.Items[0].NextStepID != stepTwoID {
+		t.Fatalf("expected first step next_step_id %s, got %q", stepTwoID, response.Data.Items[0].NextStepID)
+	}
+}
+
+func TestListThreadStepsSyncsProjectionStepsFromUpstream(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "running",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if err := db.DB.Create(&orm.AgentThreadStep{
+		ThreadID:   "thr_1",
+		StepID:     "stale",
+		Title:      "Stale",
+		Status:     "running",
+		Active:     true,
+		OrderIndex: 9,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}).Error; err != nil {
+		t.Fatalf("create stale step: %v", err)
+	}
+
+	stepOneID := "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"
+	stepTwoID := "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"
+	versionOne := 1
+	versionTwo := 2
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/steps" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(evoStepList{
+			ThreadID:     "thr_1",
+			ActiveStepID: stepTwoID,
+			Items: []evoStep{
+				{ThreadID: "thr_1", StepID: stepOneID, Stage: "dataset", Title: "dataset", Status: "completed", Active: false, OrderIndex: 0, EventCount: 4, NextStepID: stepTwoID, Version: &versionOne},
+				{ThreadID: "thr_1", StepID: stepTwoID, Stage: "eval", Title: "eval", Status: "running", Active: true, OrderIndex: 1, EventCount: 1, Version: &versionTwo},
+			},
+			TotalSize: 2,
+		})
 	}))
 	defer server.Close()
 	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
@@ -1488,6 +1625,78 @@ func TestListThreadStepsProxiesEvoResponse(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+	if rec.Code != http.StatusOK || response.Code != 0 {
+		t.Fatalf("expected ok response, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if response.Data.ActiveStepID != stepTwoID || response.Data.TotalSize != 2 {
+		t.Fatalf("unexpected synced step list: %#v", response.Data)
+	}
+	if len(response.Data.Items) != 2 || response.Data.Items[0].StepID != stepOneID ||
+		response.Data.Items[0].Stage != "dataset" || response.Data.Items[0].NextStepID != stepTwoID {
+		t.Fatalf("unexpected first synced step: %#v", response.Data.Items)
+	}
+	if response.Data.Items[0].Version == nil || *response.Data.Items[0].Version != versionOne {
+		t.Fatalf("expected first synced step version %d, got %#v", versionOne, response.Data.Items[0].Version)
+	}
+
+	var staleCount int64
+	if err := db.DB.Model(&orm.AgentThreadStep{}).Where("thread_id = ? AND step_id = ?", "thr_1", "stale").Count(&staleCount).Error; err != nil {
+		t.Fatalf("count stale steps: %v", err)
+	}
+	if staleCount != 0 {
+		t.Fatalf("expected stale local step to be deleted, got %d", staleCount)
+	}
+	var persisted orm.AgentThreadStep
+	if err := db.DB.Where("thread_id = ? AND step_id = ?", "thr_1", stepOneID).First(&persisted).Error; err != nil {
+		t.Fatalf("load persisted step: %v", err)
+	}
+	if persisted.Version == nil || *persisted.Version != versionOne {
+		t.Fatalf("expected persisted version %d, got %#v", versionOne, persisted.Version)
+	}
+}
+
+func TestListThreadStepsClearsLocalStepsWhenUpstreamProjectionIsEmpty(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "running",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if err := db.DB.Create(&orm.AgentThreadStep{
+		ThreadID:  "thr_1",
+		StepID:    "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+		Status:    "running",
+		Active:    true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create local step: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/steps" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(evoStepList{ThreadID: "thr_1", Items: []evoStep{}})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/steps", nil)
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+	ListThreadSteps(rec, req)
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected ok response, status=%d body=%s", rec.Code, rec.Body.String())
 	}

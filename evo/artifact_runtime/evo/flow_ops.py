@@ -54,6 +54,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
         op_id = 'eval.answer'
         inputs = {
             'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
+            'dataset': ArtifactInput(C.ROOTS['dataset'], partition_mapping=unpartitioned_to_all()),
             'target_config': ArtifactInput(C.EVAL_TARGET_CONFIG, partition_mapping=unpartitioned_to_all()),
         }
         outputs = {'answer': ArtifactOutput(C.EVAL_RAG_ANSWER, partitions)}
@@ -83,6 +84,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
         inputs = {
             'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
             'answer': ArtifactInput(C.EVAL_RAG_ANSWER, partition_spec=partitions),
+            'eval_summary': ArtifactInput(C.ROOTS['eval'], partition_mapping=unpartitioned_to_all()),
         }
         outputs = {'summary': ArtifactOutput(C.ANALYSIS_TRACE_SUMMARY, partitions)}
 
@@ -122,6 +124,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class BuildRepairPlan(FixedOp):
         op_id = 'repair.plan'
         inputs = {
+            'analysis_summary': ArtifactInput(C.ROOTS['analysis']),
             'classifications': ArtifactInput(
                 C.ANALYSIS_CASE_CLASSIFICATION,
                 partition_spec=partitions,

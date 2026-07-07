@@ -752,7 +752,7 @@ func updateThreadStepFromEvent(db *gorm.DB, threadID, stepID string, event fetch
 	if title == "" {
 		title = firstNonEmptyString(stage, stepID)
 	}
-	status := normalizeThreadStepStatus(extractStringByExactKeys(payload, "step_status", "status", "state", "action"), event.EventName)
+	status := normalizeThreadStepStatus(extractStringByExactKeys(payload, "step_status", "status", "state"), event.EventName)
 	active := !isTerminalThreadStepStatus(status)
 	var endedAt *time.Time
 	if !active {
@@ -890,14 +890,16 @@ func normalizeThreadStepStatus(rawStatus, eventName string) string {
 		return "cancelled"
 	case strings.Contains(status, "fail") || strings.Contains(status, "error"):
 		return "failed"
+	case strings.Contains(status, "pause"):
+		return "paused"
+	case strings.Contains(status, "wait"):
+		return "waiting"
 	case event == "done":
 		return "succeeded"
 	case status == "":
-		status = event
+		return "running"
 	}
 	switch {
-	case status == "":
-		return "running"
 	case strings.Contains(status, "cancel"):
 		return "cancelled"
 	case strings.Contains(status, "fail") || strings.Contains(status, "error"):
@@ -906,10 +908,6 @@ func normalizeThreadStepStatus(rawStatus, eventName string) string {
 		strings.Contains(status, "complete") || strings.Contains(status, "done") ||
 		strings.Contains(status, "finished"):
 		return "succeeded"
-	case strings.Contains(status, "pause"):
-		return "paused"
-	case strings.Contains(status, "wait"):
-		return "waiting"
 	case strings.Contains(status, "start") || strings.Contains(status, "run") ||
 		strings.Contains(status, "stream"):
 		return "running"

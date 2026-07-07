@@ -59,6 +59,7 @@ type threadStepResponse struct {
 	Active        bool       `json:"active"`
 	OrderIndex    int        `json:"order_index"`
 	EventCount    int64      `json:"event_count"`
+	Version       *int       `json:"version"`
 	CurrentTaskID string     `json:"current_task_id,omitempty"`
 	NextStepID    string     `json:"next_step_id"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
@@ -305,7 +306,103 @@ func ListThreadSteps(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	proxyEvoResponse(w, r, http.MethodGet, threadProxyPath(threadID, "/steps"), cloneURLValues(r.URL.Query()), nil, "application/json")
+
+	items := make([]threadStepResponse, 0, len(steps))
+	activeStepID := ""
+	var activeUpdatedAt time.Time
+	for _, step := range steps {
+		items = append(items, toThreadStepResponse(step))
+		if step.Active && (activeStepID == "" || step.UpdatedAt.After(activeUpdatedAt)) {
+			activeStepID = step.StepID
+			activeUpdatedAt = step.UpdatedAt
+		}
+	}
+
+	common.ReplyOK(w, map[string]any{
+		"thread_id":      threadID,
+		"active_step_id": activeStepID,
+		"items":          items,
+		"total_size":     len(items),
+	})
+}
+
+func syncThreadStepsFromUpstream(ctx context.Context, r *http.Request, db *gorm.DB, threadID string) error {
+	steps, err := newEvoClient(forwardedUpstreamHeaders(r)).ListSteps(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	return db.Transaction(func(tx *gorm.DB) error {
+		if len(steps.Items) == 0 {
+			return tx.Where("thread_id = ?", threadID).Delete(&orm.AgentThreadStep{}).Error
+		}
+		stepIDs := make([]string, 0, len(steps.Items))
+		for _, item := range steps.Items {
+			stepID := strings.TrimSpace(item.StepID)
+			stepID, err := normalizedProjectionStepID(stepID)
+			if err != nil {
+				return err
+			}
+			stepIDs = append(stepIDs, stepID)
+			nextStepID := strings.TrimSpace(item.NextStepID)
+			if nextStepID != "" {
+				nextStepID, err = normalizedProjectionStepID(nextStepID)
+				if err != nil {
+					return err
+				}
+			}
+			stage := strings.TrimSpace(item.Stage)
+			title := strings.TrimSpace(item.Title)
+			if title == "" {
+				title = firstNonEmptyString(stage, stepID)
+			}
+			status := normalizeThreadStepStatus(item.Status, "")
+			active := item.Active && !isTerminalThreadStepStatus(status)
+			var endedAt *time.Time
+			if !active && isTerminalThreadStepStatus(status) {
+				endedAt = &now
+			}
+			step := orm.AgentThreadStep{
+				ThreadID:   threadID,
+				StepID:     stepID,
+				Stage:      stage,
+				Title:      title,
+				Status:     status,
+				Active:     active,
+				OrderIndex: item.OrderIndex,
+				EventCount: item.EventCount,
+				NextStepID: nextStepID,
+				Version:    item.Version,
+				StartedAt:  &now,
+				EndedAt:    endedAt,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			updates := map[string]any{
+				"stage":        stage,
+				"title":        title,
+				"status":       status,
+				"active":       active,
+				"order_index":  item.OrderIndex,
+				"event_count":  item.EventCount,
+				"next_step_id": nextStepID,
+				"version":      item.Version,
+				"updated_at":   now,
+			}
+			if active {
+				updates["ended_at"] = nil
+			} else if endedAt != nil {
+				updates["ended_at"] = gorm.Expr("COALESCE(agent_thread_steps.ended_at, ?)", endedAt)
+			}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "thread_id"}, {Name: "step_id"}},
+				DoUpdates: clause.Assignments(updates),
+			}).Create(&step).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("thread_id = ? AND step_id NOT IN ?", threadID, stepIDs).Delete(&orm.AgentThreadStep{}).Error
+	})
 }
 
 func ListThreadStepRecords(w http.ResponseWriter, r *http.Request) {
@@ -1857,6 +1954,7 @@ func toThreadStepResponse(step orm.AgentThreadStep) threadStepResponse {
 		Active:        step.Active,
 		OrderIndex:    step.OrderIndex,
 		EventCount:    step.EventCount,
+		Version:       step.Version,
 		CurrentTaskID: step.CurrentTaskID,
 		NextStepID:    step.NextStepID,
 		StartedAt:     step.StartedAt,

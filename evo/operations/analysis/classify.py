@@ -196,31 +196,33 @@ def _retrieval(
                 f'doc_precision={judge["doc_precision"]}', f'chunk_precision={judge["chunk_precision"]}']
     if ref_docs and not doc_hit and not chunk_hit:
         return _row('retrieval', 'reference_document_missing', 'retrieval', 'reference_document_missing', 'high',
-                    False, features, judge, trace=trace, case=case)
+                    False, features, judge, answer=answer, trace=trace, case=case)
     if doc_hit and ref_chunks and not chunk_hit:
         return _row('retrieval', 'reference_chunk_missing', 'retrieval', 'reference_chunk_missing', 'high', False,
-                    features, judge, trace=trace, case=case)
+                    features, judge, answer=answer, trace=trace, case=case)
     if (doc_hit or chunk_hit) and ref_chunks and not (ref_chunks & final_chunks):
         return _row('retrieval', 'context_assembly_failure', 'context_assembly', 'context_reference_chunk_dropped',
-                    'high', False, features + ['final_context_missing_reference'], judge, trace=trace, case=case)
+                    'high', False, features + ['final_context_missing_reference'], judge,
+                    answer=answer, trace=trace, case=case)
     partial_seen = (
         (ref_docs and not ref_docs <= retrieved_docs)
         or (ref_chunks and (not ref_chunks <= retrieved_chunks or not ref_chunks <= final_chunks))
     )
     if (judge.get('retrieval_failure_type') == 'retrieval_partial' or _partial_recall(judge)) and partial_seen:
         return _row('retrieval', 'partial_reference_recall', 'retrieval', 'partial_reference_recall', 'medium',
-                    False, features, judge, trace=trace, case=case)
+                    False, features, judge, answer=answer, trace=trace, case=case)
     extra_context = (retrieved_docs - ref_docs) or (retrieved_chunks - ref_chunks)
     if (judge.get('retrieval_failure_type') == 'retrieval_noise' or _precision_low(judge)) and extra_context:
         block = 'rerank' if 'rerank' in trace.get('diagnostic_stage_sequence', []) else 'retrieval'
         mode = 'rerank_noise_promoted' if block == 'rerank' else 'retrieval_noise'
         issue = 'rerank_failure' if block == 'rerank' else 'retrieval_noise'
-        return _row('retrieval', issue, block, mode, 'medium', False, features, judge, trace=trace, case=case)
+        return _row('retrieval', issue, block, mode, 'medium', False, features, judge,
+                    answer=answer, trace=trace, case=case)
     if final_hit:
         return None
     return _row('undetermined', 'insufficient_trace_evidence', 'undetermined', 'insufficient_trace_evidence', 'low',
-                True, features + ['trace_retrieval_evidence_does_not_confirm_judge_signal'], judge, trace=trace,
-                case=case)
+                True, features + ['trace_retrieval_evidence_does_not_confirm_judge_signal'], judge,
+                answer=answer, trace=trace, case=case)
 
 
 def _generation(case: Mapping[str, Any], answer: Mapping[str, Any], judge: Mapping[str, Any],

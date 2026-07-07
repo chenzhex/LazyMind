@@ -56,6 +56,7 @@ type AgentThreadStep struct {
 	EventCount    int64      `gorm:"column:event_count;not null;default:0"`
 	CurrentTaskID string     `gorm:"column:current_task_id;type:varchar(128);not null;default:''"`
 	NextStepID    string     `gorm:"column:next_step_id;type:varchar(128);not null;default:''"`
+	Version       *int       `gorm:"column:version"`
 	StartedAt     *time.Time `gorm:"column:started_at"`
 	EndedAt       *time.Time `gorm:"column:ended_at"`
 	CreatedAt     time.Time  `gorm:"column:created_at;not null"`

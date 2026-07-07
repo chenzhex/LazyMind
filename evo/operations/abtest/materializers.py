@@ -91,7 +91,11 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
     base = {'candidate_config': dict(config), 'patch_status': _text(patch.get('status'))}
     if patch.get('status') != 'verified':
         return base | {'status': 'skipped', 'healthcheck': {'status': 'skipped'}}
+    algorithm_id = router_chat_url = admin_url = code_path = ''
+    manager: RouterManager | None = None
+    stop_on_failure = False
     try:
+        explicit_algorithm_id = bool(_text(config.get('algorithm_id')))
         algorithm_id = _candidate_algorithm_id(config, patch, getattr(ctx, 'run_id', 'run'))
         if not _text(config.get('router_chat_url')):
             raise ValueError('candidate_config.router_chat_url is required')
@@ -121,8 +125,16 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
                 'candidate_id_conflict',
                 'algorithm_id already exists with different code_path/config',
             )
-        registered = {'reused': True} if existing else manager.register_algorithm(spec, timeout_s=timeout_s)
-        ready = manager.wait_ready(algorithm_id, timeout_s=timeout_s)
+        health = manager.healthcheck_from_detail(existing) if existing else {}
+        stop_on_failure = existing is None and not explicit_algorithm_id
+        registered, ready = _ensure_candidate_ready(
+            manager,
+            spec,
+            existing,
+            health,
+            timeout_s,
+            restart_existing=not explicit_algorithm_id,
+        )
         _write_candidate_ledger(ctx, spec, router_chat_url, manager.router_admin_url, body, patch)
         return base | {
             'status': 'ready',
@@ -130,6 +142,7 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
             'algorithm_id': algorithm_id,
             'router_chat_url': router_chat_url,
             'router_admin_url': manager.router_admin_url,
+            'cleanup_allowed': stop_on_failure,
             'workspace_ref': _text(patch.get('workspace_ref')),
             'code_path': code_path,
             'register_request': body,
@@ -137,9 +150,17 @@ def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: 
             'healthcheck': manager.healthcheck_from_detail(ready),
         }
     except RouterManagerError as exc:
-        return base | _failed_service('', '', '', '', exc.kind, str(exc))
+        _stop_failed_candidate(manager, algorithm_id, exc.kind, stop_on_failure)
+        return base | _failed_service(
+            algorithm_id,
+            router_chat_url,
+            manager.router_admin_url if manager else admin_url,
+            code_path,
+            exc.kind,
+            str(exc),
+        )
     except Exception as exc:
-        return base | _failed_service('', '', '', '', type(exc).__name__, str(exc))
+        return base | _failed_service(algorithm_id, router_chat_url, admin_url, code_path, type(exc).__name__, str(exc))
 
 
 def candidate_rag_answer(case: Mapping[str, Any], service: Mapping[str, Any]) -> dict[str, Any]:
@@ -227,6 +248,49 @@ def _service_patch(patch: Mapping[str, Any], workspace: Mapping[str, Any]) -> di
 
 def _same_registration(existing: Mapping[str, Any], body: Mapping[str, Any]) -> bool:
     return existing.get('code_path') == body.get('code_path') and dict(existing.get('config') or {}) == body['config']
+
+
+def _ensure_candidate_ready(
+    manager: RouterManager,
+    spec: RouterAlgorithmSpec,
+    existing: Mapping[str, Any] | None,
+    health: Mapping[str, Any],
+    timeout_s: int,
+    *,
+    restart_existing: bool,
+) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    if existing:
+        if health.get('status') == 'passed':
+            return {'reused': True}, existing
+        if not restart_existing:
+            raise RouterManagerError(
+                'candidate_existing_unhealthy',
+                f'algorithm {spec.id} exists but is not healthy',
+            )
+        if _text(existing.get('status')) != 'active':
+            registered = manager.register_algorithm(spec, timeout_s=timeout_s)
+            return dict(registered) | {'reused': True, 'reactivated': True}, manager.wait_ready(
+                spec.id,
+                timeout_s=timeout_s,
+            )
+        manager.restart_algorithm(spec.id, timeout_s=timeout_s)
+        return {'reused': True, 'restarted': True}, manager.get_algorithm(spec.id) or {}
+    registered = manager.register_algorithm(spec, timeout_s=timeout_s)
+    return registered, manager.wait_ready(spec.id, timeout_s=timeout_s)
+
+
+def _stop_failed_candidate(
+    manager: RouterManager | None,
+    algorithm_id: str,
+    error_type: str,
+    enabled: bool,
+) -> None:
+    if not enabled or not manager or not algorithm_id or error_type != 'router_timeout':
+        return
+    try:
+        manager.stop_algorithm(algorithm_id)
+    except RouterManagerError:
+        pass
 
 
 def _register_request(spec: RouterAlgorithmSpec) -> dict[str, Any]:

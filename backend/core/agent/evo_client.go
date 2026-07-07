@@ -60,6 +60,7 @@ type evoStep struct {
 	OrderIndex int    `json:"order_index"`
 	EventCount int64  `json:"event_count"`
 	NextStepID string `json:"next_step_id"`
+	Version    *int   `json:"version"`
 }
 
 type evoStepList struct {
