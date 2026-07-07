@@ -173,6 +173,71 @@ func syncDefaultModelMaxInputTokens(tx *gorm.DB, now time.Time, providerID, mode
 		}).Error
 }
 
+// syncRemovedDefaultModels soft-deletes catalog models that are no longer present in YAML.
+// It also removes their seeded user-group copies and any selections that reference those
+// copies. Custom user models are preserved.
+func syncRemovedDefaultModels(tx *gorm.DB, now time.Time, providerID string, models []catalogModel) error {
+	desiredNames := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		desiredNames = append(desiredNames, name)
+	}
+
+	query := tx.Model(&orm.DefaultModel{}).
+		Where("default_model_provider_id = ? AND deleted_at IS NULL", providerID)
+	if len(desiredNames) > 0 {
+		query = query.Where("name NOT IN ?", desiredNames)
+	}
+
+	var removed []orm.DefaultModel
+	if err := query.Find(&removed).Error; err != nil {
+		return err
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+
+	removedIDs := make([]string, 0, len(removed))
+	removedNames := make([]string, 0, len(removed))
+	for _, model := range removed {
+		removedIDs = append(removedIDs, model.ID)
+		removedNames = append(removedNames, model.Name)
+	}
+
+	providerIDs := tx.Model(&orm.UserModelProvider{}).
+		Select("id").
+		Where("default_model_provider_id = ? AND deleted_at IS NULL", providerID)
+	var userModelIDs []string
+	if err := tx.Model(&orm.UserModelProviderGroupModel{}).
+		Where("is_default = ? AND name IN ? AND user_model_provider_id IN (?) AND deleted_at IS NULL", true, removedNames, providerIDs).
+		Pluck("id", &userModelIDs).Error; err != nil {
+		return err
+	}
+	if len(userModelIDs) > 0 {
+		if err := tx.Where("user_model_provider_group_model_id IN ?", userModelIDs).
+			Delete(&orm.UserSelectedModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&orm.UserModelProviderGroupModel{}).
+			Where("id IN ? AND deleted_at IS NULL", userModelIDs).
+			Updates(map[string]any{"deleted_at": now, "updated_at": now}).Error; err != nil {
+			return err
+		}
+	}
+
+	return tx.Model(&orm.DefaultModel{}).
+		Where("id IN ? AND deleted_at IS NULL", removedIDs).
+		Updates(map[string]any{"deleted_at": now, "updated_at": now}).Error
+}
+
 // SeedModelCatalog upserts default_model_providers and default_models from the YAML catalog file.
 // Section keys ending with "_providers" derive their category by trimming that suffix.
 func SeedModelCatalog(ctx context.Context, db *gorm.DB, yamlPath string) error {
@@ -215,6 +280,11 @@ func seedCatalog(ctx context.Context, db *gorm.DB, yamlPath, categorySuffix, for
 				}
 				for _, model := range supplier.Models {
 					if err := upsertDefaultModel(tx, now, providerID, supplier.Name, model); err != nil {
+						return err
+					}
+				}
+				if forceCategory == "" {
+					if err := syncRemovedDefaultModels(tx, now, providerID, supplier.Models); err != nil {
 						return err
 					}
 				}
