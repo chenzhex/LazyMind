@@ -97,11 +97,22 @@ func DeleteThreadHistory(w http.ResponseWriter, r *http.Request) {
 
 	cancelRequested := false
 	if !upstreamMissing && isThreadFlowRunning(flowStatus) {
-		if _, statusCode, err := newEvoClient(forwardedUpstreamHeaders(r)).PostCommand(r.Context(), threadID, "cancel", map[string]any{}); err != nil {
+		proxy, statusCode, err := newEvoClient(forwardedUpstreamHeaders(r)).PostCommand(r.Context(), threadID, "cancel", map[string]any{})
+		if err != nil || statusCode < 200 || statusCode >= 300 {
+			detail := ""
+			if err != nil {
+				detail = err.Error()
+			} else if proxy != nil {
+				detail = strings.TrimSpace(string(proxy.BodyBytes))
+			}
+			replyStatus := statusCode
+			if replyStatus < 400 || replyStatus >= 500 {
+				replyStatus = http.StatusBadGateway
+			}
 			common.ReplyErrWithData(w, "cancel running thread failed", map[string]any{
-				"detail":      err.Error(),
+				"detail":      detail,
 				"flow_status": flowStatus,
-			}, statusCode)
+			}, replyStatus)
 			return
 		}
 		cancelRequested = true

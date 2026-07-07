@@ -305,6 +305,10 @@ func TestPostThreadActionForwardsOnlyCommandFields(t *testing.T) {
 
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/threads/thr_1" {
+			_ = json.NewEncoder(w).Encode(evoThread{ThreadID: "thr_1", Status: "running", CurrentStep: "eval"})
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/threads/thr_1/start" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -350,6 +354,10 @@ func TestPostThreadActionForwardsOnlyEmptyCommandFields(t *testing.T) {
 
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/threads/thr_1" {
+			_ = json.NewEncoder(w).Encode(evoThread{ThreadID: "thr_1", Status: "paused", CurrentStep: "eval"})
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/threads/thr_1/pause" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -377,7 +385,7 @@ func TestPostThreadActionForwardsOnlyEmptyCommandFields(t *testing.T) {
 	}
 }
 
-func TestStreamThreadMessagesForwardsOnlyMessageFields(t *testing.T) {
+func TestStreamThreadMessagesProxiesEvoResponse(t *testing.T) {
 	db := newAgentTestDB(t)
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
@@ -415,7 +423,7 @@ func TestStreamThreadMessagesForwardsOnlyMessageFields(t *testing.T) {
 
 	StreamThreadMessages(rec, req)
 
-	if got["message_id"] != "m1" || got["content"] != "继续" || len(got) != 2 {
+	if got["message_id"] != "m1" || got["content"] != "继续" || got["extra"] != true {
 		t.Fatalf("unexpected upstream message body: %#v", got)
 	}
 }
@@ -523,7 +531,11 @@ func TestFetchThreadArtifactProxyReturnsGateContentDirectly(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected map body, got %#v", proxy.Body)
 	}
-	cases, ok := body["cases"].([]any)
+	content, ok := body["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected evo gate content wrapper, got %#v", body)
+	}
+	cases, ok := content["cases"].([]any)
 	if !ok || len(cases) != 2 {
 		t.Fatalf("expected full evo artifact content, got %#v", body)
 	}
@@ -617,12 +629,16 @@ func TestFetchThreadResultProxyReturnsGateContentDirectly(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected direct content map, got %#v", proxy.Body)
 	}
-	if body["correct_rate"] != 0.5 {
+	content, ok := body["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected evo gate content wrapper, got %#v", body)
+	}
+	if content["correct_rate"] != 0.5 {
 		t.Fatalf("expected evo content metrics to be returned directly: %#v", body)
 	}
 	for _, forbidden := range []string{"artifact_id", "runtime_artifact_id", "source_artifact_id", "schema", "data", "file_url"} {
-		if _, ok := body[forbidden]; ok {
-			t.Fatalf("result response should not include old envelope field %q: %#v", forbidden, body)
+		if _, ok := content[forbidden]; ok {
+			t.Fatalf("result content should not include old envelope field %q: %#v", forbidden, body)
 		}
 	}
 }
@@ -1426,7 +1442,7 @@ func TestUpdateThreadStepFromEventKeepsOnlyLatestRunningStepActive(t *testing.T)
 	}
 }
 
-func TestListThreadStepsReturnsActiveStep(t *testing.T) {
+func TestListThreadStepsProxiesEvoResponse(t *testing.T) {
 	db := newAgentTestDB(t)
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
@@ -1441,12 +1457,15 @@ func TestListThreadStepsReturnsActiveStep(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
-	if err := db.DB.Create(&[]orm.AgentThreadStep{
-		{ThreadID: "thr_1", StepID: "collect_material", Title: "Collect", Status: "succeeded", Active: false, OrderIndex: 1, EventCount: 2, NextStepRunID: "generate_image", CreatedAt: now, UpdatedAt: now},
-		{ThreadID: "thr_1", StepID: "generate_image", Title: "Generate", Status: "running", Active: true, OrderIndex: 2, EventCount: 3, CreatedAt: now, UpdatedAt: now.Add(time.Second)},
-	}).Error; err != nil {
-		t.Fatalf("create steps: %v", err)
-	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/steps" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"thread_id":"thr_1","items":[{"step_id":"generate_image","status":"running"}]}`)
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/steps", nil)
 	req.Header.Set("X-User-Id", "u1")
@@ -1454,30 +1473,15 @@ func TestListThreadStepsReturnsActiveStep(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ListThreadSteps(rec, req)
 
-	var response struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			ThreadID     string               `json:"thread_id"`
-			ActiveStepID string               `json:"active_step_id"`
-			Items        []threadStepResponse `json:"items"`
-			TotalSize    int                  `json:"total_size"`
-		} `json:"data"`
-	}
+	var response map[string]any
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if rec.Code != http.StatusOK || response.Code != 0 {
-		t.Fatalf("expected ok response, status=%d code=%d message=%s", rec.Code, response.Code, response.Message)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok response, status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if response.Data.ActiveStepID != "generate_image" {
-		t.Fatalf("expected active_step_id generate_image, got %q", response.Data.ActiveStepID)
-	}
-	if response.Data.TotalSize != 2 || len(response.Data.Items) != 2 {
-		t.Fatalf("unexpected step list response: %#v", response.Data)
-	}
-	if response.Data.Items[0].NextStepRunID != "generate_image" {
-		t.Fatalf("expected first step next_step_run_id generate_image, got %q", response.Data.Items[0].NextStepRunID)
+	if response["thread_id"] != "thr_1" {
+		t.Fatalf("expected raw evo response, got %#v", response)
 	}
 }
 
@@ -1775,8 +1779,6 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/threads/thr_1/events:stream" && r.URL.Query().Get("step_id") == "step_1":
 			http.Error(w, `{"detail":"closed"}`, http.StatusNotFound)
-		case r.Method == http.MethodGet && r.URL.Path == "/threads/thr_1":
-			_ = json.NewEncoder(w).Encode(evoThread{ThreadID: "thr_1", Status: "ended"})
 		default:
 			http.Error(w, "unexpected request", http.StatusNotFound)
 		}
@@ -1790,8 +1792,8 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 	rec := httptest.NewRecorder()
 	StreamThreadStepEvents(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected stream response header, status=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected upstream not found response, status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var count int64
 	if err := db.DB.Model(&orm.AgentThreadStep{}).Where("thread_id = ?", "thr_1").Count(&count).Error; err != nil {
@@ -1806,7 +1808,6 @@ func TestStreamThreadStepEventsDoesNotCreateStepBeforeEvents(t *testing.T) {
 	mu.Unlock()
 	wantCalls := []string{
 		"GET /threads/thr_1/events:stream?step_id=step_1",
-		"GET /threads/thr_1",
 	}
 	if fmt.Sprint(gotCalls) != fmt.Sprint(wantCalls) {
 		t.Fatalf("unexpected upstream calls: want %v got %v", wantCalls, gotCalls)
