@@ -489,10 +489,6 @@ model_providers:
           type: llm
         - name: qwen3-asr-flash
           type: stt
-        - name: qwen3-embedding-32m
-          type: embed
-          # TODO: 待算法同学确认该内部模型名对应的实际模型及最大输入长度。
-          max_input_tokens: 32768
         - name: qwen3-next-80b-a3b-instruct
           type: llm
         - name: qwen3-next-80b-a3b-thinking
