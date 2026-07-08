@@ -18,6 +18,7 @@ from evo.artifact_runtime.evo.use_cases import EvoArtifactAccess
 from evo.artifact_runtime.kernel.artifact import ArtifactRef
 from evo.artifact_runtime.kernel.errors import IdempotencyConflictError
 
+from .checkpoints import StaleCheckpoint, checkpoint_projection, trim_released_from_step
 from .commands import (
     ApplyArtifactMutation,
     CancelFlow,
@@ -101,7 +102,7 @@ class FlowService:
             case PauseFlow():
                 return self._gate_command(run_id, command.command_id, 'pause')
             case ResumeFlow():
-                return self._gate_command(run_id, command.command_id, 'resume')
+                return self._resume(run_id, command)
             case CancelFlow():
                 return self._gate_command(run_id, command.command_id, 'cancel')
             case RetryFlow():
@@ -110,6 +111,63 @@ class FlowService:
 
     def _gate_command(self, run_id: str, command_id: str, kind: str) -> FlowCommandResult:
         receipt = self._gate.apply_gate_command(run_id, command_id, _request_hash({'kind': kind}), kind)
+        return self._from_receipt(run_id, receipt)
+
+    def _resume(self, run_id: str, command: ResumeFlow) -> FlowCommandResult:
+        request_hash = _request_hash({'kind': 'resume'})
+        replay = self._gate.read_command(run_id, command.command_id, request_hash)
+        if replay.status != 'new':
+            return self._from_receipt(run_id, replay)
+        state = replay.state
+        if state.status != 'paused':
+            receipt = self._gate.record_command(run_id, command.command_id, request_hash, {'status': state.status})
+            return self._from_receipt(run_id, receipt)
+        if state.pending_checkpoint is None:
+            next_state = FlowRunState(run_id, released_checkpoints=state.released_checkpoints)
+            receipt = self._gate.record_command(
+                run_id, command.command_id, request_hash, {'status': 'idle'},
+                next_state=next_state, expected_version=state.status_version,
+            )
+            return self._from_receipt(run_id, receipt)
+
+        try:
+            effective_ref = self._adapter_factory().effective_artifacts(run_id).get(state.pending_checkpoint.root)
+        except Exception as exc:
+            error = _short_error(exc)
+            next_state = FlowRunState(
+                run_id,
+                status='failed',
+                pending_checkpoint=state.pending_checkpoint,
+                released_checkpoints=state.released_checkpoints,
+                last_error=error,
+            )
+            receipt = self._gate.record_command(
+                run_id, command.command_id, request_hash, {'error': error, 'status': 'failed'},
+                next_state=next_state, expected_version=state.status_version,
+            )
+            return self._from_receipt(run_id, receipt, error=error)
+        if effective_ref != state.pending_checkpoint.ref:
+            error = _stale_checkpoint_error(state.pending_checkpoint.step, state.pending_checkpoint.ref, effective_ref)
+            next_state = FlowRunState(
+                run_id,
+                status='failed',
+                pending_checkpoint=state.pending_checkpoint,
+                released_checkpoints=state.released_checkpoints,
+                last_error=error,
+            )
+            receipt = self._gate.record_command(
+                run_id, command.command_id, request_hash, {'error': error, 'status': 'failed'},
+                next_state=next_state, expected_version=state.status_version,
+            )
+            return self._from_receipt(run_id, receipt, error=error)
+
+        released = dict(state.released_checkpoints)
+        released[state.pending_checkpoint.step] = state.pending_checkpoint.ref
+        next_state = FlowRunState(run_id, released_checkpoints=released)
+        receipt = self._gate.record_command(
+            run_id, command.command_id, request_hash, {'status': 'idle'},
+            next_state=next_state, expected_version=state.status_version,
+        )
         return self._from_receipt(run_id, receipt)
 
     def _mutation(self, run_id: str, command: ApplyArtifactMutation) -> FlowCommandResult:
@@ -130,9 +188,42 @@ class FlowService:
         replay = self._gate.read_command(run_id, command.command_id, request_hash)
         if replay.status != 'new':
             return self._from_receipt(run_id, replay)
+        state = replay.state
+        try:
+            adapter = self._adapter_factory()
+            effective = adapter.effective_artifacts(run_id)
+            before = checkpoint_projection(self._spec, effective, state.released_checkpoints, state.status)
+        except Exception as exc:
+            error = _short_error(exc)
+            next_state = FlowRunState(
+                run_id,
+                status='failed',
+                pending_checkpoint=state.pending_checkpoint,
+                released_checkpoints=state.released_checkpoints,
+                last_error=error,
+            )
+            receipt = self._gate.record_command(
+                run_id, command.command_id, request_hash, {'error': error, 'status': 'failed'},
+                next_state=next_state, expected_version=state.status_version,
+            )
+            return self._from_receipt(run_id, receipt, error=error)
+        if before.stale_released:
+            error = _stale_released_error(before.stale_released[0])
+            next_state = FlowRunState(
+                run_id,
+                status='failed',
+                pending_checkpoint=state.pending_checkpoint,
+                released_checkpoints=state.released_checkpoints,
+                last_error=error,
+            )
+            receipt = self._gate.record_command(
+                run_id, command.command_id, request_hash, {'error': error, 'status': 'failed'},
+                next_state=next_state, expected_version=state.status_version,
+            )
+            return self._from_receipt(run_id, receipt, error=error)
 
         try:
-            result = dispatch_evo_mutation(self._adapter_factory(), self._spec, run_id, command.mutation)
+            result = dispatch_evo_mutation(adapter, self._spec, run_id, command.mutation)
             outcome = dict(mutation_receipt_outcome(result))
             error = ''
         except IdempotencyConflictError as exc:
@@ -141,7 +232,48 @@ class FlowService:
             outcome = {'error': _short_error(exc), 'status': 'failed'}
             error = str(outcome['error'])
 
-        receipt = self._gate.record_command(run_id, command.command_id, request_hash, outcome)
+        next_state = None
+        if outcome.get('status') == 'ok':
+            try:
+                effective = adapter.effective_artifacts(run_id)
+                after = checkpoint_projection(self._spec, effective, state.released_checkpoints, state.status)
+            except Exception as exc:
+                error = _short_error(exc)
+                next_state = FlowRunState(
+                    run_id,
+                    status='failed',
+                    pending_checkpoint=state.pending_checkpoint,
+                    released_checkpoints=state.released_checkpoints,
+                    last_error=error,
+                )
+                outcome = {**outcome, 'error': error, 'status': 'failed'}
+            else:
+                released = dict(state.released_checkpoints)
+                pending = state.pending_checkpoint
+                trim_step = ''
+                if after.stale_released:
+                    trim_step = after.stale_released[0].step
+                    released = trim_released_from_step(self._spec, released, trim_step)
+                    outcome = {**outcome, 'checkpoint_trimmed_from': trim_step}
+                if pending is not None and effective.get(pending.root) != pending.ref:
+                    pending = None
+                if released != dict(state.released_checkpoints) or pending != state.pending_checkpoint:
+                    next_state = FlowRunState(
+                        run_id,
+                        status=state.status,
+                        pending_checkpoint=pending,
+                        released_checkpoints=released,
+                        last_error=state.last_error,
+                    )
+
+        receipt = self._gate.record_command(
+            run_id,
+            command.command_id,
+            request_hash,
+            outcome,
+            next_state=next_state,
+            expected_version=state.status_version if next_state is not None else None,
+        )
         return self._from_receipt(run_id, receipt, error=error)
 
     def _continue(self, run_id: str, command: ContinueFlow) -> FlowCommandResult:
@@ -157,6 +289,29 @@ class FlowService:
         released = dict(state.released_checkpoints)
         try:
             adapter = self._adapter_factory()
+            projection = checkpoint_projection(
+                self._spec,
+                adapter.effective_artifacts(run_id),
+                state.released_checkpoints,
+                state.status,
+            )
+            if projection.stale_released:
+                error = _stale_released_error(projection.stale_released[0])
+                return self._record(
+                    run_id,
+                    command,
+                    request_hash,
+                    {'error': error, 'status': 'failed'},
+                    FlowRunState(
+                        run_id,
+                        status='failed',
+                        pending_checkpoint=state.pending_checkpoint,
+                        released_checkpoints=state.released_checkpoints,
+                        last_error=error,
+                    ),
+                    state.status_version,
+                    error=error,
+                )
             for _ in range(self._tick_limit):
                 interrupted = self._interrupted(run_id, state)
                 if interrupted is not None:
@@ -348,6 +503,26 @@ def _tick_error(tick: object) -> str:
         if op.error:
             return op.error
     return str(getattr(tick, 'status', 'failed'))
+
+
+def _stale_checkpoint_error(step: str, released_ref: ArtifactRef, effective_ref: ArtifactRef | None) -> str:
+    return (
+        f'checkpoint stale at {step}: pending={_ref_text(released_ref)} '
+        f'effective={_ref_text(effective_ref)}'
+    )
+
+
+def _stale_released_error(stale: StaleCheckpoint) -> str:
+    return (
+        f'checkpoint stale at {stale.step}: released={_ref_text(stale.released_ref)} '
+        f'effective={_ref_text(stale.effective_ref)}; rerun/invalidate the step or check artifact store consistency'
+    )
+
+
+def _ref_text(ref: ArtifactRef | None) -> str:
+    if ref is None:
+        return 'None'
+    return f'{ref.key.artifact_id}:{ref.key.partition}:{ref.version}'
 
 
 def _checkpoint_json(checkpoint: Checkpoint) -> dict[str, object]:

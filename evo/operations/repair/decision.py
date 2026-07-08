@@ -168,8 +168,13 @@ def _positive_metric(delta: Mapping[str, Any]) -> bool:
 
 
 def _metric_value(delta: Mapping[str, Any]) -> float:
-    metrics = delta.get('metric_delta') if isinstance(delta.get('metric_delta'), Mapping) else {}
-    return float(metrics.get('answer_correctness') or metrics.get('overall_score') or 0.0)
+    metrics = delta.get('target_metric_delta') if isinstance(delta.get('target_metric_delta'), Mapping) else {}
+    primary = [_text(item) for item in delta.get('primary_metrics') or () if _text(item)]
+    values = [_float(metrics.get(metric)) for metric in primary if metric in metrics]
+    if values:
+        return max(values)
+    aggregate = delta.get('metric_delta') if isinstance(delta.get('metric_delta'), Mapping) else {}
+    return max(_float(aggregate.get('answer_correctness')), _float(aggregate.get('overall_score')))
 
 
 def _int(value: Any) -> int:
@@ -181,3 +186,10 @@ def _int(value: Any) -> int:
 
 def _text(value: Any) -> str:
     return str(value or '').strip()
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0

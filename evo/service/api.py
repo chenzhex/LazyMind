@@ -342,6 +342,11 @@ def _event_stream(
                     'last_event_id': last_event_id,
                     'status': public['status'],
                     'current_step': public['current_step'],
+                    'checkpoint_state': public['checkpoint_state'],
+                    'first_missing_step': public['first_missing_step'],
+                    'last_released_step': public['last_released_step'],
+                    'retry_from_step': public['retry_from_step'],
+                    'last_error': public['last_error'],
                 }
                 if snapshot.get('step_id'):
                     payload['step_id'] = snapshot['step_id']

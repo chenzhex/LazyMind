@@ -268,7 +268,7 @@ def _task_card(plan: Mapping[str, Any], workspace: Mapping[str, Any], attempt: i
         'previous_attempts': memory['recent_attempts'][-2:],
         'hard_constraints': [
             'Preserve selected_base.patch_profile when mode is not baseline.',
-            'Do not repeat forbidden_patch_fingerprints or forbidden_strategy_keys outside selected_base.',
+            'Do not repeat forbidden_patch_fingerprints or forbidden_edit_shape_hashes outside selected_base.',
             'If continuing from a selected base patch, add a new repair hypothesis; do not only retune carried edits.',
         ],
         'instructions': [

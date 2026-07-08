@@ -79,6 +79,10 @@ class ThreadService:
             'title': str(config.get('title') or ''),
             'status': status['status'],
             'current_step': status['current_step'],
+            'checkpoint_state': status['checkpoint_state'],
+            'first_missing_step': status['first_missing_step'],
+            'last_released_step': status['last_released_step'],
+            'retry_from_step': status['retry_from_step'],
             'last_error': status['last_error'],
         }
         if include_inputs:
@@ -282,8 +286,16 @@ class ThreadService:
             status = 'paused'
         else:
             status = 'idle'
-        current = next((item.step for item in progress if not item.completed), progress[-1].step if progress else '')
-        return {'status': status, 'current_step': current, 'last_error': gate.last_error}
+        checkpoint = snapshot.checkpoint
+        return {
+            'status': status,
+            'current_step': checkpoint.current_step,
+            'checkpoint_state': checkpoint.checkpoint_state,
+            'first_missing_step': checkpoint.first_missing_step,
+            'last_released_step': checkpoint.last_released_step,
+            'retry_from_step': checkpoint.retry_from_step,
+            'last_error': gate.last_error,
+        }
 
     def _stop_owned_router_algorithms(self, thread_id: str) -> None:
         ledger = RouterAlgorithmLedger(self.runtime.store_root)

@@ -107,6 +107,7 @@ class _Turn:
         flow_snapshot = {
             'status': snapshot.status,
             'pending_checkpoint': _safe(snapshot.pending_checkpoint),
+            'checkpoint': _safe(snapshot.checkpoint),
             'progress': _safe(snapshot.progress),
         }
         base_obs = self._blob('base_observation', flow_snapshot)
@@ -387,14 +388,21 @@ def _issues(issues: list[Any]) -> str:
 def _progress_text(result: object) -> str:
     data = result if isinstance(result, Mapping) else {}
     status = str(data.get('status') or 'unknown')
+    checkpoint = data.get('checkpoint') if isinstance(data.get('checkpoint'), Mapping) else {}
     progress = [item for item in data.get('progress') or [] if isinstance(item, Mapping)]
     done = [str(item.get('step') or '') for item in progress
             if item.get('root_ref') or item.get('effective_outputs')]
-    current = next((str(item.get('step') or '') for item in progress if str(item.get('step') or '') not in done), '')
+    current = str(checkpoint.get('current_step') or '')
+    if not current:
+        current = next((str(item.get('step') or '') for item in progress if str(item.get('step') or '') not in done), '')
     if status == 'idle' and not done:
         return f'当前线程尚未启动，下一步是 {current or "dataset"}。'
     if status == 'failed':
-        return f'当前流程失败，已完成步骤: {", ".join(done) if done else "无"}。'
+        if checkpoint.get('checkpoint_state') == 'stale':
+            return f'当前流程失败，checkpoint 已失效，已完成步骤: {", ".join(done) if done else "无"}。'
+        retry_from = str(checkpoint.get('retry_from_step') or '')
+        suffix = f'，建议从 {retry_from} 继续' if retry_from else ''
+        return f'当前流程失败{suffix}，已完成步骤: {", ".join(done) if done else "无"}。'
     if status == 'cancelled':
         return '当前流程已取消。'
     if progress and len(done) == len(progress):
@@ -404,6 +412,8 @@ def _progress_text(result: object) -> str:
         text += f'，当前/下一步是 {current}'
     if done:
         text += f'，已完成: {", ".join(done)}'
+    if checkpoint.get('checkpoint_state') == 'stale':
+        text += '，checkpoint 已失效'
     return text + '。'
 
 

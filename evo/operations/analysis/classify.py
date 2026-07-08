@@ -366,17 +366,31 @@ def _tracing_defect(
     )
     refs_exist = bool(_ids(case.get('reference_doc_ids')) or _ids(case.get('reference_chunk_ids')))
     answer_failed = judge.get('failure_type') not in {'none', 'infra_failure'}
+    retrieved_trace_ids = bool(
+        _trace_semantic_ids(trace, 'retrieved_doc_ids')
+        or _trace_semantic_ids(trace, 'retrieved_chunk_ids')
+    )
+    final_trace_ids = bool(
+        _trace_semantic_ids(trace, 'final_context_doc_ids')
+        or _trace_semantic_ids(trace, 'final_context_chunk_ids')
+    )
     retrieved_ids = bool(
-        _semantic_ids(trace, answer, 'retrieved_doc_ids', 'doc_ids')
+        retrieved_trace_ids
+        or _semantic_ids(trace, answer, 'retrieved_doc_ids', 'doc_ids')
         or _semantic_ids(trace, answer, 'retrieved_chunk_ids', 'chunk_ids')
     )
     final_ids = bool(
-        _semantic_ids(trace, answer, 'final_context_doc_ids', 'doc_ids')
+        final_trace_ids
+        or _semantic_ids(trace, answer, 'final_context_doc_ids', 'doc_ids')
         or _semantic_ids(trace, answer, 'final_context_chunk_ids', 'chunk_ids')
     )
     if refs_exist and judge.get('retrieval_failure_type') == 'not_applicable':
         return 'trace_metrics_missing'
     if needs_ids and not trace.get('retrieval_steps'):
+        return 'trace_metrics_missing'
+    if needs_ids and trace.get('semantic_metric_keys') and not retrieved_trace_ids:
+        return 'trace_metrics_missing'
+    if answer_failed and refs_exist and trace.get('semantic_metric_keys') and not final_trace_ids:
         return 'trace_metrics_missing'
     if needs_ids and _semantic_fallback_enabled(trace) and not retrieved_ids:
         return 'trace_metrics_missing'
@@ -450,7 +464,7 @@ def _trace_evidence(trace: Mapping[str, Any], case: Mapping[str, Any],
     retrieved_chunks = _semantic_ids(trace, answer, 'retrieved_chunk_ids', 'chunk_ids')
     final_docs = _semantic_ids(trace, answer, 'final_context_doc_ids', 'doc_ids')
     final_chunks = _semantic_ids(trace, answer, 'final_context_chunk_ids', 'chunk_ids')
-    source = 'rag_answer_fallback' if _semantic_fallback_enabled(trace) else 'trace'
+    source = _semantic_id_source(trace, answer)
     return [
         _evidence('route_signature', 'analysis.trace_summary.route_signature', trace.get('route_signature')),
         _evidence('stage_sequence', 'analysis.trace_summary.diagnostic_stage_sequence',
@@ -502,10 +516,30 @@ def _semantic_ids(
     trace_key: str,
     answer_key: str,
 ) -> set[str]:
-    trace_ids = _ids(trace.get(trace_key))
+    trace_ids = _trace_semantic_ids(trace, trace_key)
     if trace_ids or not _semantic_fallback_enabled(trace):
         return trace_ids
     return _ids(answer.get(answer_key))
+
+
+def _trace_semantic_ids(trace: Mapping[str, Any], trace_key: str) -> set[str]:
+    return _ids(trace.get(trace_key))
+
+
+def _semantic_id_source(trace: Mapping[str, Any], answer: Mapping[str, Any]) -> str:
+    trace_ids = (
+        _trace_semantic_ids(trace, 'retrieved_doc_ids')
+        or _trace_semantic_ids(trace, 'retrieved_chunk_ids')
+        or _trace_semantic_ids(trace, 'final_context_doc_ids')
+        or _trace_semantic_ids(trace, 'final_context_chunk_ids')
+    )
+    if trace_ids:
+        return 'trace'
+    if _semantic_fallback_enabled(trace) and (_ids(answer.get('doc_ids')) or _ids(answer.get('chunk_ids'))):
+        return 'rag_answer_fallback'
+    if trace.get('semantic_metric_keys'):
+        return 'trace_missing_ids'
+    return 'trace'
 
 
 def _semantic_fallback_enabled(trace: Mapping[str, Any]) -> bool:

@@ -34,6 +34,7 @@ def build_repair_group_queue(rows: list[Mapping[str, Any]]) -> list[dict[str, An
     queue = [_group(block, mode, issue, cluster, route, items)
              for (block, mode, issue, cluster, route), items in groups.items()]
     return sorted(queue, key=lambda item: (
+        -item['answer_impact_score'],
         -item['badcase_count'],
         -item['severity_score'],
         -item['confidence_score'],
@@ -78,6 +79,7 @@ def _group(block: str, mode: str, issue: str, cluster: str, route: str,
         'badcase_count': len(rows),
         'case_ids': case_ids,
         'representative_case_id': case_ids[0] if case_ids else '',
+        'answer_impact_score': round(max((_answer_gap(row) for row in rows), default=0.0), 4),
         'confidence_score': round(sum(_confidence(row) for row in rows) / len(rows), 4),
         'severity_score': round(sum(_severity(row) for row in rows) / len(rows), 4),
         'candidate_files': list(registry.get('entrypoints') or ()),
@@ -143,9 +145,20 @@ def _metric_focus(rows: list[Mapping[str, Any]]) -> list[str]:
 def _severity(row: Mapping[str, Any]) -> float:
     category = _text(row.get('issue_category'))
     judge = row.get('judge') if isinstance(row.get('judge'), Mapping) else {}
-    score = 1.0 - _score(judge.get('answer_correctness'), 0.0)
+    answer_gap = _answer_gap(row)
+    retrieval_gap = 1.0 - _score(judge.get('retrieval_quality_score'), 1.0)
     weight = {'execution': 1.0, 'retrieval': 0.9, 'generation': 0.8, 'tracing': 0.4}.get(category, 0.2)
-    return round((0.6 * weight) + (0.25 * score) + (0.15 * _confidence(row)), 4)
+    retrieval_signal = retrieval_gap if category == 'retrieval' else 0.0
+    return round((0.55 * answer_gap) + (0.25 * retrieval_signal) + (0.10 * weight) + (0.10 * _confidence(row)), 4)
+
+
+def _answer_gap(row: Mapping[str, Any]) -> float:
+    judge = row.get('judge') if isinstance(row.get('judge'), Mapping) else {}
+    return max(
+        1.0 - _score(judge.get('answer_correctness'), 0.0),
+        1.0 - _score(judge.get('answer_quality_score'), 0.0),
+        1.0 - _score(judge.get('overall_score'), 0.0),
+    )
 
 
 def _confidence(row: Mapping[str, Any]) -> float:

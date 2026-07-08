@@ -264,6 +264,7 @@ def _analysis_delta_from(
     ]
     metrics = comparison.get('metrics') if isinstance(comparison.get('metrics'), Mapping) else {}
     delta = metrics.get('delta') if isinstance(metrics.get('delta'), Mapping) else {}
+    target_metric_delta = _target_metric_delta(selected, rows)
     target_remaining_delta = baseline_target_count - len(remaining)
     resolved = not remaining and not target_badcases
     improved = target_remaining_delta > 0
@@ -287,6 +288,8 @@ def _analysis_delta_from(
         'new_groups': new_groups[:5],
         'goodcase_guard_status': goodcase_guard.get('status') or '',
         'metric_delta': delta,
+        'target_metric_delta': target_metric_delta,
+        'primary_metrics': list(selected.get('primary_metrics') or ()),
         'execution_failures': candidate_summary.get('execution_failures') or [],
         'recommended_action': recommended_action,
     }
@@ -297,7 +300,6 @@ def _candidate_gate(
     candidate_summary: Mapping[str, Any],
     delta: Mapping[str, Any],
 ) -> tuple[bool, str]:
-    metrics = delta.get('metric_delta') if isinstance(delta.get('metric_delta'), Mapping) else {}
     if comparison.get('status') != 'completed':
         return False, _text(comparison.get('verdict')) or 'comparison_not_completed'
     if candidate_summary.get('execution_failures'):
@@ -308,9 +310,46 @@ def _candidate_gate(
         return False, 'target_followup_groups_detected'
     if delta.get('target_group_status') not in {'resolved', 'improved'}:
         return False, 'target_group_not_improved'
-    if float(metrics.get('answer_correctness') or metrics.get('overall_score') or 0.0) < 0.0001:
+    if _primary_metric_value(delta) < 0.0001:
         return False, 'metric_not_improved'
     return True, 'target_group_improved'
+
+
+def _target_metric_delta(selected: Mapping[str, Any], rows: list[Mapping[str, Any]]) -> dict[str, float]:
+    baseline = {
+        _text(item.get('case_id')): item.get('metrics')
+        for item in selected.get('evidence') or []
+        if isinstance(item, Mapping) and isinstance(item.get('metrics'), Mapping)
+    }
+    result: dict[str, list[float]] = {}
+    for row in rows:
+        case_id = _text(row.get('case_id'))
+        before = baseline.get(case_id)
+        after = row.get('judge') if isinstance(row.get('judge'), Mapping) else {}
+        if not before:
+            continue
+        for metric in selected.get('primary_metrics') or ():
+            key = _text(metric)
+            if key and key in before and key in after:
+                result.setdefault(key, []).append(_float(after.get(key)) - _float(before.get(key)))
+    return {key: round(sum(values) / len(values), 4) for key, values in result.items() if values}
+
+
+def _primary_metric_value(delta: Mapping[str, Any]) -> float:
+    metrics = delta.get('target_metric_delta') if isinstance(delta.get('target_metric_delta'), Mapping) else {}
+    primary = [_text(item) for item in delta.get('primary_metrics') or () if _text(item)]
+    values = [_float(metrics.get(metric)) for metric in primary if metric in metrics]
+    if values:
+        return max(values)
+    aggregate = delta.get('metric_delta') if isinstance(delta.get('metric_delta'), Mapping) else {}
+    return max(_float(aggregate.get('answer_correctness')), _float(aggregate.get('overall_score')))
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _text(value: Any) -> str:

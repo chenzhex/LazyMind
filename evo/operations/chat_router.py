@@ -54,6 +54,19 @@ MESSAGE_DIAGNOSTIC_MARKERS = (
     'tool execution failed',
     'tool disabled',
 )
+INVALID_FINAL_ANSWER_MARKERS = (
+    '知识库检索服务暂时不可用',
+    '知识库服务暂时不可用',
+    '无法访问知识库',
+    '无法检索知识库',
+    '检索服务暂时不可用',
+    'the knowledge base retrieval service is unavailable',
+    'knowledge base retrieval service is unavailable',
+    'kb retrieval service is unavailable',
+    'retrieval service is unavailable',
+)
+INVALID_FINAL_ANSWER_MAX_CHARS = 180
+INVALID_FINAL_ANSWER_APOLOGY = re.compile(r'^(?:抱歉|很抱歉|对不起|sorry)[，,。.!:\s]*')
 PROCESS_DIAGNOSTIC_FIELDS = (
     'msg',
     'error',
@@ -464,6 +477,9 @@ def _normalize(target: Mapping[str, Any], stream: Mapping[str, Any]) -> dict[str
     if not answer:
         return _failed(dict(stream) | {'answer': ''}, target, 'chat_no_answer',
                        'stream finished without final answer text')
+    if _invalid_final_answer(answer):
+        return _failed(dict(stream) | {'answer': ''}, target, 'chat_invalid_answer',
+                       'stream finished with retrieval-unavailable final answer')
     return {
         'status': 'ok',
         'answer': answer,
@@ -522,7 +538,7 @@ def _retry_request(request: RouterChatRequest) -> RouterChatRequest:
 def _retryable_chat_result(result: Mapping[str, Any]) -> bool:
     chat_error = result.get('chat_error') if isinstance(result.get('chat_error'), Mapping) else {}
     error_type = str(chat_error.get('type') or '')
-    if error_type == 'chat_no_answer':
+    if error_type in {'chat_no_answer', 'chat_invalid_answer'}:
         return True
     return False
 
@@ -532,9 +548,14 @@ def _retry_exhausted_result(state: Any) -> dict[str, Any]:
     if not _retryable_chat_result(result):
         return dict(result)
     target = result.get('target') if isinstance(result.get('target'), Mapping) else {}
+    chat_error = result.get('chat_error') if isinstance(result.get('chat_error'), Mapping) else {}
+    exhausted_type = str(chat_error.get('type') or '').strip() + '_retry_exhausted'
+    message = {
+        'chat_invalid_answer_retry_exhausted': 'chat stream repeatedly returned retrieval-unavailable final answer',
+        'chat_no_answer_retry_exhausted': 'chat stream repeatedly finished without final answer text',
+    }.get(exhausted_type, 'chat stream repeatedly returned retryable failure')
     empty_result = dict(result) | {'answer': ''}
-    failed = _failed(empty_result, target, 'chat_no_answer_retry_exhausted',
-                     'chat stream repeatedly finished without final answer text')
+    failed = _failed(empty_result, target, exhausted_type, message)
     return failed | {'retry_exhausted': True}
 
 
@@ -733,6 +754,20 @@ def _answer_text(raw_answer: str) -> str:
     cleaned = text[controls[-1].end():].strip() if controls else text
     cleaned = CONTROL_TAG.sub('', cleaned)
     return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+
+def _invalid_final_answer(answer: str) -> bool:
+    text = re.sub(r'\s+', ' ', str(answer or '').strip()).lower()
+    if len(text) > INVALID_FINAL_ANSWER_MAX_CHARS:
+        return False
+    if not _has_process_marker(text, INVALID_FINAL_ANSWER_MARKERS):
+        return False
+    text = text.lstrip(' "\'“”‘’')
+    if text.startswith(INVALID_FINAL_ANSWER_MARKERS):
+        return True
+    if match := INVALID_FINAL_ANSWER_APOLOGY.match(text):
+        return text[match.end():].lstrip(' "\'“”‘’').startswith(INVALID_FINAL_ANSWER_MARKERS)
+    return False
 
 
 def _source_refs(

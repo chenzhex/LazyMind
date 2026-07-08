@@ -71,12 +71,10 @@ def patch_policy_check(
     memory = repair_memory(attempts, base)
     forbidden_hashes = set(memory['forbidden_patch_fingerprints'])
     forbidden_shapes = set(memory['forbidden_edit_shape_hashes'])
-    forbidden_strategies = set(memory['forbidden_strategy_keys'])
     current_strategies = set(profile.strategy_keys)
     base_strategies = set(base.strategy_keys)
     current_edits = set(profile.normalized_edits)
     base_edits = set(base.normalized_edits)
-    new_strategies = current_strategies - base_strategies
     reason = ''
     detail: dict[str, Any] = {}
     if base.normalized_hash and profile.normalized_hash == base.normalized_hash:
@@ -90,9 +88,6 @@ def patch_policy_check(
     elif profile.edit_shape_hash in forbidden_shapes and profile.edit_shape_hash != base.edit_shape_hash:
         reason = 'repeated_forbidden_edit_shape'
         detail = {'edit_shape_hash': profile.edit_shape_hash}
-    elif repeated := sorted(new_strategies & forbidden_strategies):
-        reason = 'repeated_forbidden_strategy'
-        detail = {'strategy_keys': repeated[:8]}
     elif base_strategies and current_strategies and current_strategies <= base_strategies:
         reason = 'repeated_carried_strategy_without_new_hypothesis'
         detail = {'strategy_keys': sorted(current_strategies)[:8]}
@@ -110,7 +105,6 @@ def repair_memory(attempts: list[Mapping[str, Any]], selected_base: PatchProfile
     reasons.pop('', None)
     forbidden_hashes: set[str] = set()
     forbidden_shapes: set[str] = set()
-    forbidden_strategies: set[str] = set()
     base = selected_base or PatchProfile()
     recent = [_attempt_summary(attempt) for attempt in attempts[-5:]]
     for attempt in attempts:
@@ -118,11 +112,9 @@ def repair_memory(attempts: list[Mapping[str, Any]], selected_base: PatchProfile
         if attempt.get('status') != 'validated' and profile.normalized_hash:
             forbidden_hashes.add(profile.normalized_hash)
             forbidden_shapes.add(profile.edit_shape_hash)
-            forbidden_strategies.update(profile.strategy_keys)
     if base.normalized_hash:
         forbidden_hashes.discard(base.normalized_hash)
         forbidden_shapes.discard(base.edit_shape_hash)
-        forbidden_strategies.difference_update(base.strategy_keys)
     return {
         'attempt_count': len(attempts),
         'failure_reason_counts': dict(reasons),
@@ -130,7 +122,7 @@ def repair_memory(attempts: list[Mapping[str, Any]], selected_base: PatchProfile
         'repeat_failures': [reason for reason, count in reasons.items() if count >= 2],
         'forbidden_patch_fingerprints': sorted(forbidden_hashes),
         'forbidden_edit_shape_hashes': sorted(forbidden_shapes),
-        'forbidden_strategy_keys': sorted(forbidden_strategies),
+        'forbidden_strategy_keys': [],
     }
 
 
