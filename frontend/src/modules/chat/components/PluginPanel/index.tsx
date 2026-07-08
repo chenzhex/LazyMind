@@ -205,22 +205,68 @@ function resolveColumnSlotId(
   return null;
 }
 
+/**
+ * Flatten a format-C CompositePanelNode tree into a flat column list.
+ * For 'row' nodes, children become columns proportioned by weight.
+ * For 'column' nodes at root, we treat the whole tree as one column (single slot fallback).
+ * tabs[] leaf nodes become an InnerTabsNode for backward compat rendering.
+ */
+function flattenFormatCNode(
+  node: import('@/modules/chat/store/pluginPanel').CompositePanelNode,
+  weight: number,
+): Array<{ slotId: string | InnerTabsNode; weight: number }> {
+  if (node.slot) {
+    return [{ slotId: node.slot, weight }];
+  }
+  if (node.tabs && node.tabs.length > 0) {
+    // Convert format-C tabs (string[]) to legacy InnerTabsNode for rendering
+    const innerTabsNode: InnerTabsNode = {
+      tabs: node.tabs.map((slotId) => slotId as CompositeLayoutNode),
+    };
+    return [{ slotId: innerTabsNode, weight }];
+  }
+  if (node.direction === 'row' && node.children) {
+    const childWeight = node.children.reduce((s, c) => s + (c.weight ?? 1), 0);
+    return node.children.flatMap((child) =>
+      flattenFormatCNode(child, ((child.weight ?? 1) / childWeight) * weight),
+    );
+  }
+  // column direction or unknown: render as a single nested block — just flatten children
+  if (node.direction === 'column' && node.children) {
+    // For now, render only the first child in column containers (rows handle horizontal splitting)
+    // A full nested column render would require CSS grid nesting, handled in the tree renderer.
+    return node.children.flatMap((child) => flattenFormatCNode(child, child.weight ?? 1));
+  }
+  return [];
+}
+
 /** Build the effective column list from composite_layout (or fall back to slot ids). */
 function buildColumns(
   tab: TabDef,
 ): Array<{ slotId: string | InnerTabsNode; weight: number }> {
   const layout = tab.composite_layout;
-  if (!layout || layout.length === 0) {
-    // Fallback: all slots side-by-side with equal weight.
+  if (!layout) {
     return tab.slots.map((s) => ({ slotId: s.id, weight: 1 }));
   }
-  // The top-level array may be a single [...] parallel node or an explicit list of columns.
-  // Detect whether the first element is itself an array (parallel node).
+
+  // Format C: { direction, children } tree
+  if (!Array.isArray(layout) && typeof layout === 'object' && 'direction' in layout) {
+    const result = flattenFormatCNode(
+      layout as import('@/modules/chat/store/pluginPanel').CompositePanelNode,
+      1,
+    );
+    return result.length > 0 ? result : tab.slots.map((s) => ({ slotId: s.id, weight: 1 }));
+  }
+
+  // Legacy array format
+  if (!Array.isArray(layout) || layout.length === 0) {
+    return tab.slots.map((s) => ({ slotId: s.id, weight: 1 }));
+  }
   const first = layout[0];
   const cols =
     Array.isArray(first)
       ? (first as CompositeLayoutNode[])
-      : layout;
+      : layout as CompositeLayoutNode[];
   return cols
     .map((n) => resolveColumnSlotId(n))
     .filter((c): c is NonNullable<typeof c> => c !== null);
@@ -756,7 +802,7 @@ function TabSlotGrid({
     return slotDef.label ?? slotDef.id;
   };
   return (
-    <div className={`plugin-panel__tab-content plugin-panel__tab-content--${tab.layout ?? 'list'}`}>
+    <div className={`plugin-panel__tab-content plugin-panel__tab-content--${tab.layout ?? 'vertical'}`}>
       {/* Hidden file input for adding new items */}
       <input
         ref={addFileInputRef}

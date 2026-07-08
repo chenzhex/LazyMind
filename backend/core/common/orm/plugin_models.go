@@ -104,8 +104,10 @@ type PluginStepIntent struct {
 
 func (PluginStepIntent) TableName() string { return "plugin_step_intents" }
 
-// PluginDraft stores user-created plugin draft content (YAML state machine definition).
+// PluginDraft stores user-created plugin draft content.
 // Each draft is owned by the creating user and represents a work-in-progress plugin.
+// The original Content column is kept for backward compatibility; readers should prefer
+// the split columns and fall back to Content when the split columns are empty.
 type PluginDraft struct {
 	ID        string    `gorm:"column:id;type:varchar(36);primaryKey"`
 	Name      string    `gorm:"column:name;type:varchar(255);not null;default:''"`
@@ -113,6 +115,30 @@ type PluginDraft struct {
 	CreatedBy string    `gorm:"column:created_by;type:varchar(255);not null;default:''"`
 	CreatedAt time.Time `gorm:"column:created_at;not null"`
 	UpdatedAt time.Time `gorm:"column:updated_at;not null"`
+	// Split content columns (migration 20260706120000).
+	// generate_status: '' | 'generating' | 'skeleton_done' | 'state_done' | 'done' | 'failed'
+	//   ''             — never triggered AI generation
+	//   'generating'   — Phase 1 in progress
+	//   'skeleton_done' — Phase 1 complete (plugin.yaml available); Phase 2 running
+	//   'state_done'   — Phase 2 complete (state.yml available); Phase 3 running
+	//   'done'         — All phases complete
+	//   'failed'       — A phase failed; see generate_error for details
+	PluginYAMLContent string `gorm:"column:plugin_yaml_content;type:text;not null;default:''"`
+	StateYAMLContent  string `gorm:"column:state_yaml_content;type:text;not null;default:''"`
+	// StateLayoutContent stores only the x-layout JSON (node positions/widths) extracted
+	// from state.yml. Separated so layout drag-saves never contend with AI writes.
+	// Saved with last-write-wins; no version check needed (single-user, AI never writes this).
+	StateLayoutContent string `gorm:"column:state_layout_content;type:text;not null;default:''"`
+	ScenarioContent    string `gorm:"column:scenario_content;type:text;not null;default:''"`
+	ScriptsContent     string `gorm:"column:scripts_content;type:text;not null;default:'{}'"`
+	GenerateStatus     string `gorm:"column:generate_status;type:varchar(16);not null;default:''"`
+	// GenerateError stores the last error message when GenerateStatus = 'failed' (migration 20260707120000).
+	GenerateError string `gorm:"column:generate_error;type:text;not null;default:''"`
+	// Version is an optimistic-lock counter. SavePluginDraft increments it on every
+	// successful write to plugin_yaml_content or state_yaml_content and rejects saves
+	// that arrive with a stale version (returns 409 Conflict).
+	// AI generate_job writes bypass the version check (it only writes its own fields).
+	Version int `gorm:"column:version;type:int;not null;default:1"`
 }
 
 func (PluginDraft) TableName() string { return "plugin_drafts" }
