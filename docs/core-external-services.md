@@ -122,7 +122,23 @@ Core 调用的 Evo 端点:
 
 对应的 Core wrapper 路径为 `/api/core/agent/threads...`、`/api/core/agent/candidates...` 和 `/api/core/agent/router...`，路径形态与 Evo 保持一致，仅增加 `/api/core/agent` 前缀。
 
-Evo 的 `events:stream` 和 `event-trace:stream` SSE 帧同时提供标准 `event:` 字段，以及 JSON `data.event_type` / `data.type` 字段；终止帧示例为 `event: done` 且 `data.type == "done"`，便于只解析 `data` 的前端识别流程已暂停、取消或结束。
+Evo 线程状态字段以 Evo 当前返回为准。`GET /threads/{thread_id}` 和 SSE `done` 帧都会透出只读 checkpoint projection：
+
+```json
+{
+  "status": "paused",
+  "current_step": "eval",
+  "checkpoint_state": "valid",
+  "first_missing_step": "eval",
+  "last_released_step": "dataset",
+  "retry_from_step": "eval",
+  "last_error": ""
+}
+```
+
+这些字段只用于展示和解释恢复边界。Core 不理解 checkpoint contract，也不通过 `current_step` / `retry_from_step` 驱动 Evo 流程；重跑必须走 Evo 的显式 rerun/invalidate mutation，`/threads/{thread_id}/retry` 只表示 failed flow recovery，不是全量 rerun。
+
+Evo 的 `events:stream` 和 `event-trace:stream` SSE 帧同时提供标准 `event:` 字段，以及 JSON `data.event_type` / `data.type` 字段；终止帧示例为 `event: done` 且 `data.type == "done"`，便于只解析 `data` 的前端识别流程已暂停、取消或结束。`done` 帧的 `data` 也包含上面的 checkpoint projection 字段。
 
 ## 运行期依赖关系简图
 

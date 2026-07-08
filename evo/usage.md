@@ -519,7 +519,13 @@ ContinueFlow('cmd:continue:eval', until_step='eval')
 CheckpointPolicy(pause_after_steps=('dataset', 'eval', 'analysis', 'repair'))
 ```
 
-也就是说 dataset/eval/analysis/repair 的当前 root ref 如果尚未 released，就会自动暂停，等待用户或上层服务确认，再 `ResumeFlow` 后继续。`ResumeFlow` release 的是当前 root ref；如果 rerun/edit/invalidate 后同一步生成了新的 root ref，该 step 会再次暂停。
+也就是说 dataset/eval/analysis/repair 的当前 root ref 如果尚未 released，就会自动暂停，等待用户或上层服务确认，再 `ResumeFlow` 后继续。released checkpoint 是 artifact ref contract：
+
+```text
+released_checkpoints[step] == effective_artifacts[root_key(step)]
+```
+
+`ResumeFlow` release pending checkpoint 前会校验该 ref 仍是对应 step root 的 effective ref；如果已经 stale，flow 会进入 failed 并写入 `last_error`，不会盲目 release。rerun/edit/invalidate 后如果同一步或下游 step 的 effective root 变化，`ApplyArtifactMutation` 会基于 mutation 后的 `effective_artifacts` 裁剪 stale released checkpoints，而不是按 mutation 类型手写依赖规则。
 
 ### Pause / Resume / Cancel / Retry
 
@@ -533,11 +539,13 @@ service.handle(run_id, RetryFlow('cmd:retry:1'))
 语义：
 
 - pause：把 flow gate 置为 paused，正在 continue 的循环会观察到 stale/interrupted。
-- resume：只有 paused 可恢复；如果存在 pending checkpoint，会把该 checkpoint 记录为 released。
+- resume：只有 paused 可恢复；如果存在 pending checkpoint，必须先通过 checkpoint contract 校验，才会把该 checkpoint 记录为 released。
 - cancel：把 flow gate 置为 cancelled；不会删除 artifact。
-- retry：只有 failed 可重置为 idle；不自动修改 artifact。
+- retry：只有 failed 可重置为 idle；不自动修改 artifact，也不是全量 rerun。retry 后的 `ContinueFlow` 仍会校验 released checkpoint；如果 dataset checkpoint 仍有效，eval 失败后的 retry 会从 eval 继续。需要从指定步骤重跑时，应使用显式 rerun/invalidate mutation。
 
 这些状态是流程门闩，不是业务 step 状态。产物是否有效仍看 `effective_artifacts`。
+
+`ContinueFlow` 进入 tick 循环前会校验所有 released checkpoint。如果发现 released ref 不再等于 effective root ref，会把 flow gate 写为 failed，`last_error` 包含 stale step、released ref、effective ref 和建议动作；旧数据或非原子写入导致的 checkpoint 不一致不会被静默裁剪。
 
 ### FlowQueryService
 
@@ -555,11 +563,25 @@ records = query.read(run_id, ReadProgressSnapshot())
 
 `FlowQueryService` 只读：
 
-- `snapshot(run_id)` 返回 flow gate 状态、pending checkpoint 和 progress。
+- `snapshot(run_id)` 返回 flow gate 状态、pending checkpoint、released checkpoints、progress 和 checkpoint projection。
 - `progress(run_id)` 根据 `effective_artifacts` 推导每个 step 的 root 和输出完成情况。
 - `read(run_id, query)` 调用 `dispatch_evo_query(...)` 读取 step root 或 case artifact。
 
 它不写 store，不执行 tick，不处理命令幂等。
+
+checkpoint projection 是展示/查询字段，不是新的持久化状态：
+
+```json
+{
+  "current_step": "eval",
+  "first_missing_step": "eval",
+  "last_released_step": "dataset",
+  "checkpoint_state": "valid",
+  "retry_from_step": "eval"
+}
+```
+
+`current_step`、`retry_from_step` 等字段由 `effective_artifacts` 和 `released_checkpoints` 推导，前端/Core 只能展示和透传，不能用它们改写流程边界。
 
 ## 9. 后续迁移 operation 的标准步骤
 
