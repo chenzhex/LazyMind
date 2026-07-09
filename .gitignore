@@ -2,6 +2,7 @@ backend/auth-service/api_permissions.json
 .vscode/settings.json
 backend/core/core
 .env
+docker-compose.override.yml
 
 .flake8-python.path
 __pycache__
