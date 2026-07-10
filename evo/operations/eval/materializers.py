@@ -16,9 +16,34 @@ SCORES = (
     'completeness',
     'groundedness',
     'format_compliance',
+    'key_point_recall',
+    'key_point_precision',
+    'semantic_similarity',
+    'numeric_accuracy',
+    'list_set_f1',
+    'claim_support_rate',
+    'unsupported_claim_rate',
+    'contradiction_rate',
+    'retrieval_hit_at_k',
+    'retrieval_recall_at_k',
+    'retrieval_precision_at_k',
+    'retrieval_mrr',
+    'retrieval_ndcg',
+    'context_relevance_avg',
+    'context_noise_rate',
     'answer_quality_score',
     'retrieval_quality_score',
     'overall_score',
+)
+EXPLANATIONS = (
+    'matched_key_points',
+    'missing_points',
+    'wrong_points',
+    'extra_points',
+    'unsupported_claims',
+    'contradicted_claims',
+    'evidence_mapping',
+    'claims',
 )
 
 
@@ -50,6 +75,7 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
                 'kb_id': '',
                 'question': '',
                 'question_type': '',
+                'difficulty': '',
                 'ground_truth': '',
                 'rag_answer': '',
                 **{key: 0.0 for key in ('answer_score', 'retrieval_score', *SCORES)},
@@ -64,6 +90,9 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
                 'retrieve_doc_ids': [],
                 'retrieve_contexts': [],
                 'retrieved_contexts': [],
+                **{key: [] for key in EXPLANATIONS},
+                'metric_layers': {},
+                'score_breakdown': {},
                 'trace_id': '',
                 'target': {},
             })
@@ -77,6 +106,7 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
             'kb_id': str(target.get('kb_id') or ''),
             'question': str(case.get('question') or ''),
             'question_type': str(case.get('question_type') or ''),
+            'difficulty': str(case.get('difficulty') or ''),
             'ground_truth': case.get('answer'),
             'rag_answer': answer.get('answer'),
             **{key: judge.get(key, 0.0) for key in SCORES},
@@ -95,6 +125,9 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
             'retrieve_doc_ids': answer.get('doc_ids') or [],
             'retrieve_contexts': answer.get('contexts') or [],
             'retrieved_contexts': answer.get('contexts') or [],
+            **{key: judge.get(key) or [] for key in EXPLANATIONS},
+            'metric_layers': judge.get('metric_layers') if isinstance(judge.get('metric_layers'), Mapping) else {},
+            'score_breakdown': judge.get('score_breakdown') if isinstance(judge.get('score_breakdown'), Mapping) else {},
             'trace_id': str(judge.get('trace_id') or ''),
             'target': dict(target),
         })
@@ -130,7 +163,21 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
             'answer_relevance_avg': _avg(scored, 'answer_relevance'),
             'correct_rate': round(sum(1 for row in scored if row['quality_label'] == 'good') / len(scored), 4)
             if scored else 0.0,
+            'key_point_recall_avg': _avg(scored, 'key_point_recall'),
+            'claim_support_rate_avg': _avg(scored, 'claim_support_rate'),
+            'retrieval_mrr_avg': _avg(
+                [row for row in scored if row['retrieval_failure_type'] != 'not_applicable'],
+                'retrieval_mrr',
+            ),
+            'retrieval_ndcg_avg': _avg(
+                [row for row in scored if row['retrieval_failure_type'] != 'not_applicable'],
+                'retrieval_ndcg',
+            ),
         },
+        'by_question_type': _group_metrics(scored, 'question_type'),
+        'by_difficulty': _group_metrics(scored, 'difficulty'),
+        'top_missing_points': _top_items(rows, 'missing_points'),
+        'top_unsupported_claims': _top_items(rows, 'unsupported_claims'),
         'quality_counts': dict(Counter(row['quality_label'] for row in rows)),
         'failure_type_counts': dict(Counter(row['failure_type'] for row in rows)),
         'retrieval_failure_type_counts': dict(Counter(row['retrieval_failure_type'] for row in rows)),
@@ -152,3 +199,47 @@ def _mapping(value: object, name: str) -> Mapping[str, Any]:
 def _avg(rows: list[Mapping[str, Any]], key: str) -> float:
     values = [float(row.get(key) or 0.0) for row in rows]
     return round(sum(values) / len(values), 4) if values else 0.0
+
+
+def _group_metrics(rows: list[Mapping[str, Any]], key: str) -> dict[str, Any]:
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        label = str(row.get(key) or 'unknown')
+        groups.setdefault(label, []).append(row)
+    return {
+        label: {
+            'count': len(group),
+            'overall_score_avg': _avg(group, 'overall_score'),
+            'answer_quality_score_avg': _avg(group, 'answer_quality_score'),
+            'retrieval_quality_score_avg': _avg(group, 'retrieval_quality_score'),
+            'key_point_recall_avg': _avg(group, 'key_point_recall'),
+            'claim_support_rate_avg': _avg(group, 'claim_support_rate'),
+            'correct_rate': round(sum(1 for row in group if row['quality_label'] == 'good') / len(group), 4),
+        }
+        for label, group in sorted(groups.items())
+    }
+
+
+def _top_items(rows: list[Mapping[str, Any]], key: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    counts: Counter[str] = Counter()
+    examples: dict[str, str] = {}
+    for row in rows:
+        values = row.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            text = _item_text(value)
+            if not text:
+                continue
+            counts[text] += 1
+            examples.setdefault(text, str(row.get('case_id') or ''))
+    return [
+        {'text': text, 'count': count, 'example_case_id': examples.get(text, '')}
+        for text, count in counts.most_common(limit)
+    ]
+
+
+def _item_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return str(value.get('statement') or value.get('text') or value.get('claim') or value)[:300]
+    return str(value or '')[:300]
