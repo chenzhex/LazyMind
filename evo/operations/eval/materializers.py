@@ -19,11 +19,8 @@ SCORES = (
     'key_point_recall',
     'key_point_precision',
     'semantic_similarity',
-    'numeric_accuracy',
-    'list_set_f1',
     'claim_support_rate',
     'unsupported_claim_rate',
-    'contradiction_rate',
     'retrieval_hit_at_k',
     'retrieval_recall_at_k',
     'retrieval_precision_at_k',
@@ -35,15 +32,22 @@ SCORES = (
     'retrieval_quality_score',
     'overall_score',
 )
+OPTIONAL_SCORES = (
+    'numeric_accuracy',
+    'list_set_f1',
+    'contradiction_rate',
+)
 EXPLANATIONS = (
     'matched_key_points',
     'missing_points',
     'wrong_points',
     'extra_points',
     'unsupported_claims',
-    'contradicted_claims',
     'evidence_mapping',
     'claims',
+)
+OPTIONAL_EXPLANATIONS = (
+    'contradicted_claims',
 )
 
 
@@ -89,9 +93,10 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
                 'retrieve_chunk_ids': [],
                 'retrieve_doc_ids': [],
                 'retrieve_contexts': [],
-                'retrieved_contexts': [],
-                **{key: [] for key in EXPLANATIONS},
-                'metric_layers': {},
+            'retrieved_contexts': [],
+            **{key: [] for key in EXPLANATIONS},
+            **{key: [] for key in OPTIONAL_EXPLANATIONS},
+            'metric_layers': {},
                 'score_breakdown': {},
                 'trace_id': '',
                 'target': {},
@@ -110,6 +115,7 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
             'ground_truth': case.get('answer'),
             'rag_answer': answer.get('answer'),
             **{key: judge.get(key, 0.0) for key in SCORES},
+            **{key: judge[key] for key in OPTIONAL_SCORES if key in judge},
             'answer_score': judge.get('answer_quality_score', 0.0),
             'retrieval_score': judge.get('retrieval_quality_score', 0.0),
             'quality_label': str(judge.get('quality_label') or ''),
@@ -126,6 +132,7 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
             'retrieve_contexts': answer.get('contexts') or [],
             'retrieved_contexts': answer.get('contexts') or [],
             **{key: judge.get(key) or [] for key in EXPLANATIONS},
+            **{key: judge[key] for key in OPTIONAL_EXPLANATIONS if key in judge},
             'metric_layers': judge.get('metric_layers') if isinstance(judge.get('metric_layers'), Mapping) else {},
             'score_breakdown': judge.get('score_breakdown') if isinstance(judge.get('score_breakdown'), Mapping) else {},
             'trace_id': str(judge.get('trace_id') or ''),
@@ -173,6 +180,7 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
                 [row for row in scored if row['retrieval_failure_type'] != 'not_applicable'],
                 'retrieval_ndcg',
             ),
+            **_optional_metric_avgs(scored),
         },
         'by_question_type': _group_metrics(scored, 'question_type'),
         'by_difficulty': _group_metrics(scored, 'difficulty'),
@@ -199,6 +207,14 @@ def _mapping(value: object, name: str) -> Mapping[str, Any]:
 def _avg(rows: list[Mapping[str, Any]], key: str) -> float:
     values = [float(row.get(key) or 0.0) for row in rows]
     return round(sum(values) / len(values), 4) if values else 0.0
+
+
+def _optional_metric_avgs(rows: list[Mapping[str, Any]]) -> dict[str, float]:
+    return {
+        f'{key}_avg': _avg([row for row in rows if key in row], key)
+        for key in OPTIONAL_SCORES
+        if any(key in row for row in rows)
+    }
 
 
 def _group_metrics(rows: list[Mapping[str, Any]], key: str) -> dict[str, Any]:

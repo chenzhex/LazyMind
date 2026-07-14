@@ -28,11 +28,8 @@ DIAGNOSTIC_SCORE_KEYS = (
     'key_point_recall',
     'key_point_precision',
     'semantic_similarity',
-    'numeric_accuracy',
-    'list_set_f1',
     'claim_support_rate',
     'unsupported_claim_rate',
-    'contradiction_rate',
     'retrieval_hit_at_k',
     'retrieval_recall_at_k',
     'retrieval_precision_at_k',
@@ -41,15 +38,22 @@ DIAGNOSTIC_SCORE_KEYS = (
     'context_relevance_avg',
     'context_noise_rate',
 )
+OPTIONAL_DIAGNOSTIC_SCORE_KEYS = (
+    'numeric_accuracy',
+    'list_set_f1',
+    'contradiction_rate',
+)
 EXPLANATION_KEYS = (
     'matched_key_points',
     'missing_points',
     'wrong_points',
     'extra_points',
     'unsupported_claims',
-    'contradicted_claims',
     'evidence_mapping',
     'claims',
+)
+OPTIONAL_EXPLANATION_KEYS = (
+    'contradicted_claims',
 )
 METRIC_LAYERS = {
     'primary_scores': (
@@ -75,13 +79,9 @@ METRIC_LAYERS = {
         'extra_points',
         'claims',
         'unsupported_claims',
-        'contradicted_claims',
         'evidence_mapping',
     ),
     'specialized_metrics': (
-        'numeric_accuracy',
-        'list_set_f1',
-        'contradiction_rate',
         'retrieval_ndcg',
         'retrieval_precision_at_k',
         'context_relevance_avg',
@@ -202,6 +202,8 @@ def judge_answer(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy:
                 'answer_relevance_floor',
                 'key_point_recall_floor',
                 'contradiction_rate_ceiling',
+                'unsupported_claim_rate_ceiling',
+                'claim_support_rate_floor',
                 'retrieval_top_k',
                 'top_k',
                 'judge_schema_version',
@@ -233,7 +235,7 @@ def judge_answer(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy:
         return judge_contract_error(case, rag_answer, policy, str(exc))
 
     diagnostics = _diagnostics(case, rag_answer, scores, policy)
-    score_payload = scores.model_dump()
+    score_payload = _score_payload(scores)
     score_payload.update(diagnostics)
 
     ref_chunks = {_id_tail(item) for item in _ids(case.get('reference_chunk_ids'))}
@@ -293,6 +295,14 @@ def judge_answer(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy:
         policy.get('contradiction_rate_ceiling') or 0.0
     ):
         failure = 'hallucination'
+    unsupported_claim_rate = float(score_payload.get('unsupported_claim_rate') or 0.0)
+    claim_support_rate = float(score_payload.get('claim_support_rate') or 1.0)
+    has_claims = bool(score_payload.get('claims'))
+    if failure == 'none' and has_claims and (
+        unsupported_claim_rate > float(policy.get('unsupported_claim_rate_ceiling') or 0.0)
+        or claim_support_rate < float(policy.get('claim_support_rate_floor') or 0.8)
+    ):
+        failure = 'partial_answer'
     if scores.format_compliance < 1.0:
         failure = 'format_error'
 
@@ -330,8 +340,8 @@ def judge_answer(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy:
         'retrieval_failure_type': retrieval_failure,
         'answer_quality_score': answer_quality,
         'overall_score': overall,
-        'metric_layers': _metric_layers(),
-        'score_breakdown': _score_breakdown(retrieval_failure),
+        'metric_layers': _metric_layers(score_payload),
+        'score_breakdown': _score_breakdown(retrieval_failure, score_payload),
         'quality_label': label,
         'failure_type': failure,
         'is_correct': label == 'good',
@@ -374,8 +384,8 @@ def _failure(base: Mapping[str, Any], failure_type: FailureType, reason: str) ->
         'answer_quality_score': 0.0,
         'retrieval_quality_score': 0.0,
         'overall_score': 0.0,
-        'metric_layers': _metric_layers(),
-        'score_breakdown': _score_breakdown('not_applicable'),
+        'metric_layers': _metric_layers({}),
+        'score_breakdown': _score_breakdown('not_applicable', {}),
         'retrieval_failure_type': 'not_applicable',
         'quality_label': 'infra_failure',
         'failure_type': failure_type,
@@ -390,20 +400,22 @@ def _prompt(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy: Mapp
         'question': case.get('question'),
         'reference_answer': case.get('answer'),
         'key_points': case.get('key_points'),
-        'answer_type': case.get('answer_type'),
-        'numeric_expectations': case.get('numeric_expectations'),
-        'forbidden_claims': case.get('forbidden_claims'),
         'grading_guidance': case.get('grading_guidance'),
         'reference_context': case.get('reference_context'),
         'rag_answer': rag_answer.get('answer'),
         'retrieved_contexts': rag_answer.get('contexts'),
     }
+    if case.get('answer_type'):
+        payload['answer_type'] = case.get('answer_type')
+    if case.get('forbidden_claims'):
+        payload['forbidden_claims'] = case.get('forbidden_claims')
     return (
         'Judge one RAG answer. Return one JSON object only, no markdown. '
         f'Scores must be floats from 0 to 1 with keys: {", ".join(SCORE_KEYS)}. '
         'When possible, also return diagnostic scores: key_point_recall, key_point_precision, '
         'semantic_similarity, numeric_accuracy, list_set_f1, claim_support_rate, '
-        'unsupported_claim_rate, contradiction_rate. '
+        'unsupported_claim_rate. Return contradiction_rate only when forbidden_claims are provided '
+        'or a contradiction is explicitly detected. '
         'Also return arrays for matched_key_points, missing_points, wrong_points, extra_points, '
         'unsupported_claims, contradicted_claims, evidence_mapping, claims. '
         'Return failure_type, reason, defect. failure_type must be one of none, wrong_answer, '
@@ -434,17 +446,36 @@ def _score(value: float) -> float:
     return round(max(0.0, min(1.0, float(value))), 4)
 
 
-def _metric_layers() -> dict[str, list[str]]:
-    return {key: list(values) for key, values in METRIC_LAYERS.items()}
+def _score_payload(scores: JudgeScores) -> dict[str, Any]:
+    payload = {key: float(getattr(scores, key)) for key in SCORE_KEYS}
+    payload.update({
+        'failure_type': scores.failure_type,
+        'reason': scores.reason,
+        'defect': scores.defect,
+    })
+    return payload
 
 
-def _score_breakdown(retrieval_failure_type: str) -> dict[str, Any]:
+def _metric_layers(payload: Mapping[str, Any] | None = None) -> dict[str, list[str]]:
+    layers = {key: list(values) for key, values in METRIC_LAYERS.items()}
+    present = set(payload or {})
+    optional = [key for key in OPTIONAL_DIAGNOSTIC_SCORE_KEYS if key in present]
+    if optional:
+        layers['specialized_metrics'] = [*optional, *layers['specialized_metrics']]
+    optional_explanations = [key for key in OPTIONAL_EXPLANATION_KEYS if key in present]
+    if optional_explanations:
+        layers['diagnostic_evidence'] = [*layers['diagnostic_evidence'], *optional_explanations]
+    return layers
+
+
+def _score_breakdown(retrieval_failure_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     overall = {'answer_quality_score': 1.0} if retrieval_failure_type == 'not_applicable' \
         else dict(OVERALL_SCORE_WEIGHTS)
+    penalties = {'contradiction_rate': 0.20} if 'contradiction_rate' in payload else {}
     return {
         'answer_quality_score': {
             'weights': dict(ANSWER_QUALITY_WEIGHTS),
-            'penalties': {'contradiction_rate': 0.20},
+            'penalties': penalties,
         },
         'retrieval_quality_score': {
             'weights': dict(RETRIEVAL_QUALITY_WEIGHTS),
@@ -467,21 +498,23 @@ def _diagnostics(
     contexts = _contexts(rag_answer.get('contexts'))
     reference_contexts = _contexts(case.get('reference_context'))
     key_point_diag = _key_point_diagnostics(case, answer, scores)
-    claim_diag = _claim_diagnostics(answer, contexts, reference_contexts, scores)
-    numeric_accuracy = _metric(scores, 'numeric_accuracy', _numeric_accuracy(case, answer, reference))
-    list_set_f1 = _metric(scores, 'list_set_f1', _list_set_f1(case, answer, reference))
+    claim_diag = _claim_diagnostics(case, answer, contexts, reference_contexts, scores)
+    numeric_accuracy = _numeric_accuracy(answer, reference)
+    list_set_f1 = _list_set_f1(case, answer, reference)
     retrieval = _ranked_retrieval(case, rag_answer, policy, reference_contexts)
-    return {
+    payload = {
         **key_point_diag,
         **claim_diag,
         **retrieval,
         'semantic_similarity': _metric(scores, 'semantic_similarity', _similarity(answer, reference)),
-        'numeric_accuracy': numeric_accuracy,
-        'list_set_f1': list_set_f1,
         'wrong_points': _list_or_default(scores.wrong_points, []),
         'extra_points': _list_or_default(scores.extra_points, []),
-        'contradicted_claims': _list_or_default(scores.contradicted_claims, []),
     }
+    if numeric_accuracy is not None:
+        payload['numeric_accuracy'] = _metric(scores, 'numeric_accuracy', numeric_accuracy)
+    if list_set_f1 is not None:
+        payload['list_set_f1'] = _metric(scores, 'list_set_f1', list_set_f1)
+    return payload
 
 
 def _metric(scores: JudgeScores, field: str, default: float) -> float:
@@ -501,13 +534,9 @@ def _key_point_diagnostics(case: Mapping[str, Any], answer: str, scores: JudgeSc
         }
     matched, missing = [], []
     for item in key_points:
-        variants = [item['statement'], *item['acceptable_variants']]
-        hit = max((_similarity(answer, variant) for variant in variants if variant), default=0.0) >= 0.55
+        hit = _similarity(answer, item['statement']) >= 0.55
         (matched if hit else missing).append(item)
-    required = [item for item in key_points if item['required']]
-    required_weight = sum(item['weight'] for item in required) or sum(item['weight'] for item in key_points) or 1.0
-    matched_weight = sum(item['weight'] for item in matched if item['required']) or sum(item['weight'] for item in matched)
-    recall = matched_weight / required_weight
+    recall = len(matched) / len(key_points) if key_points else scores.answer_correctness
     precision = len(matched) / len(key_points) if key_points else scores.answer_correctness
     return {
         'key_point_recall': _metric(scores, 'key_point_recall', recall),
@@ -518,11 +547,14 @@ def _key_point_diagnostics(case: Mapping[str, Any], answer: str, scores: JudgeSc
 
 
 def _claim_diagnostics(
+    case: Mapping[str, Any],
     answer: str,
     retrieved_contexts: list[str],
     reference_contexts: list[str],
     scores: JudgeScores,
 ) -> dict[str, Any]:
+    include_contradiction = bool(case.get('forbidden_claims')) or 'contradiction_rate' in scores.model_fields_set \
+        or bool(scores.contradicted_claims)
     if scores.claims:
         claims = scores.claims
         unsupported = _list_or_default(scores.unsupported_claims, [
@@ -530,14 +562,17 @@ def _claim_diagnostics(
             if isinstance(claim, Mapping) and not bool(claim.get('supported_by_retrieved') or claim.get('supported'))
         ])
         support = 1.0 - len(unsupported) / len(claims) if claims else scores.groundedness
-        return {
+        payload = {
             'claims': claims,
             'unsupported_claims': unsupported,
             'evidence_mapping': _list_or_default(scores.evidence_mapping, []),
             'claim_support_rate': _metric(scores, 'claim_support_rate', support),
             'unsupported_claim_rate': _metric(scores, 'unsupported_claim_rate', 1.0 - support),
-            'contradiction_rate': _metric(scores, 'contradiction_rate', 0.0),
         }
+        if include_contradiction:
+            payload['contradiction_rate'] = _metric(scores, 'contradiction_rate', 0.0)
+            payload['contradicted_claims'] = _list_or_default(scores.contradicted_claims, [])
+        return payload
     claims = _sentences(answer)
     evidence_pool = [*retrieved_contexts, *reference_contexts]
     supported, unsupported, mapping = [], [], []
@@ -549,14 +584,17 @@ def _claim_diagnostics(
         else:
             unsupported.append(claim)
     support_rate = len(supported) / len(claims) if claims else scores.groundedness
-    return {
+    payload = {
         'claims': [{'text': claim, 'supported': claim in supported} for claim in claims],
         'unsupported_claims': _list_or_default(scores.unsupported_claims, unsupported),
         'evidence_mapping': _list_or_default(scores.evidence_mapping, mapping),
         'claim_support_rate': _metric(scores, 'claim_support_rate', support_rate),
         'unsupported_claim_rate': _metric(scores, 'unsupported_claim_rate', 1.0 - support_rate),
-        'contradiction_rate': _metric(scores, 'contradiction_rate', 0.0),
     }
+    if include_contradiction:
+        payload['contradiction_rate'] = _metric(scores, 'contradiction_rate', 0.0)
+        payload['contradicted_claims'] = _list_or_default(scores.contradicted_claims, [])
+    return payload
 
 
 def _ranked_retrieval(
@@ -616,20 +654,20 @@ def _key_points(value: Any) -> list[dict[str, Any]]:
     for index, item in enumerate(values, 1):
         if isinstance(item, Mapping):
             statement = str(item.get('statement') or item.get('text') or item.get('point') or '').strip()
-            variants = item.get('acceptable_variants') if isinstance(item.get('acceptable_variants'), list) else []
-            weight = _float(item.get('weight'), 1.0) or 1.0
-            required = bool(item.get('required', True))
             key = str(item.get('id') or f'kp_{index}')
+            evidence_chunk_ids = [
+                str(chunk_id).strip()
+                for chunk_id in item.get('evidence_chunk_ids', [])
+                if str(chunk_id or '').strip()
+            ] if isinstance(item.get('evidence_chunk_ids'), list) else []
         else:
             statement = str(item or '').strip()
-            variants, weight, required, key = [], 1.0, True, f'kp_{index}'
+            key, evidence_chunk_ids = f'kp_{index}', []
         if statement:
             result.append({
                 'id': key,
                 'statement': statement,
-                'weight': weight if math.isfinite(weight) and weight > 0 else 1.0,
-                'required': required,
-                'acceptable_variants': [str(variant) for variant in variants if str(variant or '').strip()],
+                'evidence_chunk_ids': evidence_chunk_ids,
             })
     return result
 
@@ -686,26 +724,11 @@ def _sentences(text: str) -> list[str]:
     return [chunk.strip() for chunk in chunks if len(chunk.strip()) >= 8]
 
 
-def _numeric_accuracy(case: Mapping[str, Any], answer: str, reference: str) -> float:
-    expected = case.get('numeric_expectations')
+def _numeric_accuracy(answer: str, reference: str) -> float | None:
     answer_numbers = _numbers(answer)
-    if isinstance(expected, list) and expected:
-        hits = 0
-        for item in expected:
-            if not isinstance(item, Mapping):
-                continue
-            target = _float(item.get('value'), None)
-            if target is None:
-                continue
-            absolute = _float(item.get('absolute_tolerance'), 0.0) or 0.0
-            relative = _float(item.get('relative_tolerance'), 0.0) or 0.0
-            tolerance = max(absolute, abs(target) * relative)
-            if any(abs(candidate - target) <= tolerance for candidate in answer_numbers):
-                hits += 1
-        return hits / len(expected)
     reference_numbers = _numbers(reference)
     if not reference_numbers:
-        return 1.0
+        return None
     hits = sum(1 for number in reference_numbers if any(abs(candidate - number) <= 1e-9 for candidate in answer_numbers))
     return hits / len(reference_numbers)
 
@@ -714,9 +737,9 @@ def _numbers(text: str) -> list[float]:
     return [float(match.group(0)) for match in NUMBER.finditer(text)]
 
 
-def _list_set_f1(case: Mapping[str, Any], answer: str, reference: str) -> float:
+def _list_set_f1(case: Mapping[str, Any], answer: str, reference: str) -> float | None:
     if str(case.get('answer_type') or '').strip().lower() not in {'list', 'table'}:
-        return 1.0
+        return None
     ref_items = _split_items(reference)
     answer_items = _split_items(answer)
     if not ref_items:

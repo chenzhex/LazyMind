@@ -41,14 +41,13 @@ def answer_case(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> di
 def case_kb_id(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> str:
     case_id = str(case.get('id') or '')
     by_case = target_config.get('case_metadata_by_id')
-    metadata = case.get('case_metadata') if isinstance(case.get('case_metadata'), Mapping) else {}
     preparation = case.get('source_preparation') if isinstance(case.get('source_preparation'), Mapping) else {}
     case_source = preparation.get('case_source') if isinstance(preparation.get('case_source'), Mapping) else {}
     if isinstance(by_case, Mapping) and isinstance(by_case.get(case_id), Mapping):
         text = str(by_case[case_id].get('kb_id') or '').strip()
         if text:
             return text
-    return str(metadata.get('kb_id') or case_source.get('kb_id') or target_config.get('kb_id') or '').strip()
+    return str(case_source.get('kb_id') or target_config.get('kb_id') or '').strip()
 
 
 def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str) -> dict[str, Any]:
@@ -109,8 +108,6 @@ def _with_case(case: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, 
     answer = _answer_base(case, stream, result.get('target') if isinstance(result.get('target'), Mapping) else {})
     answer.update(dict(result))
     answer['case_id'] = str(case.get('id') or answer.get('case_id') or '')
-    answer['case'] = dict(case)
-    answer['case_metadata'] = {'kb_id': answer.get('target', {}).get('kb_id', '')}
     answer['question'] = str(case.get('question') or '')
     answer['evidence_status'] = _evidence_status(answer)
     return answer
@@ -150,8 +147,6 @@ def _raw_target(target_config: Mapping[str, Any], kb_id: str) -> dict[str, str]:
 def _answer_base(case: Mapping[str, Any], stream: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, Any]:
     return {
         'case_id': str(case.get('id') or ''),
-        'case': dict(case),
-        'case_metadata': {'kb_id': target.get('kb_id', '')},
         'question': str(case.get('question') or ''),
         'answer': str(stream.get('answer') or ''),
         'tool_errors': [],
