@@ -401,7 +401,7 @@ def _prompt(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy: Mapp
         'reference_answer': case.get('answer'),
         'key_points': case.get('key_points'),
         'grading_guidance': case.get('grading_guidance'),
-        'reference_context': case.get('reference_context'),
+        'reference_context': _contexts(case.get('reference_context')),
         'rag_answer': rag_answer.get('answer'),
         'retrieved_contexts': rag_answer.get('contexts'),
     }
@@ -707,11 +707,18 @@ def _ordered_values(value: Any) -> Iterable[str]:
 
 
 def _contexts(value: Any) -> list[str]:
+    if isinstance(value, Mapping):
+        direct = str(value.get('content') or value.get('text') or value.get('context') or '').strip()
+        if direct:
+            return [direct]
+        joined = '\n'.join(str(item).strip() for item in value.values() if str(item or '').strip())
+        return [joined] if joined else []
     values = value if isinstance(value, list | tuple) else [value] if value else []
     result = []
     for item in values:
         if isinstance(item, Mapping):
-            text = str(item.get('content') or item.get('text') or item.get('context') or '').strip()
+            direct = str(item.get('content') or item.get('text') or item.get('context') or '').strip()
+            text = direct or '\n'.join(str(value).strip() for value in item.values() if str(value or '').strip())
         else:
             text = str(item or '').strip()
         if text:

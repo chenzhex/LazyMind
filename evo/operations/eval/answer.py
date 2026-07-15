@@ -47,7 +47,7 @@ def case_kb_id(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> str
         text = str(by_case[case_id].get('kb_id') or '').strip()
         if text:
             return text
-    return str(case_source.get('kb_id') or target_config.get('kb_id') or '').strip()
+    return str(preparation.get('kb_id') or case_source.get('kb_id') or target_config.get('kb_id') or '').strip()
 
 
 def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str) -> dict[str, Any]:
