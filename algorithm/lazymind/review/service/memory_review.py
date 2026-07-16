@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
-from uuid import uuid4
 
 import lazyllm
 from lazyllm import AutoModel, LOG
@@ -32,11 +31,11 @@ def _truncate_log_text(value: Any, limit: int = 4000) -> str:
 
 
 def review_memory(
+    task_id: str,
     user_id: str,
     history: List[Dict[str, Any]],
     llm_config: Optional[Dict[str, Any]] = None,
 ) -> MemoryReviewResult:
-    task_id = f'memory_review_{uuid4()}'
     lazyllm.globals._init_sid(sid=task_id)
     lazyllm.locals._init_sid(sid=task_id)
     inject_model_config(llm_config)
