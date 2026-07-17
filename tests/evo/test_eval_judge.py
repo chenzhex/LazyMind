@@ -70,6 +70,97 @@ class FakeBadLLM(FakeLLM):
         })
 
 
+class FakeCapturePromptLLM(FakeLLM):
+    prompt = ''
+
+    def __call__(self, prompt, **kwargs):
+        type(self).prompt = prompt
+        return super().__call__(prompt, **kwargs)
+
+
+class FakeClaimsWithoutMappingLLM(FakeLLM):
+    def __call__(self, prompt, **kwargs):
+        return json.dumps({
+            'answer_correctness': 0.9,
+            'answer_relevance': 1.0,
+            'completeness': 0.9,
+            'groundedness': 0.9,
+            'format_compliance': 1.0,
+            'failure_type': 'none',
+            'reason': 'claims returned without usable mapping',
+            'defect': '',
+            'claims': [{'text': 'The supported fact is alpha.', 'supported': True}],
+            'evidence_mapping': [],
+        })
+
+
+def test_judge_prompt_passes_contexts_with_chunk_ids(monkeypatch):
+    import evo.llm
+
+    monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeCapturePromptLLM)
+    case = {
+        'id': 'case_prompt',
+        'question': 'What fact is supported?',
+        'answer': 'The supported fact is alpha.',
+        'reference_chunk_ids': ['chunk-ref'],
+        'reference_context': {'chunk-ref': 'The supported fact is alpha.'},
+    }
+    answer = {
+        'status': 'ok',
+        'case_id': 'case_prompt',
+        'answer': 'The supported fact is alpha.',
+        'contexts': [{'chunk_id': 'chunk-ret', 'content': 'The supported fact is alpha.', 'rank': 1}],
+        'chunk_ids': ['chunk-ret'],
+        'doc_ids': [],
+        'trace_id': 'trace-prompt',
+        'target': {'algorithm_id': 'algo-a', 'kb_id': 'kb-a'},
+    }
+
+    judge_case(case, answer, {'judge_llm_config': {'evo_llm': {'model': 'fake'}}})
+    payload = json.loads(FakeCapturePromptLLM.prompt.split('case_json: ', 1)[1])
+
+    assert payload['reference_context'] == [{'chunk_id': 'chunk-ref', 'content': 'The supported fact is alpha.'}]
+    assert payload['retrieved_contexts'] == [{'chunk_id': 'chunk-ret', 'content': 'The supported fact is alpha.'}]
+
+
+def test_evidence_mapping_falls_back_and_separates_reference_and_retrieved_support(monkeypatch):
+    import evo.llm
+
+    monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeClaimsWithoutMappingLLM)
+    case = {
+        'id': 'case_mapping',
+        'question': 'What fact is supported?',
+        'answer': 'The supported fact is alpha.',
+        'question_type': 'single_hop',
+        'difficulty': 'medium',
+        'key_points': [
+            {'id': 'alpha', 'statement': 'The supported fact is alpha.', 'evidence_chunk_ids': ['chunk-ref']},
+        ],
+        'reference_chunk_ids': ['chunk-ref'],
+        'reference_context': {'chunk-ref': 'The supported fact is alpha.'},
+    }
+    answer = {
+        'status': 'ok',
+        'case_id': 'case_mapping',
+        'answer': 'The supported fact is alpha.',
+        'contexts': [{'chunk_id': 'chunk-ret', 'content': 'The supported fact is alpha.', 'rank': 1}],
+        'chunk_ids': ['chunk-ret'],
+        'doc_ids': [],
+        'trace_id': 'trace-mapping',
+        'target': {'algorithm_id': 'algo-a', 'kb_id': 'kb-a'},
+    }
+
+    result = judge_case(case, answer, {'judge_llm_config': {'evo_llm': {'model': 'fake'}}})
+
+    assert result['evidence_mapping'] == [{
+        'claim': 'The supported fact is alpha.',
+        'reference_support': {'evidence_chunk_id': 'chunk-ref', 'score': 1.0},
+        'retrieved_support': {'evidence_chunk_id': 'chunk-ret', 'score': 1.0},
+        'derivation': 'fallback',
+    }]
+    assert 'evidence' not in result['evidence_mapping'][0]
+
+
 def test_judge_adds_key_point_and_rank_diagnostics(monkeypatch):
     import evo.llm
 

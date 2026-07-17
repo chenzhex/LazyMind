@@ -396,14 +396,24 @@ def _failure(base: Mapping[str, Any], failure_type: FailureType, reason: str) ->
 
 
 def _prompt(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy: Mapping[str, Any]) -> str:
+    reference_contexts = _evidence_contexts(
+        case.get('reference_context'),
+        'reference_context',
+        case.get('reference_chunk_ids'),
+    )
+    retrieved_contexts = _evidence_contexts(
+        rag_answer.get('contexts'),
+        'retrieved_context',
+        rag_answer.get('chunk_ids'),
+    )
     payload = {
         'question': case.get('question'),
         'reference_answer': case.get('answer'),
         'key_points': case.get('key_points'),
         'grading_guidance': case.get('grading_guidance'),
-        'reference_context': _contexts(case.get('reference_context')),
+        'reference_context': _prompt_contexts(reference_contexts),
         'rag_answer': rag_answer.get('answer'),
-        'retrieved_contexts': rag_answer.get('contexts'),
+        'retrieved_contexts': _prompt_contexts(retrieved_contexts),
     }
     if case.get('answer_type'):
         payload['answer_type'] = case.get('answer_type')
@@ -418,8 +428,9 @@ def _prompt(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy: Mapp
         'or a contradiction is explicitly detected. '
         'Also return arrays for matched_key_points, missing_points, wrong_points, extra_points, '
         'unsupported_claims, contradicted_claims, evidence_mapping, claims. '
-        'Each evidence_mapping item should use claim, evidence_source, evidence_chunk_id, score; '
-        'evidence_source must be reference_context or retrieved_context. Do not include full evidence text. '
+        'Each evidence_mapping item should use claim, reference_support, retrieved_support, derivation. '
+        'reference_support and retrieved_support are objects with evidence_chunk_id and score, or null. '
+        'derivation must be llm. Do not include full evidence text. '
         'Return failure_type, reason, defect. failure_type must be one of none, wrong_answer, '
         'partial_answer, question_not_answered, format_error, hallucination. '
         'First compare rag_answer with key_points and reference_answer. Then check every factual claim '
@@ -499,8 +510,16 @@ def _diagnostics(
     reference = str(case.get('answer') or '')
     contexts = _contexts(rag_answer.get('contexts'))
     reference_contexts = _contexts(case.get('reference_context'))
-    retrieved_evidence = _evidence_contexts(rag_answer.get('contexts'), 'retrieved_context')
-    reference_evidence = _evidence_contexts(case.get('reference_context'), 'reference_context')
+    retrieved_evidence = _evidence_contexts(
+        rag_answer.get('contexts'),
+        'retrieved_context',
+        rag_answer.get('chunk_ids'),
+    )
+    reference_evidence = _evidence_contexts(
+        case.get('reference_context'),
+        'reference_context',
+        case.get('reference_chunk_ids'),
+    )
     key_point_diag = _key_point_diagnostics(case, answer, scores)
     claim_diag = _claim_diagnostics(case, answer, retrieved_evidence, reference_evidence, scores)
     numeric_accuracy = _numeric_accuracy(answer, reference)
@@ -561,15 +580,28 @@ def _claim_diagnostics(
         or bool(scores.contradicted_claims)
     if scores.claims:
         claims = scores.claims
+        claim_texts = [_claim_text(claim) for claim in claims]
+        claim_texts = [claim for claim in claim_texts if claim]
+        llm_mapping = _normal_evidence_mapping(scores.evidence_mapping, derivation='llm')
+        fallback_mapping = _fallback_evidence_mapping(claim_texts, retrieved_contexts, reference_contexts)
+        if _evidence_mapping_complete(llm_mapping, claim_texts):
+            evidence_mapping = llm_mapping
+        else:
+            evidence_mapping = fallback_mapping
+        supported_claims = {
+            str(item.get('claim') or '')
+            for item in evidence_mapping
+            if _has_support(item)
+        }
         unsupported = _list_or_default(scores.unsupported_claims, [
-            claim for claim in claims
-            if isinstance(claim, Mapping) and not bool(claim.get('supported_by_retrieved') or claim.get('supported'))
+            claim for claim in claim_texts
+            if claim not in supported_claims
         ])
-        support = 1.0 - len(unsupported) / len(claims) if claims else scores.groundedness
+        support = len(supported_claims) / len(claim_texts) if claim_texts else scores.groundedness
         payload = {
             'claims': claims,
             'unsupported_claims': unsupported,
-            'evidence_mapping': _normal_evidence_mapping(scores.evidence_mapping),
+            'evidence_mapping': evidence_mapping,
             'claim_support_rate': _metric(scores, 'claim_support_rate', support),
             'unsupported_claim_rate': _metric(scores, 'unsupported_claim_rate', 1.0 - support),
         }
@@ -578,33 +610,23 @@ def _claim_diagnostics(
             payload['contradicted_claims'] = _list_or_default(scores.contradicted_claims, [])
         return payload
     claims = _sentences(answer)
-    evidence_pool = [*retrieved_contexts, *reference_contexts]
-    supported, unsupported, mapping = [], [], []
+    supported, unsupported = [], []
+    mapping = _fallback_evidence_mapping(claims, retrieved_contexts, reference_contexts)
+    supported_claims = {
+        str(item.get('claim') or '')
+        for item in mapping
+        if _has_support(item)
+    }
     for claim in claims:
-        best = max(
-            (
-                (_similarity(claim, item['content']), item)
-                for item in evidence_pool
-                if item.get('content')
-            ),
-            key=lambda pair: pair[0],
-            default=(0.0, {}),
-        )
-        if best[0] >= 0.45:
+        if claim in supported_claims:
             supported.append(claim)
-            mapping.append({
-                'claim': claim,
-                'evidence_source': str(best[1].get('source') or ''),
-                'evidence_chunk_id': str(best[1].get('chunk_id') or ''),
-                'score': _score(best[0]),
-            })
         else:
             unsupported.append(claim)
     support_rate = len(supported) / len(claims) if claims else scores.groundedness
     payload = {
         'claims': [{'text': claim, 'supported': claim in supported} for claim in claims],
         'unsupported_claims': _list_or_default(scores.unsupported_claims, unsupported),
-        'evidence_mapping': _list_or_default(scores.evidence_mapping, mapping),
+        'evidence_mapping': _normal_evidence_mapping(scores.evidence_mapping, derivation='llm') or mapping,
         'claim_support_rate': _metric(scores, 'claim_support_rate', support_rate),
         'unsupported_claim_rate': _metric(scores, 'unsupported_claim_rate', 1.0 - support_rate),
     }
@@ -743,7 +765,18 @@ def _contexts(value: Any) -> list[str]:
     return result
 
 
-def _evidence_contexts(value: Any, source: str) -> list[dict[str, str]]:
+def _prompt_contexts(values: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            'chunk_id': str(item.get('chunk_id') or ''),
+            'content': str(item.get('content') or ''),
+        }
+        for item in values
+        if str(item.get('content') or '').strip()
+    ]
+
+
+def _evidence_contexts(value: Any, source: str, fallback_chunk_ids: Any = None) -> list[dict[str, str]]:
     result = []
     if isinstance(value, Mapping):
         direct = str(value.get('content') or value.get('text') or value.get('context') or '').strip()
@@ -759,11 +792,15 @@ def _evidence_contexts(value: Any, source: str) -> list[dict[str, str]]:
                 result.append({'source': source, 'chunk_id': str(key).strip(), 'content': text})
         return result
     values = value if isinstance(value, list | tuple) else [value] if value else []
-    chunk_ids = list(_ordered_values(value.get('chunk_ids'))) if isinstance(value, Mapping) else []
+    chunk_ids = list(_ordered_values(fallback_chunk_ids))
     for index, item in enumerate(values):
         if isinstance(item, Mapping):
             text = str(item.get('content') or item.get('text') or item.get('context') or '').strip()
-            chunk_id = str(item.get('chunk_id') or item.get('id') or '').strip()
+            chunk_id = str(
+                item.get('chunk_id')
+                or item.get('id')
+                or (chunk_ids[index] if index < len(chunk_ids) else '')
+            ).strip()
         else:
             text = str(item or '').strip()
             chunk_id = chunk_ids[index] if index < len(chunk_ids) else ''
@@ -772,26 +809,97 @@ def _evidence_contexts(value: Any, source: str) -> list[dict[str, str]]:
     return result
 
 
-def _normal_evidence_mapping(value: Any) -> list[dict[str, Any]]:
+def _normal_evidence_mapping(value: Any, derivation: str) -> list[dict[str, Any]]:
     values = value if isinstance(value, list | tuple) else []
     result = []
     for item in values:
         if not isinstance(item, Mapping):
             continue
         claim = str(item.get('claim') or item.get('text') or '').strip()
-        source = str(item.get('evidence_source') or item.get('source') or '').strip()
-        chunk_id = str(item.get('evidence_chunk_id') or item.get('chunk_id') or item.get('id') or '').strip()
         if not claim:
             continue
-        entry: dict[str, Any] = {'claim': claim}
-        if source:
-            entry['evidence_source'] = source
-        if chunk_id:
-            entry['evidence_chunk_id'] = chunk_id
-        if item.get('score') is not None:
-            entry['score'] = _score(float(item.get('score') or 0.0))
+        reference_support = _normal_support(item.get('reference_support'))
+        retrieved_support = _normal_support(item.get('retrieved_support'))
+        if not reference_support and not retrieved_support:
+            source = str(item.get('evidence_source') or item.get('source') or '').strip()
+            support = _normal_support(item)
+            if source == 'reference_context':
+                reference_support = support
+            elif source == 'retrieved_context':
+                retrieved_support = support
+        if reference_support or retrieved_support:
+            result.append({
+                'claim': claim,
+                'reference_support': reference_support,
+                'retrieved_support': retrieved_support,
+                'derivation': derivation,
+            })
+    return result
+
+
+def _normal_support(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    chunk_id = str(value.get('evidence_chunk_id') or value.get('chunk_id') or value.get('id') or '').strip()
+    if not chunk_id or value.get('score') is None:
+        return None
+    try:
+        score = _score(float(value.get('score')))
+    except (TypeError, ValueError):
+        return None
+    return {'evidence_chunk_id': chunk_id, 'score': score}
+
+
+def _fallback_evidence_mapping(
+    claims: list[str],
+    retrieved_contexts: list[dict[str, str]],
+    reference_contexts: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    result = []
+    for claim in claims:
+        entry = {
+            'claim': claim,
+            'reference_support': _best_support(claim, reference_contexts),
+            'retrieved_support': _best_support(claim, retrieved_contexts),
+            'derivation': 'fallback',
+        }
         result.append(entry)
     return result
+
+
+def _best_support(claim: str, contexts: list[dict[str, str]]) -> dict[str, Any] | None:
+    best = max(
+        (
+            (_similarity(claim, item.get('content', '')), item)
+            for item in contexts
+            if item.get('content') and item.get('chunk_id')
+        ),
+        key=lambda pair: pair[0],
+        default=(0.0, {}),
+    )
+    if best[0] < 0.45 or not best[1]:
+        return None
+    return {
+        'evidence_chunk_id': str(best[1].get('chunk_id') or ''),
+        'score': _score(best[0]),
+    }
+
+
+def _claim_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return str(value.get('text') or value.get('claim') or value.get('statement') or '').strip()
+    return str(value or '').strip()
+
+
+def _has_support(value: Mapping[str, Any]) -> bool:
+    return isinstance(value.get('reference_support'), Mapping) or isinstance(value.get('retrieved_support'), Mapping)
+
+
+def _evidence_mapping_complete(mapping: list[dict[str, Any]], claims: list[str]) -> bool:
+    if not claims:
+        return True
+    mapped = {str(item.get('claim') or '') for item in mapping if _has_support(item)}
+    return all(claim in mapped for claim in claims)
 
 
 def _sentences(text: str) -> list[str]:
