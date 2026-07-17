@@ -273,6 +273,14 @@ func GetThreadTraceDetail(w http.ResponseWriter, r *http.Request) {
 	proxyEvoResponse(w, r, http.MethodGet, path, cloneURLValues(r.URL.Query()), nil, "application/json")
 }
 
+func CompareThreadTraces(w http.ResponseWriter, r *http.Request) {
+	threadID, ok := ownerCheckedThreadID(w, r)
+	if !ok {
+		return
+	}
+	proxyEvoResponse(w, r, http.MethodGet, threadProxyPath(threadID, "/results/traces:compare"), cloneURLValues(r.URL.Query()), nil, "application/json")
+}
+
 func StreamThreadEvents(w http.ResponseWriter, r *http.Request) {
 	streamThreadEvents(w, r, "")
 }
@@ -377,17 +385,22 @@ func ListRouterAlgorithms(w http.ResponseWriter, r *http.Request) {
 	proxyEvoResponse(w, r, http.MethodGet, "/router/algorithms", cloneURLValues(r.URL.Query()), nil, "application/json")
 }
 
-func RegisterRouterAlgorithm(w http.ResponseWriter, r *http.Request) {
-	proxyEvoResponse(w, r, http.MethodPost, "/router/algorithms", cloneURLValues(r.URL.Query()), r.Body, "application/json")
-}
-
 func PostRouterAlgorithmAction(w http.ResponseWriter, r *http.Request) {
 	algorithmID := strings.TrimSpace(mux.Vars(r)["algorithm_id"])
 	if algorithmID == "" {
 		common.ReplyErr(w, "algorithm_id required", http.StatusBadRequest)
 		return
 	}
-	proxyEvoResponse(w, r, http.MethodPost, "/router/algorithms/"+url.PathEscape(algorithmID)+":action", cloneURLValues(r.URL.Query()), r.Body, "application/json")
+	proxyEvoResponse(w, r, http.MethodPost, "/router/algorithms/"+url.PathEscape(algorithmID)+"/action", cloneURLValues(r.URL.Query()), r.Body, "application/json")
+}
+
+func DeleteRouterAlgorithm(w http.ResponseWriter, r *http.Request) {
+	algorithmID := strings.TrimSpace(mux.Vars(r)["algorithm_id"])
+	if algorithmID == "" {
+		common.ReplyErr(w, "algorithm_id required", http.StatusBadRequest)
+		return
+	}
+	proxyEvoResponse(w, r, http.MethodDelete, "/router/algorithms/"+url.PathEscape(algorithmID), cloneURLValues(r.URL.Query()), nil, "application/json")
 }
 
 func GetRouterABStrategy(w http.ResponseWriter, r *http.Request) {

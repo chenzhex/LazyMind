@@ -5,6 +5,8 @@ from fastapi import FastAPI
 from lazymind.config import config
 from lazymind.chat.api import (
     chat_routes,
+    generate_plugin_routes,
+    generate_plugin_staged_routes,
     health_routes,
     model_check_routes,
     model_features_routes,
@@ -13,7 +15,7 @@ from lazymind.chat.api import (
 )
 from lazymind.chat.service.utils.trace_archive import start_local_trace_maintenance
 from lazymind.rewrite.api import rewrite_routes
-from lazymind.review.api import memory_review_routes, skill_review_routes
+from lazymind.review.api import memory_review_routes, skill_organize_routes, skill_review_routes
 
 
 def register_chat_routers(app: FastAPI) -> FastAPI:
@@ -29,7 +31,10 @@ def register_chat_routers(app: FastAPI) -> FastAPI:
 
     if not config['router_child_proxied_only']:
         app.include_router(rewrite_routes.router)
+        app.include_router(generate_plugin_routes.router)
+        app.include_router(generate_plugin_staged_routes.router)
         app.include_router(memory_review_routes.router)
+        app.include_router(skill_organize_routes.router)
         app.include_router(skill_review_routes.router)
         app.include_router(model_features_routes.router)
         app.include_router(model_check_routes.router)
@@ -46,7 +51,8 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-start_local_trace_maintenance()
+if config['background_jobs_enabled']:
+    start_local_trace_maintenance()
 
 if __name__ == '__main__':
     import argparse

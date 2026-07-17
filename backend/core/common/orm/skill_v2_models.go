@@ -84,7 +84,7 @@ type SkillV2Draft struct {
 	DraftStatus    string     `gorm:"column:draft_status;type:varchar(32);not null;default:''"`
 	DraftUpdatedAt *time.Time `gorm:"column:draft_updated_at"`
 	TaskID         string     `gorm:"column:task_id;type:varchar(128);not null;default:''"`
-	ConversationID *string    `gorm:"column:conversation_id;type:varchar(36)"`
+	ConversationID *string    `gorm:"column:conversation_id;type:varchar(128)"`
 	UpdatedBy      *string    `gorm:"column:updated_by;type:varchar(255)"`
 	Version        int64      `gorm:"column:version;not null;default:1"`
 	CreatedAt      time.Time  `gorm:"column:created_at;not null"`
@@ -124,6 +124,16 @@ type SkillMarketItem struct {
 }
 
 func (SkillMarketItem) TableName() string { return "skill_market_items" }
+
+type SkillMarketInstall struct {
+	MarketItemID string    `gorm:"column:market_item_id;type:varchar(36);primaryKey"`
+	UserID       string    `gorm:"column:user_id;type:varchar(255);primaryKey"`
+	SkillID      string    `gorm:"column:skill_id;type:varchar(36);not null"`
+	CreatedAt    time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt    time.Time `gorm:"column:updated_at;not null"`
+}
+
+func (SkillMarketInstall) TableName() string { return "skill_market_installs" }
 
 type SkillSearchIndex struct {
 	SkillID        string    `gorm:"column:skill_id;type:varchar(36);primaryKey"`

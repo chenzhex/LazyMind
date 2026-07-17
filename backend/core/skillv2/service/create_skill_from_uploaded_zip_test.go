@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -211,6 +211,12 @@ func assertSkillMetadata(t *testing.T, db *gorm.DB, skillID, headRevisionID stri
 	}
 	if row.Category != "research" {
 		t.Fatalf("category = %q, want research", row.Category)
+	}
+	if row.RelativeRoot != "research/论文精读" {
+		t.Fatalf("relative_root = %q, want research/论文精读", row.RelativeRoot)
+	}
+	if row.SkillMDPath != "SKILL.md" {
+		t.Fatalf("skill_md_path = %q, want SKILL.md", row.SkillMDPath)
 	}
 	if row.Description != "用于阅读和总结论文的技能" {
 		t.Fatalf("description = %q, want 用于阅读和总结论文的技能", row.Description)

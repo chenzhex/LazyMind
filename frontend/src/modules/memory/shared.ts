@@ -1,7 +1,7 @@
 import dayjs from "dayjs";
 import { diffLines, diffChars } from "diff";
 import type { EvolutionSuggestionRecord } from "./preferenceApi";
-import type { SkillShareStatus } from "./skillApi";
+import type { SkillDraftSummary, SkillShareStatus } from "./skillApi";
 
 export type MemoryTab = "skills" | "experience" | "glossary";
 export type ModalMode = "add" | "edit" | "view";
@@ -30,36 +30,28 @@ export interface StructuredAsset extends BaseAsset {
   description: string;
   category: string;
   tags: string[];
-  parentId?: string;
-  parentSkillName?: string;
-  fileExt?: string;
+  headRevisionId?: string;
+  draft?: SkillDraftSummary;
   isEnabled?: boolean;
-  builtinSkillUid?: string;
-  originBuiltinSkillUid?: string;
-  isBuiltinTemplate?: boolean;
-  activationStatus?: string;
   readonly?: boolean;
+  protect?: boolean;
   hasPendingReviewSuggestions?: boolean;
   hasPendingReviewResult?: boolean;
   hasPendingRemoveSuggestion?: boolean;
   reviewStatus?: string;
   suggestionStatus?: string;
   updateStatus?: string;
-  nodeType?: string;
+  deletedAt?: string;
+  deletedBy?: string;
 }
 
-export type SkillViewMode = "installed" | "market" | "upload";
+export type SkillViewMode = "installed" | "market" | "trash";
 export type SkillSourceFilter = "all" | "builtin" | "admin" | "personal";
 export type SkillMarketSourceFilter = "all" | "builtin" | "admin";
 
 export const resolveSkillSourceType = (
-  item: StructuredAsset,
-): "builtin" | "admin" | "personal" => {
-  if (item.originBuiltinSkillUid) {
-    return "builtin";
-  }
-  return "personal";
-};
+  _item: StructuredAsset,
+): "builtin" | "admin" | "personal" => "personal";
 
 export const isSkillUpdatePendingForRecord = (record: StructuredAsset) =>
   Boolean(record.hasPendingReviewResult) ||
@@ -317,7 +309,7 @@ export const createStructuredDraft = (
     description: item.description,
     category: item.category,
     tags: item.tags,
-    parentId: item.parentId || "",
+    parentId: "",
     childSkills: [],
     term: "",
     group: "",
@@ -364,15 +356,27 @@ export const isMarkdownSkillFile = (filename: string) => {
   return lowerName.endsWith(".md") || lowerName.endsWith(".markdown");
 };
 
-export const parseMarkdownFrontMatter = (content: string) => {
+export const splitMarkdownFrontMatter = (content: string) => {
   const matched = content.match(markdownFrontMatterPattern);
   if (!matched) {
     return null;
   }
 
-  const rawFields = matched[1] || "";
+  return {
+    frontMatter: matched[0],
+    fields: matched[1] || "",
+    content: content.slice(matched[0].length),
+  };
+};
+
+export const parseMarkdownFrontMatter = (content: string) => {
+  const split = splitMarkdownFrontMatter(content);
+  if (!split) {
+    return null;
+  }
+
   const metadata: Record<string, string> = {};
-  rawFields.split(/\r?\n/).forEach((line) => {
+  split.fields.split(/\r?\n/).forEach((line) => {
     const trimmed = line.trim();
     if (!trimmed) {
       return;
@@ -392,7 +396,8 @@ export const parseMarkdownFrontMatter = (content: string) => {
   return {
     name: metadata.name || "",
     description: metadata.description || "",
-    content: content.slice(matched[0].length),
+    category: metadata.category || "",
+    content: split.content,
   };
 };
 

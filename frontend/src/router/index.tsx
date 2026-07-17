@@ -1,5 +1,6 @@
+import { lazy, Suspense } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
-import { ConfigProvider } from "antd";
+import { ConfigProvider, Spin } from "antd";
 import { useTranslation } from "react-i18next";
 import MainLayout from "@/layouts/MainLayout";
 import SigninLogin from "@/modules/signin/pages/login";
@@ -35,32 +36,51 @@ import MemoryReviewPage from "@/modules/memory/pages/review";
 import MemoryGlossaryDetailPage from "@/modules/memory/pages/glossaryDetail";
 import MemorySkillDetailPage from "@/modules/memory/pages/skillDetail";
 import MemoryExperienceDetailPage from "@/modules/memory/pages/experienceDetail";
-import PluginDetailPage from "@/modules/plugin/pages/detail";
 import ModelProviderPage from "@/modules/modelProvider";
+import CloudDocumentsLayout from "@/modules/modelProvider/CloudDocumentsLayout";
 import ModelProvidersPage from "@/modules/modelProvider/pages/ModelProvidersPage";
 import ExternalServicesPage from "@/modules/modelProvider/pages/ExternalServicesPage";
 import DefaultServicesPage from "@/modules/modelProvider/pages/DefaultServicesPage";
 import {
+  SelfEvolutionAlgorithmManagementPage,
+  SelfEvolutionRoutingStrategyPage,
   SelfEvolutionHomePage,
   SelfEvolutionDetailPage,
   SelfEvolutionObservationPage,
 } from "@/modules/selfEvolution";
 import { getAntdLocale } from "@/i18n/antdLocale";
 import { runtimeFeatures } from "@/runtime/features";
+import { isLocalSessionEnabled } from "@/runtime/localSession";
+
+const PluginDetailPage = lazy(() => import("@/modules/plugin/pages/detail"));
+const BuiltinPluginDetailPage = lazy(() => import("@/modules/plugin/pages/builtin-detail"));
 
 export default function AppRouter() {
   const { i18n } = useTranslation();
+  const localSessionEnabled = isLocalSessionEnabled();
 
   return (
     <ConfigProvider
       locale={getAntdLocale(i18n.resolvedLanguage || i18n.language)}
     >
       <Routes>
-        <Route path="/login" element={<SigninDashboard />}>
-          <Route index element={<SigninLogin />} />
-        </Route>
+        {localSessionEnabled ? (
+          <Route path="/login" element={<Navigate to="/agent/chat" replace />} />
+        ) : (
+          <Route path="/login" element={<SigninDashboard />}>
+            <Route index element={<SigninLogin />} />
+          </Route>
+        )}
         {runtimeFeatures.hideRegister ? (
-          <Route path="/register" element={<Navigate to="/login" replace />} />
+          <Route
+            path="/register"
+            element={
+              <Navigate
+                to={localSessionEnabled ? "/agent/chat" : "/login"}
+                replace
+              />
+            }
+          />
         ) : (
           <Route path="/register" element={<SigninDashboard />}>
             <Route index element={<SigninRegister />} />
@@ -78,7 +98,16 @@ export default function AppRouter() {
           path="/oauth/notion/callback"
           element={<DataSourceFeishuCallback provider="notion" />}
         />
-        <Route path="/loginTransition" element={<LoginTransition />} />
+        <Route
+          path="/loginTransition"
+          element={
+            localSessionEnabled ? (
+              <Navigate to="/agent/chat" replace />
+            ) : (
+              <LoginTransition />
+            )
+          }
+        />
         <Route path="/" element={<MainLayout />}>
           <Route index element={<Navigate to="/agent/chat" replace />} />
           <Route path="agent/chat" element={<ChatApp />}>
@@ -88,7 +117,14 @@ export default function AppRouter() {
           <Route path="lib/knowledge" element={<KnowledgeApp />}>
             <Route index element={<Navigate to="list" replace />} />
             <Route path="list" element={<KnowledgeList />} />
-            <Route path="auth/:id" element={<KnowledgeAuth />} />
+            {runtimeFeatures.hideUserGroupSurfaces ? (
+              <Route
+                path="auth/:id"
+                element={<Navigate to="/lib/knowledge/list" replace />}
+              />
+            ) : (
+              <Route path="auth/:id" element={<KnowledgeAuth />} />
+            )}
             <Route path="detail/:id" element={<KnowledgeDetail />} />
             <Route
               path="knowledge/:knowledgeBaseId/:knowledgeId"
@@ -96,46 +132,55 @@ export default function AppRouter() {
             />
           </Route>
           <Route path="data-sources" element={<DataSourceManagement />} />
-          <Route path="data-sources/database-connections" element={<DatabaseConnectionsPage />} />
+          <Route
+            path="data-sources/database-connections"
+            element={<Navigate to="/databases" replace />}
+          />
           <Route path="data-sources/:id" element={<DataSourceDetail />} />
           <Route path="dataset-management" element={<DatasetListPage />} />
           <Route
             path="dataset-management/:datasetId"
             element={<DatasetDetailPage />}
           />
+          <Route path="databases" element={<DatabaseConnectionsPage />} />
+          <Route path="cloud-documents" element={<CloudDocumentsLayout />}>
+            <Route index element={<CloudDocumentsPage />} />
+            <Route path="local" element={<LocalDataSourcePage />} />
+            <Route path="feishu" element={<FeishuAccountPage />} />
+            <Route path="docs/feishu-setup" element={<FeishuSetupGuide />} />
+            <Route path="docs/notion-setup" element={<NotionSetupGuide />} />
+          </Route>
           <Route path="model-providers" element={<ModelProviderPage />}>
             <Route index element={<Navigate to="default-services" replace />} />
             <Route path="models" element={<ModelProvidersPage />} />
             <Route
               path="document-parsing"
-              element={<ExternalServicesPage section="parsing" />}
+              element={<Navigate to="/model-providers/tools" replace />}
             />
+            <Route path="tools" element={<ExternalServicesPage />} />
             <Route
-              path="tools"
-              element={<ExternalServicesPage section="tools" />}
+              path="cloud-documents"
+              element={<Navigate to="/cloud-documents" replace />}
             />
-            <Route path="cloud-documents" element={<CloudDocumentsPage />} />
             <Route
               path="cloud-documents/local"
-              element={<LocalDataSourcePage />}
+              element={<Navigate to="/cloud-documents/local" replace />}
             />
             <Route
               path="cloud-documents/feishu"
-              element={<FeishuAccountPage />}
+              element={<Navigate to="/cloud-documents/feishu" replace />}
             />
             <Route
               path="cloud-documents/docs/feishu-setup"
-              element={<FeishuSetupGuide />}
+              element={<Navigate to="/cloud-documents/docs/feishu-setup" replace />}
             />
             <Route
               path="cloud-documents/docs/notion-setup"
-              element={<NotionSetupGuide />}
+              element={<Navigate to="/cloud-documents/docs/notion-setup" replace />}
             />
             <Route
               path="external-services"
-              element={
-                <Navigate to="/model-providers/document-parsing" replace />
-              }
+              element={<Navigate to="/model-providers/tools" replace />}
             />
             <Route path="default-services" element={<DefaultServicesPage />} />
           </Route>
@@ -159,8 +204,9 @@ export default function AppRouter() {
             />
             <Route path="review/:tab/:itemId" element={<MemoryReviewPage />} />
           </Route>
-          <Route path="memory-management/plugins" element={<Navigate to="/memory-management/skills" replace />} />
-          <Route path="memory-management/plugins/:pluginId" element={<PluginDetailPage />} />
+          <Route path="memory-management/plugins" element={<Navigate to="/memory-management/skills?skillView=plugins" replace />} />
+          <Route path="memory-management/plugins/builtin/:pluginId" element={<Suspense fallback={<Spin style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }} />}><BuiltinPluginDetailPage /></Suspense>} />
+          <Route path="memory-management/plugins/:pluginId" element={<Suspense fallback={<Spin style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }} />}><PluginDetailPage /></Suspense>} />
           {runtimeFeatures.hideEvo ? (
             <Route
               path="self-evolution/*"
@@ -171,6 +217,14 @@ export default function AppRouter() {
               <Route
                 path="self-evolution"
                 element={<SelfEvolutionHomePage />}
+              />
+              <Route
+                path="self-evolution/algorithms"
+                element={<SelfEvolutionAlgorithmManagementPage />}
+              />
+              <Route
+                path="self-evolution/algorithms/routing-strategy"
+                element={<SelfEvolutionRoutingStrategyPage />}
               />
               <Route
                 path="self-evolution/detail/:threadId/observation/:kind"

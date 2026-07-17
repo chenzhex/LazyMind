@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+ALGORITHM_APP = Path('algorithm/lazymind/chat/app.py')
+
 
 def workspace_path(policy: Mapping[str, Any], plan: Mapping[str, Any]) -> Path:
     base = (Path(os.getenv('LAZYMIND_EVO_BASE_DIR') or '/var/lib/lazymind/evo') / 'work' / 'repair').resolve()
@@ -27,7 +29,7 @@ def workspace_path(policy: Mapping[str, Any], plan: Mapping[str, Any]) -> Path:
 
 
 def prepare_workspace(source: Path, workspace: Path, objective_hash: str = '') -> None:
-    if not (source / 'lazymind' / 'chat' / 'app.py').exists():
+    if not (source / ALGORITHM_APP).exists():
         raise RuntimeError(f'candidate source is not LazyRAG algorithm dir: {source}')
     source, workspace = source.resolve(), workspace.resolve()
     if source == workspace or source in workspace.parents or workspace in source.parents:
@@ -42,7 +44,7 @@ def prepare_workspace(source: Path, workspace: Path, objective_hash: str = '') -
         _copy_source(source, workspace)
     elif (workspace / '.git').exists():
         reset_workspace(workspace)
-    if not (workspace / 'lazymind' / 'chat' / 'app.py').exists():
+    if not (workspace / ALGORITHM_APP).exists():
         raise RuntimeError(f'candidate workspace is not LazyRAG algorithm dir: {workspace}')
     _ensure_git(workspace, created)
     _write_workspace_fingerprint(workspace, fingerprint)
@@ -52,7 +54,7 @@ def prepare_workspace(source: Path, workspace: Path, objective_hash: str = '') -
 def algorithm_source_root(value: Any) -> Path:
     path = Path(_text(value)).resolve()
     for candidate in (path, *path.parents):
-        if (candidate / 'lazymind' / 'chat' / 'app.py').exists():
+        if (candidate / ALGORITHM_APP).exists():
             return candidate
     return path
 
@@ -68,7 +70,10 @@ def workspace_diff(workspace: Path) -> dict[str, Any]:
                  and not path.startswith('.evo_repair_logs/') and not path.endswith('.pyc')]
     if untracked:
         git(workspace, 'add', '-N', '--', *untracked)
-    return {'diff': git(workspace, 'diff', '--', strip=False), 'files': git(workspace, 'diff', '--name-only').splitlines()}
+    return {
+        'diff': git(workspace, 'diff', '--', strip=False),
+        'files': git(workspace, 'diff', '--name-only').splitlines(),
+    }
 
 
 def apply_diff(workspace: Path, diff: str) -> None:
@@ -104,7 +109,7 @@ def workspace_fingerprint(workspace: Path) -> dict[str, str]:
 def _copy_source(source: Path, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     ignore = shutil.ignore_patterns('.git', '.evo_repair_logs', '__pycache__', '*.pyc')
-    for name in ('lazymind', 'chat', 'common', 'vocab', 'parsing', 'processor'):
+    for name in ('algorithm',):
         if (source / name).exists():
             shutil.copytree(source / name, target / name, ignore=ignore, dirs_exist_ok=True)
     for name in ('.dockerignore', 'Dockerfile', 'config.py', 'requirements.txt'):

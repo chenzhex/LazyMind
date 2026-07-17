@@ -34,6 +34,7 @@ import {
 } from "@ant-design/icons";
 import { useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { getLocalizedErrorMessage } from "@/components/request";
 import {
   batchDeleteDatasetItems,
   createDatasetItem,
@@ -78,6 +79,8 @@ import {
   joinListField,
   validateRequiredDatasetItem,
 } from "../../utils/datasetValidation";
+import { DATASET_PAGE_SIZE_OPTIONS } from "../../constants";
+import { getLocalizedTablePagination } from "@/components/ui/pagination";
 import "../../index.scss";
 
 const { TextArea } = Input;
@@ -158,6 +161,17 @@ type ReferenceContextTextPart = {
 type ReferenceContextPart = ReferenceContextChunkPart | ReferenceContextTextPart;
 type ReferenceContextValue = {
   parts: ReferenceContextPart[];
+};
+type DatasetItemFilters = {
+  keyword: string;
+  questionType?: string;
+  source?: DatasetItemSource;
+};
+
+const EMPTY_DATASET_ITEM_FILTERS: DatasetItemFilters = {
+  keyword: "",
+  questionType: undefined,
+  source: undefined,
 };
 
 function createReferenceChunkSelectorState(): ReferenceChunkSelectorState {
@@ -469,6 +483,10 @@ function referenceContextChunkIDs(raw?: string) {
     .filter((part): part is ReferenceContextChunkPart => part.type === "chunk")
     .map((part) => part.id)
     .filter(Boolean);
+}
+
+function hasReferenceContextChunks(raw?: string) {
+  return parseReferenceContextValue(raw).parts.some((part) => part.type === "chunk");
 }
 
 function removeReferenceContextPart(raw: string | undefined, partIndex: number) {
@@ -908,6 +926,8 @@ export default function DatasetDetailPage() {
   const [keyword, setKeyword] = useState("");
   const [questionType, setQuestionType] = useState<string>();
   const [source, setSource] = useState<DatasetItemSource>();
+  const [appliedFilters, setAppliedFilters] =
+    useState<DatasetItemFilters>(EMPTY_DATASET_ITEM_FILTERS);
   const [pagination, setPagination] = useState({ current: 1, pageSize: 10 });
   const [total, setTotal] = useState(0);
   const [questionTypeOptions, setQuestionTypeOptions] = useState<string[]>([]);
@@ -951,6 +971,7 @@ export default function DatasetDetailPage() {
   const referenceContextEditingValueRef = useRef<Record<string, string | undefined>>({});
   const referenceContextEditingDirtyRef = useRef<Record<string, boolean | undefined>>({});
   const pendingNewItemCellActivationRef = useRef<ActiveEditableCell>(null);
+  const loadDetailRequestIdRef = useRef(0);
   const requiredItemMessages = useMemo(
     () => ({
       question: t("datasetManagement.validation.questionRequired"),
@@ -1089,35 +1110,57 @@ export default function DatasetDetailPage() {
     setDirtyItemIds([]);
     setNewItemVisible(false);
     setActiveCell(null);
+    setKeyword("");
+    setQuestionType(undefined);
+    setSource(undefined);
+    setAppliedFilters(EMPTY_DATASET_ITEM_FILTERS);
+    setPagination({ current: 1, pageSize: 10 });
   }, [clearAllItemRuntimeState, datasetId]);
 
   const loadDetail = useCallback(async () => {
     if (!datasetId) {
       return;
     }
+    const requestId = loadDetailRequestIdRef.current + 1;
+    loadDetailRequestIdRef.current = requestId;
     setLoading(true);
     try {
       const [datasetDetail, itemList, remoteQuestionTypes] = await Promise.all([
         getDataset(datasetId),
         listDatasetItems(datasetId, {
-          keyword,
-          question_type: questionType,
-          source,
+          keyword: appliedFilters.keyword,
+          question_type: appliedFilters.questionType,
+          source: appliedFilters.source,
           page: pagination.current,
           pageSize: pagination.pageSize,
         }),
         listDatasetQuestionTypes(datasetId).catch(() => []),
       ]);
+      if (loadDetailRequestIdRef.current !== requestId) {
+        return;
+      }
       setDataset(datasetDetail);
       setItems(itemList.items);
       setTotal(itemList.total);
       setQuestionTypeOptions(remoteQuestionTypes);
-    } catch (error: any) {
-      message.error(error?.message || t("datasetManagement.detail.loadFailed"));
+    } catch {
+      if (loadDetailRequestIdRef.current !== requestId) {
+        return;
+      }
     } finally {
-      setLoading(false);
+      if (loadDetailRequestIdRef.current === requestId) {
+        setLoading(false);
+      }
     }
-  }, [datasetId, keyword, pagination.current, pagination.pageSize, questionType, source, t]);
+  }, [
+    appliedFilters.keyword,
+    appliedFilters.questionType,
+    appliedFilters.source,
+    datasetId,
+    pagination.current,
+    pagination.pageSize,
+    t,
+  ]);
 
   useEffect(() => {
     void loadDetail();
@@ -1172,8 +1215,8 @@ export default function DatasetDetailPage() {
     setDirtyItemIds([]);
     setNewItemVisible(false);
     setActiveCell(null);
+    setAppliedFilters({ keyword, questionType, source });
     setPagination((current) => ({ ...current, current: 1 }));
-    await loadDetail();
   };
 
   const handleAddItem = async () => {
@@ -1280,8 +1323,7 @@ export default function DatasetDetailPage() {
         setDirtyItemIds((current) => current.filter((id) => id !== itemId));
         await loadDetail();
         return true;
-      } catch (error: any) {
-        message.error(error?.message || t("datasetManagement.detail.saveFailed"));
+      } catch {
         return false;
       } finally {
         setSaving(false);
@@ -1704,14 +1746,14 @@ export default function DatasetDetailPage() {
           previewSegment,
           error: chunks.length === 0 ? t("datasetManagement.detail.reference.noChunks") : "",
         }));
-      } catch (error: any) {
+      } catch (error) {
         if (referenceChunkSelectorRequestRef.current !== selectorRequestId) {
           return;
         }
         setReferenceChunkSelector((current) => ({
           ...current,
           loading: false,
-          error: error?.message || t("datasetManagement.detail.reference.docLoadFailed"),
+          error: getLocalizedErrorMessage(error),
         }));
       }
     },
@@ -1991,10 +2033,17 @@ export default function DatasetDetailPage() {
       field === "reference_doc" &&
       record.id !== NEW_ITEM_ID &&
       Boolean(record.reference_doc_invalid);
+    const referenceContextValue =
+      field === "reference_context"
+        ? referenceContextEditingValueRef.current[record.id] ??
+          draft?.reference_context ??
+          ""
+        : "";
     const shouldShowInvalidReferenceContextClear =
       field === "reference_context" &&
       record.id !== NEW_ITEM_ID &&
-      Boolean(record.reference_chunk_invalid);
+      Boolean(record.reference_chunk_invalid) &&
+      hasReferenceContextChunks(referenceContextValue);
     return (
       <div
         className={`dataset-inline-display-wrapper${
@@ -2505,6 +2554,23 @@ export default function DatasetDetailPage() {
     </div>
   );
 
+  const tablePagination = useMemo(
+    () =>
+      getLocalizedTablePagination(
+        {
+          current: pagination.current,
+          pageSize: pagination.pageSize,
+          total,
+          showSizeChanger: true,
+          pageSizeOptions: DATASET_PAGE_SIZE_OPTIONS,
+          showTotal: (currentTotal) =>
+            t("datasetManagement.detail.paginationTotal", { total: currentTotal }),
+        },
+        t,
+      ),
+    [pagination.current, pagination.pageSize, t, total],
+  );
+
   return (
     <div className="dataset-page dataset-detail-page">
       <div className="dataset-detail-breadcrumb">
@@ -2563,6 +2629,7 @@ export default function DatasetDetailPage() {
               onChange={setQuestionType}
               placeholder={t("datasetManagement.detail.questionTypePlaceholder")}
               options={questionTypeOptions}
+              showAllOptions
             />
             <Select
               allowClear
@@ -2610,23 +2677,25 @@ export default function DatasetDetailPage() {
             onResizeRow: handleRowResize,
           })}
           scroll={{ x: tableScrollX }}
-          pagination={{
-            current: pagination.current,
-            pageSize: pagination.pageSize,
-            total,
-            showTotal: (currentTotal) =>
-              t("datasetManagement.detail.paginationTotal", { total: currentTotal }),
-            onChange: async (current, pageSize) => {
-              const canContinue = await confirmDiscardDirty();
-              if (!canContinue) {
-                return;
-              }
-              clearAllItemRuntimeState();
-              setDirtyItemIds([]);
-              setNewItemVisible(false);
-              setActiveCell(null);
-              setPagination({ current, pageSize });
-            },
+          pagination={tablePagination}
+          onChange={async (nextPagination) => {
+            const nextCurrent = nextPagination.current || 1;
+            const nextPageSize = nextPagination.pageSize || pagination.pageSize;
+            if (
+              nextCurrent === pagination.current &&
+              nextPageSize === pagination.pageSize
+            ) {
+              return;
+            }
+            const canContinue = await confirmDiscardDirty();
+            if (!canContinue) {
+              return;
+            }
+            clearAllItemRuntimeState();
+            setDirtyItemIds([]);
+            setNewItemVisible(false);
+            setActiveCell(null);
+            setPagination({ current: nextCurrent, pageSize: nextPageSize });
           }}
         />
       </Card>

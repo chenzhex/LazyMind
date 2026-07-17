@@ -41,7 +41,7 @@ class RemoteFS(LazyLLMFSBase):
     def _raw_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         agentic_config = lazyllm.globals.get('agentic_config') or {}
         user_id = agentic_config.get('user_id')
-        task_id = agentic_config.get('session_id')
+        task_id = agentic_config.get('session_id') or agentic_config.get('task_id')
         params = kwargs.pop('params', {})
         if user_id:
             params['user_id'] = user_id
@@ -90,6 +90,8 @@ class RemoteFS(LazyLLMFSBase):
         parts = [part for part in normalized.split('/') if part]
         if len(parts) >= 3 and parts[0] == 'skills':
             return '/'.join(parts[:3])
+        if len(parts) >= 3 and parts[0] == 'plugins':
+            return '/'.join(parts[:3])
         return normalized
 
     def _entry_remote_path(self, parent_path: str, entry: Dict[str, Any]) -> str:
@@ -114,7 +116,10 @@ class RemoteFS(LazyLLMFSBase):
     def ls(self, path: str, detail: bool = True, **kwargs) -> List[Any]:
         normalized_path = self._normalize_path(path)
         try:
-            data = self._request_json('list', path=normalized_path)
+            params = {'path': normalized_path}
+            if kwargs.get('revision_id'):
+                params['revision_id'] = kwargs['revision_id']
+            data = self._request_json('list', **params)
         except RuntimeError as exc:
             if normalized_path == 'skills' and 'path does not exist' in str(exc):
                 return []
@@ -125,10 +130,16 @@ class RemoteFS(LazyLLMFSBase):
         return [entry['name'] for entry in entries]
 
     def info(self, path: str, **kwargs) -> Dict[str, Any]:
-        return self._request_json('info', path=self._normalize_path(path))
+        params = {'path': self._normalize_path(path)}
+        if kwargs.get('revision_id'):
+            params['revision_id'] = kwargs['revision_id']
+        return self._request_json('info', **params)
 
     def exists(self, path: str, **kwargs) -> bool:
-        data = self._request_json('exists', path=self._normalize_path(path))
+        params = {'path': self._normalize_path(path)}
+        if kwargs.get('revision_id'):
+            params['revision_id'] = kwargs['revision_id']
+        data = self._request_json('exists', **params)
         return bool(data.get('exists'))
 
     def makedirs(self, path: str, exist_ok: bool = True) -> None:
@@ -250,14 +261,18 @@ class RemoteFS(LazyLLMFSBase):
         response = self._raw_request(
             'GET',
             'content',
-            params={'path': self._normalize_path(path), 'encoding': 'raw'},
+            params={
+                'path': self._normalize_path(path),
+                'encoding': 'raw',
+                **({'revision_id': kwargs['revision_id']} if kwargs.get('revision_id') else {}),
+            },
         )
         self._raise_for_status(response, 'content')
         body = BytesIO(response.content)
         if 'b' in mode:
             return body
         encoding = kwargs.get('encoding') or 'utf-8'
-        return TextIOWrapper(body, encoding=encoding)
+        return TextIOWrapper(body, encoding=encoding, errors=kwargs.get('errors'))
 
     def read_base64(self, path: str) -> bytes:
         data = self._request_json('content', path=self._normalize_path(path), encoding='base64')
@@ -268,10 +283,11 @@ class RemoteFS(LazyLLMFSBase):
 
     def materialize_dir(self, path: str, local_dir: str, **kwargs) -> Dict[str, Any]:
         normalized_root = self._normalize_path(path)
+        revision_id = kwargs.get('revision_id')
         files: List[str] = []
 
         def walk(current: str) -> None:
-            for entry in self.ls(current, detail=True):
+            for entry in self.ls(current, detail=True, revision_id=revision_id):
                 entry_name = str((entry or {}).get('name') or '').strip()
                 if not entry_name:
                     continue
@@ -284,11 +300,15 @@ class RemoteFS(LazyLLMFSBase):
                     rel_path = remote_name[len(prefix):]
                 else:
                     rel_path = remote_name.rsplit('/', 1)[-1]
-                if not rel_path or rel_path.startswith('../') or '/..' in rel_path:
+                rel_parts = [part for part in rel_path.replace('\\', '/').split('/') if part]
+                if not rel_parts or any(part in ('.', '..') for part in rel_parts):
                     raise RuntimeError(f'remote-fs materialize got invalid relative path: {rel_path!r}')
-                destination = os.path.join(local_dir, *rel_path.split('/'))
+                local_root = os.path.abspath(local_dir)
+                destination = os.path.abspath(os.path.join(local_root, *rel_parts))
+                if os.path.commonpath([local_root, destination]) != local_root:
+                    raise RuntimeError(f'remote-fs materialize got invalid relative path: {rel_path!r}')
                 os.makedirs(os.path.dirname(destination), exist_ok=True)
-                with self.open(remote_name, 'rb') as src, open(destination, 'wb') as dst:
+                with self.open(remote_name, 'rb', revision_id=revision_id) as src, open(destination, 'wb') as dst:
                     dst.write(src.read())
                 files.append(rel_path)
 

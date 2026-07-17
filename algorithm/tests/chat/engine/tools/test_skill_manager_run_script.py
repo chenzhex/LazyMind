@@ -47,7 +47,7 @@ def test_run_script_uses_fs_materialize_dir_without_source_specific_branch(monke
 
     assert result['status'] == 'ok'
     assert fs.materialized[0][0] == 'remote://skills/coding/pkg'
-    assert calls[0]['cmd'].endswith("scripts/check.py --fast")
+    assert calls[0]['cmd'].endswith('scripts/check.py --fast')
     assert calls[0]['cwd'] == fs.materialized[0][1]
 
 

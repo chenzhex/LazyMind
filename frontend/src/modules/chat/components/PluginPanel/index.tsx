@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { message, Popconfirm } from 'antd';
+import { Popconfirm } from 'antd';
 import { usePluginSession } from '@/modules/chat/hooks/usePlugin';
 import { usePluginStore } from '@/modules/chat/store/pluginPanel';
 import { uploadFileInChunks } from '@/modules/chat/utils/chunkUpload';
@@ -19,7 +19,7 @@ import type {
 import { SlotRenderer, SlotEditingContext } from './SlotComponents';
 import './PluginPanel.scss';
 
-/** Parse a JSON intent_context string and return the text field, or '' if empty/invalid. */
+/** Parse a JSON intent context string and return the text field, or '' if empty/invalid. */
 function parseIntentText(raw?: string): string {
   if (!raw || raw === '{}') return '';
   try {
@@ -30,18 +30,22 @@ function parseIntentText(raw?: string): string {
   }
 }
 
-/** Latest _source_tool among selected image slots (newest first). */
-function getLatestSelectedImageSourceTool(session: PluginSession): string {
-  const selectedImageSlots = (session.slots ?? []).filter(
-    (s) => s.selected && s.content_type === 'image',
-  );
-  if (!selectedImageSlots.length) {
-    return '';
+/** Fallback: read latest selected text from a slot artifact. */
+function parseSelectedSlotText(session: PluginSession, slotKey: string, includeUnselected = false): string {
+  const candidates = (session.slots ?? [])
+    .filter((s) => s.slot === slotKey && (includeUnselected || s.selected))
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  const latest = candidates[0];
+  if (!latest) return '';
+  const raw = latest.artifact_value;
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    if (obj.text !== undefined) return String(obj.text);
+    if (obj.value !== undefined) return String(obj.value);
   }
-  const latest = [...selectedImageSlots].sort(
-    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-  )[0];
-  return String(latest?.artifact_value?._source_tool ?? '').trim();
+  return String(raw);
 }
 
 /** IntentPopover shows global intent + per-step intent inside a floating popover. */
@@ -56,14 +60,16 @@ function IntentPopover({
 }) {
   const { t } = useTranslation();
   const wrapRef = useRef<HTMLDivElement>(null);
-  const globalText = parseIntentText(session.intent_context);
+  const globalText =
+    parseIntentText(session.intent_context)
+    || parseSelectedSlotText(session, 'user_intent_summary', true);
   const stepIntents = (session.steps ?? [])
     .filter((s) => !!parseIntentText(s.intent_context))
     .map((s, idx) => ({
       idx: idx + 1,
       stepId: s.step_id,
       text: parseIntentText(s.intent_context),
-      tabLabel: tabs.find((t) => t.id === s.step_id)?.label ?? s.step_id,
+      tabLabel: tabs.find((t) => getTabStepId(t) === s.step_id)?.label ?? s.step_id,
     }));
 
   useEffect(() => {
@@ -134,10 +140,11 @@ function AutoSlotGrid({
   onRefresh?: () => void;
   onReference?: (slot: SlotRevision) => void;
 }) {
+  const { t } = useTranslation();
   if (!session.slots || session.slots.length === 0) {
     return (
       <div className='plugin-panel__empty' role='status' aria-live='polite'>
-        <span>Waiting for results…</span>
+        <span>{t('chat.pluginWaitingForResults')}</span>
       </div>
     );
   }
@@ -205,25 +212,175 @@ function resolveColumnSlotId(
   return null;
 }
 
+/**
+ * Flatten a format-C CompositePanelNode tree into a flat column list.
+ * For 'row' nodes, children become columns proportioned by weight.
+ * For 'column' nodes at root, we treat the whole tree as one column (single slot fallback).
+ * tabs[] leaf nodes become an InnerTabsNode for backward compat rendering.
+ */
+function flattenFormatCNode(
+  node: import('@/modules/chat/store/pluginPanel').CompositePanelNode,
+  weight: number,
+): Array<{ slotId: string | InnerTabsNode; weight: number }> {
+  if (node.slot) {
+    return [{ slotId: node.slot, weight }];
+  }
+  if (node.tabs && node.tabs.length > 0) {
+    // Convert format-C tabs (string[]) to legacy InnerTabsNode for rendering
+    const innerTabsNode: InnerTabsNode = {
+      tabs: node.tabs.map((slotId) => slotId as CompositeLayoutNode),
+    };
+    return [{ slotId: innerTabsNode, weight }];
+  }
+  if (node.direction === 'row' && node.children) {
+    const childWeight = node.children.reduce((s, c) => s + (c.weight ?? 1), 0);
+    return node.children.flatMap((child) =>
+      flattenFormatCNode(child, ((child.weight ?? 1) / childWeight) * weight),
+    );
+  }
+  // column direction or unknown: render as a single nested block — just flatten children
+  if (node.direction === 'column' && node.children) {
+    // For now, render only the first child in column containers (rows handle horizontal splitting)
+    // A full nested column render would require CSS grid nesting, handled in the tree renderer.
+    return node.children.flatMap((child) => flattenFormatCNode(child, child.weight ?? 1));
+  }
+  return [];
+}
+
 /** Build the effective column list from composite_layout (or fall back to slot ids). */
 function buildColumns(
   tab: TabDef,
 ): Array<{ slotId: string | InnerTabsNode; weight: number }> {
   const layout = tab.composite_layout;
-  if (!layout || layout.length === 0) {
-    // Fallback: all slots side-by-side with equal weight.
+  if (!layout) {
     return tab.slots.map((s) => ({ slotId: s.id, weight: 1 }));
   }
-  // The top-level array may be a single [...] parallel node or an explicit list of columns.
-  // Detect whether the first element is itself an array (parallel node).
+
+  // Format C: { direction, children } tree
+  if (!Array.isArray(layout) && typeof layout === 'object' && 'direction' in layout) {
+    const result = flattenFormatCNode(
+      layout as import('@/modules/chat/store/pluginPanel').CompositePanelNode,
+      1,
+    );
+    return result.length > 0 ? result : tab.slots.map((s) => ({ slotId: s.id, weight: 1 }));
+  }
+
+  // Legacy array format
+  if (!Array.isArray(layout) || layout.length === 0) {
+    return tab.slots.map((s) => ({ slotId: s.id, weight: 1 }));
+  }
   const first = layout[0];
   const cols =
     Array.isArray(first)
       ? (first as CompositeLayoutNode[])
-      : layout;
+      : layout as CompositeLayoutNode[];
   return cols
     .map((n) => resolveColumnSlotId(n))
     .filter((c): c is NonNullable<typeof c> => c !== null);
+}
+
+function getTabStepId(tab: TabDef): string | undefined {
+  return tab.step_id ?? tab.id;
+}
+
+function revisionMatchesTabScope(
+  session: PluginSession,
+  tab: TabDef,
+  slot: SlotRevision,
+  scope: 'selected' | 'tab',
+): boolean {
+  if (scope === 'selected') {
+    return Boolean(slot.selected);
+  }
+  if (tab.step_id) {
+    return slot.step_id === tab.step_id;
+  }
+  const isStepTab = session.steps?.some((s) => s.step_id === tab.id);
+  if (isStepTab) {
+    return slot.step_id === tab.id;
+  }
+  return Boolean(slot.selected);
+}
+
+/** Slot ids that currently have at least one revision under the tab's empty-column scope. */
+function getPresentSlotIds(
+  tab: TabDef,
+  session: PluginSession,
+  scope: 'selected' | 'tab' = 'selected',
+): Set<string> {
+  const participating = new Set(tab.slots.map((s) => s.id));
+  const present = new Set<string>();
+  for (const slot of session.slots ?? []) {
+    if (!participating.has(slot.slot)) continue;
+    if (!revisionMatchesTabScope(session, tab, slot, scope)) continue;
+    present.add(slot.slot);
+  }
+  return present;
+}
+
+/**
+ * Resolve which slot ids should be visible for a tab from `composite_behavior`.
+ * Returns null when no behavior is declared (show all configured columns/slots).
+ */
+function resolveVisibleSlotIds(
+  tab: TabDef,
+  session: PluginSession,
+): Set<string> | null {
+  const behavior = tab.composite_behavior;
+  if (!behavior) return null;
+
+  const scope = behavior.empty_column_scope === 'tab' ? 'tab' : 'selected';
+  const present = getPresentSlotIds(tab, session, scope);
+  const allowed = new Set(tab.slots.map((s) => s.id));
+
+  for (const group of behavior.mutually_exclusive ?? []) {
+    const members = (group.slots ?? []).filter((id) => allowed.has(id));
+    if (members.length < 2) continue;
+    const prefer = (group.prefer?.length ? group.prefer : members)
+      .filter((id) => members.includes(id));
+    const winner = prefer.find((id) => present.has(id))
+      ?? members.find((id) => present.has(id));
+    if (!winner) continue;
+    for (const id of members) {
+      if (id !== winner) allowed.delete(id);
+    }
+  }
+
+  if (behavior.hide_empty_columns) {
+    for (const id of [...allowed]) {
+      if (!present.has(id)) allowed.delete(id);
+    }
+  }
+
+  return allowed;
+}
+
+function filterColumnsByVisibleSlots(
+  columns: Array<{ slotId: string | InnerTabsNode; weight: number }>,
+  visible: Set<string> | null,
+): Array<{ slotId: string | InnerTabsNode; weight: number }> {
+  if (!visible) return columns;
+  const filtered = columns.filter((col) => {
+    if (typeof col.slotId !== 'string') return true;
+    return visible.has(col.slotId);
+  });
+  return filtered.length > 0 ? filtered : columns;
+}
+
+function getTabSlotRevisions(
+  session: PluginSession,
+  tab: TabDef,
+  artifactKey: string,
+): SlotRevision[] {
+  const slots = session.slots ?? [];
+  if (tab.step_id) {
+    return slots.filter((s) => s.slot === artifactKey && s.step_id === tab.step_id);
+  }
+  const isStepTab = session.steps?.some((s) => s.step_id === tab.id);
+  if (isStepTab) {
+    return slots.filter((s) => s.slot === artifactKey && s.step_id === tab.id);
+  }
+  return slots.filter((s) => s.slot === artifactKey && s.selected);
 }
 
 /** Get all distinct sort_orders present across the participating slots. */
@@ -233,8 +390,11 @@ function getCompositeRows(
 ): number[] {
   const participating = new Set(tab.slots.map((s) => s.id));
   const orders = new Set<number>();
+  const scopeStepId = tab.step_id
+    ?? (session.steps?.some((s) => s.step_id === tab.id) ? tab.id : undefined);
   for (const slot of session.slots ?? []) {
-    if (slot.selected && participating.has(slot.slot)) {
+    const matchesTabStep = scopeStepId ? slot.step_id === scopeStepId : slot.selected;
+    if (matchesTabStep && participating.has(slot.slot)) {
       if (slot.sort_order !== undefined) {
         orders.add(slot.sort_order);
       }
@@ -246,11 +406,12 @@ function getCompositeRows(
 /** Find a slot revision for (slot, sort_order). */
 function findSlotRevision(
   session: PluginSession,
+  tab: TabDef,
   artifactKey: string,
   sortOrder: number,
 ): SlotRevision | undefined {
-  return (session.slots ?? []).find(
-    (s) => s.selected && s.slot === artifactKey && s.sort_order === sortOrder,
+  return getTabSlotRevisions(session, tab, artifactKey).find(
+    (s) => s.slot === artifactKey && s.sort_order === sortOrder,
   );
 }
 
@@ -260,6 +421,7 @@ function findSlotRevision(
 
 function InnerTabsCell({
   tabsNode,
+  tab,
   session,
   slotDefs,
   sortOrder,
@@ -267,6 +429,7 @@ function InnerTabsCell({
   onReference,
 }: {
   tabsNode: InnerTabsNode;
+  tab: TabDef;
   session: PluginSession;
   slotDefs: SlotDef[];
   sortOrder: number;
@@ -301,7 +464,7 @@ function InnerTabsCell({
       {innerSlotIds.map((slotId, i) => {
         const def = slotDefs.find((s) => s.id === slotId);
         const artifactKey = def?.id ?? slotId;
-        const rev = findSlotRevision(session, artifactKey, sortOrder);
+        const rev = findSlotRevision(session, tab, artifactKey, sortOrder);
         return (
           <div key={slotId} role='tabpanel' hidden={i !== activeIdx}>
             {rev ? (
@@ -340,16 +503,20 @@ function CompositeSlotGrid({
   onReference?: (slot: SlotRevision) => void;
   onFocusSortOrder?: (sortOrder: number | undefined) => void;
 }) {
+  const { t } = useTranslation();
   const rows = getCompositeRows(tab, session);
-  const columns = buildColumns(tab);
+  const columns = filterColumnsByVisibleSlots(
+    buildColumns(tab),
+    resolveVisibleSlotIds(tab, session),
+  );
 
   // Compute total weight for flex proportions.
-  const totalWeight = columns.reduce((s, c) => s + c.weight, 0);
+  const totalWeight = columns.reduce((s, c) => s + c.weight, 0) || 1;
 
   if (rows.length === 0) {
     return (
       <div className='plugin-panel__empty' role='status' aria-live='polite'>
-        <span>Waiting for results…</span>
+        <span>{t('chat.pluginWaitingForResults')}</span>
       </div>
     );
   }
@@ -363,7 +530,7 @@ function CompositeSlotGrid({
           onClick={() => onFocusSortOrder?.(sortOrder)}
           role='button'
           tabIndex={0}
-          aria-label={`行 ${sortOrder}`}
+          aria-label={t('chat.pluginRowAria', { index: sortOrder })}
         >
           {columns.map((col, colIdx) => {
             const flexBasis = `${(col.weight / totalWeight) * 100}%`;
@@ -376,6 +543,7 @@ function CompositeSlotGrid({
                 >
                   <InnerTabsCell
                     tabsNode={col.slotId}
+                    tab={tab}
                     session={session}
                     slotDefs={tab.slots}
                     sortOrder={sortOrder}
@@ -388,7 +556,7 @@ function CompositeSlotGrid({
             const slotId = col.slotId as string;
             const def = tab.slots.find((s) => s.id === slotId);
             const artifactKey = def?.id ?? slotId;
-            const rev = findSlotRevision(session, artifactKey, sortOrder);
+            const rev = findSlotRevision(session, tab, artifactKey, sortOrder);
             return (
               <div
                 key={slotId}
@@ -595,7 +763,7 @@ function SortableImageList({
               onClick={() => onFocusSortOrder?.(rev.sort_order)}
               role='button'
               tabIndex={0}
-              aria-label={`图片 ${listIndex}`}
+              aria-label={t('chat.pluginImageAria', { index: listIndex })}
               className={`plugin-panel__image-list-item${dragSrcIdx.current === idx ? ' plugin-panel__image-list-item--dragging' : ''}`}
             >
               <SlotRenderer
@@ -622,8 +790,8 @@ function SortableImageList({
         <button
           className='plugin-panel__image-add-card'
           onClick={onAddItem}
-          title='新增附件'
-          aria-label='新增附件'
+          title={t('chat.pluginAddAttachment')}
+          aria-label={t('chat.pluginAddAttachment')}
           type='button'
         >
           <span className='plugin-panel__image-add-card-icon'>+</span>
@@ -650,7 +818,6 @@ function TabSlotGrid({
   const addFileInputRef = useRef<HTMLInputElement>(null);
   const addingSlotIdRef = useRef<string>('');
   const addingSlotTypeRef = useRef<string>('');
-  const { t } = useTranslation();
   const { createSlotItem } = usePluginStore();
 
   const handleAddItem = useCallback((slotId: string, slotType: string) => {
@@ -687,49 +854,14 @@ function TabSlotGrid({
     );
   }
   const resolveVisibleSlots = (slotDefs: SlotDef[]): SlotDef[] => {
-    if (session.plugin_id !== 'image-plugin' || tab.id !== 'result') {
-      return slotDefs;
-    }
-    const selectedImageSlots = (session.slots ?? []).filter(
-      (s) => s.selected && s.content_type === 'image',
-    );
-    if (!selectedImageSlots.length) {
-      return slotDefs;
-    }
-    const latest = [...selectedImageSlots].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    )[0];
-    const sourceTool = String(latest?.artifact_value?._source_tool ?? '').trim();
-    if (sourceTool === 'image_generator') {
-      return slotDefs
-        .filter((s) => s.id === 'image_output')
-        .map((s) => ({
-          ...s,
-          // In pure generation flow, this slot is the final generated output, not an editor input.
-          label: 'Generated Image',
-        }));
-    }
-    if (sourceTool === 'image_editor') {
-      const allowed = new Set(['image_output', 'enhanced_image_output']);
-      return slotDefs.filter((s) => allowed.has(s.id));
-    }
-    return slotDefs;
+    const visible = resolveVisibleSlotIds(tab, session);
+    if (!visible) return slotDefs;
+    const filtered = slotDefs.filter((s) => visible.has(s.id));
+    return filtered.length > 0 ? filtered : slotDefs;
   };
   const visibleSlots = resolveVisibleSlots(tab.slots);
-  const resolveSlotLabel = (slotDef: SlotDef): string => {
-    const key = slotDef.id;
-    if (
-      session.plugin_id === 'image-plugin'
-      && tab.id === 'result'
-      && key === 'image_output'
-      && getLatestSelectedImageSourceTool(session) === 'image_generator'
-    ) {
-      return t('chat.pluginGeneratedImage');
-    }
-    return slotDef.label ?? slotDef.id;
-  };
   return (
-    <div className={`plugin-panel__tab-content plugin-panel__tab-content--${tab.layout ?? 'list'}`}>
+    <div className={`plugin-panel__tab-content plugin-panel__tab-content--${tab.layout ?? 'vertical'}`}>
       {/* Hidden file input for adding new items */}
       <input
         ref={addFileInputRef}
@@ -741,20 +873,27 @@ function TabSlotGrid({
       />
       {visibleSlots.map((slotDef) => {
         const artifactKey = slotDef.id;
-        const revisions = (session.slots ?? []).filter(
-          (s) => s.slot === artifactKey && s.selected,
-        );
-        if (revisions.length === 0) {
+        const revisions = getTabSlotRevisions(session, tab, artifactKey);
+        const hideEmpty = Boolean(tab.composite_behavior?.hide_empty_columns);
+        if (hideEmpty && revisions.length === 0) {
           return null;
         }
+        const slotLabel = slotDef.label ?? slotDef.id;
         const isImageList = slotDef.type === 'image' && slotDef.cardinality === 'list';
         const isDraggable = Boolean(slotDef.ordered);
         return (
           <div key={slotDef.id} className='plugin-panel__named-slot'>
             {(slotDef.label || slotDef.id) && (
-              <span className='plugin-panel__slot-label'>{resolveSlotLabel(slotDef)}</span>
+              <span className='plugin-panel__slot-label'>{slotLabel}</span>
             )}
-            {isImageList ? (
+            {revisions.length === 0 ? (
+              <div
+                className='plugin-panel__slot-placeholder'
+                aria-label={`${slotLabel} pending`}
+              >
+                <span>—</span>
+              </div>
+            ) : isImageList ? (
               <SortableImageList
                 revisions={revisions}
                 session={session}
@@ -772,7 +911,7 @@ function TabSlotGrid({
                   onClick={() => onFocusSortOrder?.(rev.sort_order)}
                   role='button'
                   tabIndex={0}
-                  aria-label={`内容项 ${rev.sort_order ?? ''}`}
+                  aria-label={t('chat.pluginContentItemAria', { index: rev.sort_order ?? '' })}
                 >
                   <SlotRenderer
                     slot={rev}
@@ -807,7 +946,7 @@ export function PluginPanel({
   onStop,
   onDismissed,
 }: PluginPanelProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { session, loading, refresh } = usePluginSession(conversationId);
   const bumpDismissedRefresh = usePluginStore((s) => s.bumpDismissedRefresh);
   const autoRunning = usePluginStore((s) =>
@@ -816,9 +955,12 @@ export function PluginPanel({
   const [activeTabIdx, setActiveTabIdx] = React.useState(0);
   const [collapsed, setCollapsed] = useState(false);
   const fetchPluginUI = usePluginStore((s) => s.fetchPluginUI);
-  const pluginUIByPlugin = usePluginStore((s) => s.pluginUIByPlugin);
   const setFocusedTab = usePluginStore((s) => s.setFocusedTab);
   const setFocusedSortOrder = usePluginStore((s) => s.setFocusedSortOrder);
+  // Focused tab id mirrored out of the session so polling refreshes don't
+  // reset the user's current tab.
+  const focusedTabByConversation = usePluginStore((s) => s.focusedTabByConversation);
+  const persistedFocusedTab = conversationId ? focusedTabByConversation[conversationId] : undefined;
   const [ui, setUI] = useState<PluginUI>({});
   const [dismissing, setDismissing] = useState(false);
   const [stateGraphOpen, setStateGraphOpen] = useState(false);
@@ -832,7 +974,6 @@ export function PluginPanel({
       onDismissed?.();
       refresh();
     } catch {
-      message.error(t('chat.pluginDismissFailed'));
       setDismissing(false);
     }
   }, [session, dismissing, refresh, t, onDismissed, bumpDismissedRefresh, conversationId]);
@@ -852,18 +993,22 @@ export function PluginPanel({
 
   useEffect(() => {
     if (!session?.plugin_id) return;
-    const cached = pluginUIByPlugin[session.plugin_id];
-    if (cached) { setUI(cached); return; }
+    const lang = i18n.language || '';
+    const cached = usePluginStore.getState().pluginUIByPlugin[`${session.plugin_id}:${lang}`];
+    if (cached) {
+      setUI(cached);
+    }
+    // Always re-fetch once to avoid stale cached tab/slot layouts after plugin.yaml updates.
     fetchPluginUI(session.plugin_id).then(setUI);
-  }, [session?.plugin_id, fetchPluginUI, pluginUIByPlugin]);
+  }, [session?.plugin_id, fetchPluginUI, i18n.language]);
 
-  // Restore the previously focused tab when UI loads or session changes.
+  // Restore the previously focused tab when UI loads.
   useEffect(() => {
     const tabs: TabDef[] = ui.tabs ?? [];
-    if (!tabs.length || !session?.focusedTab) return;
-    const idx = tabs.findIndex((t) => t.id === session.focusedTab);
+    if (!tabs.length || !persistedFocusedTab) return;
+    const idx = tabs.findIndex((t) => t.id === persistedFocusedTab);
     if (idx !== -1) setActiveTabIdx(idx);
-  }, [ui.tabs, session?.focusedTab]);
+  }, [ui.tabs, persistedFocusedTab]);
 
   useEffect(() => {
     if (!session || session.status !== 'active') return;
@@ -887,7 +1032,7 @@ export function PluginPanel({
       <div
         className='plugin-panel plugin-panel--loading'
         role='status'
-        aria-label='Loading plugin panel'
+        aria-label={t('chat.pluginPanelLoading')}
       />
     );
   }
@@ -896,9 +1041,6 @@ export function PluginPanel({
 
   const tabs: TabDef[] = ui.tabs ?? [];
   const hasTabs = tabs.length > 0;
-
-  // Always show the intent button when a session exists.
-  // When no intent has been recorded yet the popover shows empty sections.
   const hasIntent = true;
 
   const showActions =
@@ -913,9 +1055,16 @@ export function PluginPanel({
   // A failed step cannot be checkpoint-resumed — the SubAgent exited uncleanly and there is
   // no valid checkpoint to restore. Only "重试" (full restart) is meaningful in this case.
   // Note: "interrupted" steps CAN be resumed via checkpoint, so only "failed" is blocked.
-  const currentStepStatus = session.steps
-    ?.filter((s) => s.step_id === session.current_step_id)
-    ?.sort((a, b) => b.attempt - a.attempt)[0]?.status;
+  const authoritativeCurrent = session.projection?.current ?? [];
+  const currentStepStatus = authoritativeCurrent
+    .map((id) => session.projection?.nodes?.[id]?.execution)
+    .find((status) => status === 'failed')
+    ?? (session.current_step_id
+      ? session.steps
+        ?.filter((s) => s.step_id === session.current_step_id && s.validity !== 'stale')
+        ?.sort((a, b) => b.attempt - a.attempt)[0]?.status
+      : undefined);
+  const effectivePast = new Set(session.projection?.past ?? []);
   const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
 
   function handleContinue() {
@@ -938,7 +1087,7 @@ export function PluginPanel({
     <div
       className={`plugin-panel plugin-panel--${displayStatus}${collapsed ? ' plugin-panel--collapsed' : ''}`}
       data-session-id={session.session_id}
-      aria-label='Plugin Panel'
+      aria-label={t('chat.pluginPanelTitle')}
     >
       {/* Header */}
       <div className='plugin-panel__header'>
@@ -946,10 +1095,10 @@ export function PluginPanel({
           <span className='plugin-panel__title'>{session.plugin_id}</span>
           <span
             className={`plugin-panel__status plugin-panel__status--${displayStatus}`}
-            aria-label={`Status: ${t(STATUS_KEY[displayStatus] ?? displayStatus)}`}
+            aria-label={t('chat.pluginStatusAria', { status: t(STATUS_KEY[displayStatus] ?? displayStatus) })}
             onClick={() => session && setStateGraphOpen(true)}
             style={{ cursor: 'pointer' }}
-            title='查看工作流图'
+            title={t('chat.pluginViewWorkflow')}
             role='button'
             tabIndex={0}
             onKeyDown={(e) => e.key === 'Enter' && session && setStateGraphOpen(true)}
@@ -1031,7 +1180,8 @@ export function PluginPanel({
       {!collapsed && hasTabs && (
         <div className='plugin-panel__tabs' role='tablist'>
           {tabs.map((tab, idx) => {
-            const step = session.steps?.find((s) => s.step_id === tab.id);
+            const stepID = getTabStepId(tab);
+            const step = session.steps?.find((s) => s.step_id === stepID);
             const stepStatus = step?.status;
             return (
               <React.Fragment key={tab.id}>
@@ -1094,7 +1244,7 @@ export function PluginPanel({
 
       {/* Footer */}
       {!collapsed && showActions && (
-        <div className='plugin-panel__footer' role='group' aria-label='Session controls'>
+        <div className='plugin-panel__footer' role='group' aria-label={t('chat.pluginSessionControls')}>
           {displayStatus === 'active' && onStop && (
             <button
               type='button'
@@ -1105,16 +1255,18 @@ export function PluginPanel({
               {t('chat.pluginStop')}
             </button>
           )}
-          <button
-            type='button'
-            className='plugin-panel__action-btn plugin-panel__action-btn--secondary'
-            disabled={buttonsDisabled}
-            aria-disabled={buttonsDisabled}
-            onClick={handleRetry}
-            title={buttonsDisabled ? t('chat.pluginBtnDisabledHint') : t('chat.pluginRetry')}
-          >
-            {t('chat.pluginRetry')}
-          </button>
+          {session.status !== 'completed' && (
+            <button
+              type='button'
+              className='plugin-panel__action-btn plugin-panel__action-btn--secondary'
+              disabled={buttonsDisabled}
+              aria-disabled={buttonsDisabled}
+              onClick={handleRetry}
+              title={buttonsDisabled ? t('chat.pluginBtnDisabledHint') : t('chat.pluginRetry')}
+            >
+              {t('chat.pluginRetry')}
+            </button>
+          )}
           {showContinue && (
             <button
               type='button'
@@ -1134,14 +1286,19 @@ export function PluginPanel({
             </button>
           )}
           {session.status === 'completed' && session.steps && session.steps.length > 0 && (
-            <div className='plugin-panel__rollback'>
-              <span className='plugin-panel__rollback-label'>{t('chat.pluginRollbackLabel')}</span>
-              <div className='plugin-panel__rollback-steps'>
-                {session.steps.map((step) => (
+            <div style={{ flex: '1 1 100%', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>{t('chat.pluginRollbackLabel')}</span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {session.steps
+                  .filter((step, index, all) => effectivePast.has(step.step_id)
+                    && step.validity !== 'stale'
+                    && all.findIndex((candidate) => candidate.step_id === step.step_id && candidate.validity !== 'stale') === index)
+                  .map((step) => (
                   <button
                     key={`${step.step_id}-${step.attempt}`}
                     type='button'
-                    className='plugin-panel__rollback-step-btn'
+                    className='plugin-panel__action-btn plugin-panel__action-btn--secondary'
+                    style={{ padding: '3px 10px', fontSize: 12 }}
                     onClick={() => handleRollback(step.step_id)}
                     title={`${t('chat.pluginRollbackPrefix')}${step.step_id}`}
                   >

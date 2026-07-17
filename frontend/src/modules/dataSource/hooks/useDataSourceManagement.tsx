@@ -3,7 +3,7 @@ import { Form } from "antd";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { AgentAppsAuth } from "@/components/auth";
-import type { TypedConfirmModalRef } from '@/components/ui/TypedConfirmModal';
+import type { TypedConfirmModalRef } from "@/components/ui/TypedConfirmModal";
 import type { DatabaseConnectionItem } from "../api/databaseConnections";
 import {
   createFeishuAccountId,
@@ -16,14 +16,11 @@ import {
 } from "../common/feishuAccounts";
 import {
   FEISHU_DATA_SOURCE_OAUTH_CHANNEL,
-  consumeCloudDataSourceOAuthResult,
-  consumeFeishuDataSourceOAuthResult,
-  consumeFeishuDataSourceWizardDraft,
+  bootstrapOAuthSession,
   type CloudDataSourceProvider,
   type FeishuDataSourceConnection,
   type FeishuDataSourceOAuthMessage,
 } from "@/modules/dataSource/common/feishuOAuth";
-import { DEFAULT_DATA_SOURCE_FILE_TYPES } from "../constants/options";
 import type {
   DataSourceItem,
   FeishuAppSetup,
@@ -37,6 +34,7 @@ import { type ScanV2AgentHint } from "../utils/scanAccessors";
 import { pickScanAgent } from "../utils/cloudSync";
 import { isAdminRole } from "../utils/role";
 import { loadNotionAppSetup } from "../utils/notionSetup";
+import { resolveCloudAuthConnection } from "../utils/feishuAccount";
 import { sourceTypeOptions } from "../constants/sourceTypeOptions";
 import { useLocalPathTree } from "./useLocalPathTree";
 import { useFeishuTargetTree } from "./useFeishuTargetTree";
@@ -71,6 +69,8 @@ export function useDataSourceManagement() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [createProviderModalOpen, setCreateProviderModalOpen] = useState(false);
   const [authSelectModalOpen, setAuthSelectModalOpen] = useState(false);
+  const [authSelectProvider, setAuthSelectProvider] =
+    useState<CloudDataSourceProvider | null>(null);
   const [oauthState, setOauthState] = useState<OAuthState>("pending");
   const [connectionVerified, setConnectionVerified] = useState(false);
   const [oauthConnection, setOauthConnection] =
@@ -89,6 +89,9 @@ export function useDataSourceManagement() {
   );
   const [notionOauthConnection, setNotionOauthConnection] =
     useState<FeishuDataSourceConnection | null>(null);
+  const [notionAuthAccounts, setNotionAuthAccounts] = useState<
+    FeishuAuthAccount[]
+  >([]);
   const [cloudSetupProvider, setCloudSetupProvider] =
     useState<CloudDataSourceProvider>("feishu");
   const [feishuSetupModalOpen, setFeishuSetupModalOpen] = useState(false);
@@ -99,7 +102,8 @@ export function useDataSourceManagement() {
   const [manualOauthModalOpen, setManualOauthModalOpen] = useState(false);
   const [manualOauthCallbackValue, setManualOauthCallbackValue] = useState("");
   const [manualOauthSubmitting, setManualOauthSubmitting] = useState(false);
-  const [databaseEditingConnection, setDatabaseEditingConnection] = useState<DatabaseConnectionItem | null>(null);
+  const [databaseEditingConnection, setDatabaseEditingConnection] =
+    useState<DatabaseConnectionItem | null>(null);
   const [databaseEditSaving, setDatabaseEditSaving] = useState(false);
   const oauthAttemptRef = useRef<PendingOAuthAttempt | null>(null);
   const canCreateLocalSource = isAdminRole(AgentAppsAuth.getUserInfo()?.role);
@@ -112,15 +116,19 @@ export function useDataSourceManagement() {
   const [scanLoading, setScanLoading] = useState(false);
   const [validatedAgentId, setValidatedAgentId] = useState<string | null>(null);
   const [wizardSaving, setWizardSaving] = useState(false);
-  const [wizardSavingMode, setWizardSavingMode] = useState<DataSourceSaveMode | null>(null);
+  const [wizardSavingMode, setWizardSavingMode] =
+    useState<DataSourceSaveMode | null>(null);
   const sourceListRequestSeqRef = useRef(0);
   const assetSearchInitializedRef = useRef(false);
   const feishuAuthAccountsLoadedRef = useRef(false);
   const confirmRef = useRef<TypedConfirmModalRef>(null);
-  const pendingConfirmActionRef = useRef<(() => void | Promise<void>) | null>(null);
+  const pendingConfirmActionRef = useRef<(() => void | Promise<void>) | null>(
+    null,
+  );
 
   const syncMode = Form.useWatch("syncMode", form) || "scheduled";
-  const feishuTargetType = (Form.useWatch("targetType", form) || "wiki_space") as FeishuTargetType;
+  const feishuTargetType = (Form.useWatch("targetType", form) ||
+    "wiki_space") as FeishuTargetType;
   const isFeishuSetupReady = Boolean(
     feishuAppSetup?.appId.trim() && feishuAppSetup?.appSecret.trim(),
   );
@@ -129,12 +137,16 @@ export function useDataSourceManagement() {
   );
   const validFeishuAccounts = feishuAuthAccounts.filter(
     (account) =>
-      account.status === "connected" && Boolean(account.connection?.connectionId),
+      account.status === "connected" &&
+      Boolean(account.connection?.connectionId),
+  );
+  const validNotionAccounts = notionAuthAccounts.filter(
+    (account) =>
+      account.status === "connected" &&
+      Boolean(account.connection?.connectionId),
   );
   const isFeishuAuthValid = validFeishuAccounts.length > 0;
-  const isNotionAuthValid =
-    notionOauthConnection?.status === "connected" &&
-    Boolean(notionOauthConnection.connectionId);
+  const isNotionAuthValid = validNotionAccounts.length > 0;
 
   const getPreferredLocalAgentId = () => {
     const currentLocalSource =
@@ -146,7 +158,12 @@ export function useDataSourceManagement() {
       validatedAgentId || currentLocalSource?.agentId,
     );
 
-    return selectedAgent?.agent_id || validatedAgentId || currentLocalSource?.agentId || "";
+    return (
+      selectedAgent?.agent_id ||
+      validatedAgentId ||
+      currentLocalSource?.agentId ||
+      ""
+    );
   };
 
   const {
@@ -159,12 +176,27 @@ export function useDataSourceManagement() {
   } = useLocalPathTree({ t, form, getPreferredLocalAgentId });
 
   const getActiveFeishuAuthConnectionId = () => {
-    if (oauthConnection?.connectionId) {
-      return oauthConnection.connectionId;
+    const fromOauth = `${oauthConnection?.connectionId || ""}`.trim();
+    if (fromOauth) {
+      return fromOauth;
     }
     if (wizardMode === "edit" && editingId) {
-      return sources.find((item) => item.id === editingId && item.type === "feishu")
-        ?.authConnectionId || "";
+      const source = sources.find(
+        (item) => item.id === editingId && item.type === "feishu",
+      );
+      const resolved = resolveCloudAuthConnection(
+        null,
+        source?.authConnectionId,
+        feishuAuthAccounts,
+        "feishu",
+      );
+      if (resolved?.connectionId) {
+        return resolved.connectionId;
+      }
+    }
+    // Single valid account: recover browse after state was cleared.
+    if (validFeishuAccounts.length === 1) {
+      return `${validFeishuAccounts[0].connection?.connectionId || ""}`.trim();
     }
     return "";
   };
@@ -176,7 +208,12 @@ export function useDataSourceManagement() {
     handleSearchFeishuTargetOptions,
     handleLoadFeishuTargetChildren,
     resetFeishuTargetBrowseOptions,
-  } = useFeishuTargetTree({ t, feishuTargetType, getActiveFeishuAuthConnectionId });
+    seedFeishuTargetTree,
+  } = useFeishuTargetTree({
+    t,
+    feishuTargetType,
+    getActiveFeishuAuthConnectionId,
+  });
 
   // Build the shared context once per render with all state, setters and refs,
   // then progressively layer the handler factories on top of it.
@@ -218,6 +255,8 @@ export function useDataSourceManagement() {
     setCreateProviderModalOpen,
     authSelectModalOpen,
     setAuthSelectModalOpen,
+    authSelectProvider,
+    setAuthSelectProvider,
     cloudSetupProvider,
     setCloudSetupProvider,
     feishuSetupModalOpen,
@@ -244,6 +283,8 @@ export function useDataSourceManagement() {
     setOauthConnection,
     notionOauthConnection,
     setNotionOauthConnection,
+    notionAuthAccounts,
+    setNotionAuthAccounts,
     feishuAuthAccounts,
     setFeishuAuthAccounts,
     editingFeishuAccountId,
@@ -270,6 +311,7 @@ export function useDataSourceManagement() {
     feishuTargetTreeData,
     resetLocalPathBrowseOptions,
     resetFeishuTargetBrowseOptions,
+    seedFeishuTargetTree,
   });
   Object.assign(ctx, createListActions(ctx));
   Object.assign(ctx, createOAuthEngine(ctx));
@@ -278,28 +320,28 @@ export function useDataSourceManagement() {
   Object.assign(ctx, createSaveActions(ctx));
 
   useEffect(() => {
-    const draft = consumeFeishuDataSourceWizardDraft();
-    if (draft) {
-      const normalizedWizardStep = Math.min(Math.max(draft.wizardStep, 0), 1);
-      if (draft.authSelectModalOpen !== undefined) {
-        setAuthSelectModalOpen(Boolean(draft.authSelectModalOpen));
-      }
-      setWizardMode(draft.wizardMode);
-      setWizardOpen(draft.wizardOpen);
-      setWizardStep(normalizedWizardStep);
-      setSelectedType((draft.selectedType as SourceType | null) || null);
-      setEditingId(draft.editingId);
-      setValidatedAgentId(draft.validatedAgentId || null);
-      setOauthState((draft.oauthState as OAuthState) || "pending");
-      setConnectionVerified(Boolean(draft.connectionVerified));
-      setOauthConnection(draft.oauthConnection || null);
-      window.setTimeout(() => {
-        form.setFieldsValue({
-          fileTypes: DEFAULT_DATA_SOURCE_FILE_TYPES,
-          ...draft.formValues,
-        });
-      }, 0);
-    }
+    bootstrapOAuthSession({
+      form,
+      setAuthSelectModalOpen,
+      setAuthSelectProvider,
+      setWizardMode,
+      setWizardOpen,
+      setWizardStep,
+      setSelectedType,
+      setEditingId,
+      setValidatedAgentId,
+      setOauthState,
+      setConnectionVerified,
+      setOauthConnection,
+      applyOauthResult: (payload, options) => {
+        ctx.applyOauthResult(payload, options);
+      },
+      reopenCloudSetupModal: (type) => {
+        if (type === "feishu" || type === "notion") {
+          ctx.openCloudSetupModal(type, "create");
+        }
+      },
+    });
 
     if (feishuAuthAccounts.length === 0 && feishuAppSetup) {
       const seededAccounts: FeishuAuthAccount[] = [
@@ -318,25 +360,16 @@ export function useDataSourceManagement() {
       persistFeishuAuthAccounts(seededAccounts);
     }
 
-    const storedResult = consumeFeishuDataSourceOAuthResult();
-    if (storedResult) {
-      window.setTimeout(() => {
-        ctx.applyOauthResult(storedResult);
-      }, 0);
-    }
-
-    const storedNotionResult = consumeCloudDataSourceOAuthResult("notion");
-    if (storedNotionResult) {
-      window.setTimeout(() => {
-        ctx.applyOauthResult(storedNotionResult);
-      }, 0);
-    }
-
-    const handleMessage = (event: MessageEvent<FeishuDataSourceOAuthMessage>) => {
+    const handleMessage = (
+      event: MessageEvent<FeishuDataSourceOAuthMessage>,
+    ) => {
       if (event.origin !== window.location.origin) {
         return;
       }
-      if (!event.data || event.data.channel !== FEISHU_DATA_SOURCE_OAUTH_CHANNEL) {
+      if (
+        !event.data ||
+        event.data.channel !== FEISHU_DATA_SOURCE_OAUTH_CHANNEL
+      ) {
         return;
       }
       ctx.applyOauthResult(event.data);
@@ -354,7 +387,7 @@ export function useDataSourceManagement() {
   useEffect(() => {
     void ctx.refreshSources(false);
     void ctx.refreshFeishuAuthAccounts();
-    void ctx.refreshNotionAuthConnection();
+    void ctx.refreshNotionAuthAccounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -388,19 +421,22 @@ export function useDataSourceManagement() {
 
   const requestDeleteSourceConfirm = (record: DataSourceItem) => {
     const isDatabase = record.type === "database";
-    pendingConfirmActionRef.current = () => (
+    pendingConfirmActionRef.current = () =>
       isDatabase
         ? ctx.executeDeleteDatabaseConnection(record)
-        : ctx.executeDeleteSource(record)
-    );
+        : ctx.executeDeleteSource(record);
     confirmRef.current?.onOpen({
       id: record.id,
       title: t(
-        isDatabase ? "admin.dataSourceDatabaseDeleteTitle" : "admin.dataSourceDeleteTitle",
+        isDatabase
+          ? "admin.dataSourceDatabaseDeleteTitle"
+          : "admin.dataSourceDeleteTitle",
         { name: record.name },
       ),
       content: t(
-        isDatabase ? "admin.dataSourceDatabaseDeleteContent" : "admin.dataSourceDeleteContent",
+        isDatabase
+          ? "admin.dataSourceDatabaseDeleteContent"
+          : "admin.dataSourceDeleteContent",
         { name: record.name },
       ),
       confirmText: t(
@@ -439,6 +475,7 @@ export function useDataSourceManagement() {
     setCreateProviderModalOpen,
     authSelectModalOpen,
     setAuthSelectModalOpen,
+    authSelectProvider,
     manualOauthModalOpen,
     setManualOauthModalOpen,
     manualOauthCallbackValue,
@@ -452,7 +489,6 @@ export function useDataSourceManagement() {
     feishuSetupIntent,
     setFeishuSetupIntent,
     feishuSetupSubmitting,
-    oauthConnection,
     notionOauthConnection,
     canCreateLocalSource,
     creatableSourceTypeOptions,
@@ -461,6 +497,7 @@ export function useDataSourceManagement() {
     isFeishuAuthValid,
     isNotionAuthValid,
     validFeishuAccounts,
+    validNotionAccounts,
     localPathOptions,
     localPathLoading,
     loadLocalPathOptions,
@@ -473,10 +510,17 @@ export function useDataSourceManagement() {
     handleSearchFeishuTargetOptions,
     handleLoadFeishuTargetChildren,
     resetFeishuTargetBrowseOptions,
+    seedFeishuTargetTree,
     openSourceCreateWizard: ctx.openSourceCreateWizard,
     handleCreateProviderSelect: ctx.handleCreateProviderSelect,
-    handleOpenFeishuGuideFromAuthSelect: ctx.handleOpenFeishuGuideFromAuthSelect,
+    handleOpenFeishuGuideFromAuthSelect:
+      ctx.handleOpenFeishuGuideFromAuthSelect,
+    handleAddFeishuAuthFromSelect: ctx.handleAddFeishuAuthFromSelect,
+    handleAddNotionAuthFromSelect: ctx.handleAddNotionAuthFromSelect,
     handleSelectFeishuAuthConnection: ctx.handleSelectFeishuAuthConnection,
+    handleSelectNotionAuthConnection: ctx.handleSelectNotionAuthConnection,
+    handleOpenNotionGuideFromAuthSelect:
+      ctx.handleOpenNotionGuideFromAuthSelect,
     handleSubmitManualOauthCallback: ctx.handleSubmitManualOauthCallback,
     handleCloseWizard: ctx.handleCloseWizard,
     handleNextStep: ctx.handleNextStep,
@@ -484,6 +528,8 @@ export function useDataSourceManagement() {
     handleSelectType: ctx.handleSelectType,
     handleResetFeishuSetup: ctx.handleResetFeishuSetup,
     handleResetNotionSetup: ctx.handleResetNotionSetup,
+    handleSaveFeishuSetup: ctx.handleSaveFeishuSetup,
+    handleCancelCloudSetup: ctx.handleCancelCloudSetup,
     openDetailPage: ctx.openDetailPage,
     openDatabaseConnectionConfig: ctx.openDatabaseConnectionConfig,
     closeDatabaseConnectionConfig: ctx.closeDatabaseConnectionConfig,

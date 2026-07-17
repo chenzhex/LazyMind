@@ -29,6 +29,9 @@ func TestRemoteFSDir_CreatesEmptyPackage(t *testing.T) {
 	if err := db.Where("relative_root = ?", "research/new-skill").Take(&skill).Error; err != nil {
 		t.Fatalf("query created skill: %v", err)
 	}
+	if skill.IsEnabled {
+		t.Fatal("remote-fs empty package is_enabled = true, want false")
+	}
 	if got := testutil.CountRows(t, db, "skill_revisions", "skill_id = ?", skill.ID); got != 1 {
 		t.Fatalf("empty head revision count = %d, want 1", got)
 	}

@@ -1,22 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Button,
+  Drawer,
+  Empty,
   Form,
   Input,
   Modal,
+  Segmented,
   Select,
   Space,
+  Spin,
+  Switch,
   Table,
   Tag,
   TimePicker,
-  Tooltip,
   Typography,
   Upload,
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type { UploadFile } from 'antd/es/upload/interface';
-import { PlusOutlined, SearchOutlined, UploadOutlined } from '@ant-design/icons';
+import { AppstoreOutlined, CalendarOutlined, EllipsisOutlined, PlayCircleOutlined, PlusOutlined, SearchOutlined, UnorderedListOutlined, UploadOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
@@ -28,7 +32,7 @@ import { cancelSchedule, createSchedule, enableSchedule, listSchedules, listSche
 import type { Schedule, Task, TaskListResponse } from './api';
 import { KnowledgeBaseServiceApi } from '@/modules/chat/utils/request';
 import { uploadFileInChunks } from '@/modules/chat/utils/chunkUpload';
-import { axiosInstance, BASE_URL } from '@/components/request';
+import { axiosInstance, BASE_URL, localizeErrorCode } from '@/components/request';
 import { CHAT_RESUME_CONVERSATION_KEY } from '@/modules/chat/constants/chat';
 
 /* ── KnowledgeSelect: reusable KB selector with embedding guard ────────── */
@@ -40,10 +44,11 @@ interface KnowledgeSelectProps {
 }
 
 function KnowledgeSelect({ value, onChange, options, embeddingReady }: KnowledgeSelectProps) {
+  const { t } = useTranslation();
   if (embeddingReady === false) {
     return (
       <Typography.Text type='secondary' style={{ fontSize: 12 }}>
-        知识库功能需要配置 Embedding 模型后方可使用
+        {t('taskCenter.kbEmbeddingNotReady')}
       </Typography.Text>
     );
   }
@@ -51,9 +56,9 @@ function KnowledgeSelect({ value, onChange, options, embeddingReady }: Knowledge
   if (options.length === 0 && embeddingReady !== null) {
     return (
       <Typography.Text type='secondary' style={{ fontSize: 12 }}>
-        暂无可用知识库，
+        {t('taskCenter.kbNoAvailable')}
         <Typography.Link href='/lib/knowledge/list' target='_blank'>
-          去创建
+          {t('taskCenter.kbCreateLink')}
         </Typography.Link>
       </Typography.Text>
     );
@@ -63,7 +68,7 @@ function KnowledgeSelect({ value, onChange, options, embeddingReady }: Knowledge
     <Select
       mode='multiple'
       allowClear
-      placeholder={embeddingReady === null ? '加载中…' : '选择知识库'}
+      placeholder={embeddingReady === null ? t('taskCenter.kbLoading') : t('taskCenter.scheduleKbPlaceholder')}
       options={options}
       value={value}
       onChange={onChange}
@@ -78,7 +83,6 @@ function KnowledgeSelect({ value, onChange, options, embeddingReady }: Knowledge
 /* ────────────────────────────────────────────────
    Helper: build cron expression from picker state
 ──────────────────────────────────────────────── */
-const WEEKDAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
 const WEEKDAY_VALUES = [0, 1, 2, 3, 4, 5, 6];
 
 function buildCronExpr(weekdays: number[], time: dayjs.Dayjs): string {
@@ -107,12 +111,15 @@ function capitalize(s: string) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function describeCron(cron: string): string {
+type TFunc = (key: string) => string;
+
+function describeCron(cron: string, t: TFunc): string {
   const { weekdays, time } = parseCronExpr(cron);
   const timeStr = time.format('HH:mm');
-  if (weekdays.length === 0) return `每天 ${timeStr}`;
-  const labels = weekdays.map((d) => `周${WEEKDAY_LABELS[d]}`).join('、');
-  return `${labels} ${timeStr}`;
+  if (weekdays.length === 0) return t('taskCenter.cronDaily').replace('{{time}}', timeStr);
+  const sep = t('taskCenter.weekdaySeparator');
+  const labels = weekdays.map((d) => t(`taskCenter.weekdayFull${d}`)).join(sep);
+  return t('taskCenter.cronWeekdays').replace('{{days}}', labels).replace('{{time}}', timeStr);
 }
 
 /* ────────────────────────────────────────────────
@@ -124,6 +131,7 @@ interface VisualSchedulerProps {
 }
 
 function VisualScheduler({ value, onChange }: VisualSchedulerProps) {
+  const { t } = useTranslation();
   const parsed = value
     ? parseCronExpr(value)
     : { weekdays: [1, 2, 3, 4, 5], time: dayjs().hour(9).minute(0).second(0) };
@@ -153,8 +161,8 @@ function VisualScheduler({ value, onChange }: VisualSchedulerProps) {
   const weekdays = rawWeekdays.length === 0 ? WEEKDAY_VALUES : rawWeekdays;
   const time = value ? parseCronExpr(value).time : localTime;
 
-  const emit = (wd: number[], t: dayjs.Dayjs) => {
-    onChange?.(buildCronExpr(wd, t));
+  const emit = (wd: number[], time: dayjs.Dayjs) => {
+    onChange?.(buildCronExpr(wd, time));
   };
 
   const toggleDay = (day: number) => {
@@ -173,7 +181,7 @@ function VisualScheduler({ value, onChange }: VisualSchedulerProps) {
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-      <span style={{ fontSize: 13, color: '#555' }}>每周</span>
+      <span style={{ fontSize: 13, color: '#555' }}>{t('taskCenter.weekly')}</span>
       {WEEKDAY_VALUES.map((d) => (
         <Button
           key={d}
@@ -182,7 +190,7 @@ function VisualScheduler({ value, onChange }: VisualSchedulerProps) {
           onClick={() => toggleDay(d)}
           style={{ minWidth: 32, borderRadius: 6, padding: '0 6px' }}
         >
-          {WEEKDAY_LABELS[d]}
+          {t(`taskCenter.weekdayShort${d}`)}
         </Button>
       ))}
       <TimePicker
@@ -234,7 +242,7 @@ function ExpandedScheduleTasks({ scheduleId }: { scheduleId: string }) {
 
   const statusOptions = [
     { text: t('taskCenter.statusRunning'), value: 'running' },
-    { text: t('taskCenter.statusCompleted'), value: 'completed' },
+    { text: t('taskCenter.statusCompleted'), value: 'succeeded' },
     { text: t('taskCenter.statusFailed'), value: 'failed' },
     { text: t('taskCenter.statusInterrupted'), value: 'interrupted' },
     { text: t('taskCenter.statusCanceled'), value: 'canceled' },
@@ -265,7 +273,7 @@ function ExpandedScheduleTasks({ scheduleId }: { scheduleId: string }) {
       filteredValue: statusFilter,
       onFilter: (value, record) => record.status === value,
       render: (v: string) => (
-        <Tag color={v === 'completed' ? 'green' : v === 'failed' ? 'red' : 'blue'}>
+        <Tag color={v === 'succeeded' ? 'green' : v === 'failed' ? 'red' : 'blue'}>
           {t(`taskCenter.status${capitalize(v)}`) || v}
         </Tag>
       ),
@@ -276,7 +284,7 @@ function ExpandedScheduleTasks({ scheduleId }: { scheduleId: string }) {
       width: 80,
       render: (steps: Task['steps']) => {
         if (!steps?.length) return '—';
-        const done = steps.filter((s) => s.status === 'completed' || s.status === 'succeeded').length;
+        const done = steps.filter((s) => s.status === 'succeeded').length;
         return `${done}/${steps.length}`;
       },
     },
@@ -310,7 +318,7 @@ function ExpandedScheduleTasks({ scheduleId }: { scheduleId: string }) {
         total,
         onChange: (p) => setPage(p),
         size: 'small',
-        showTotal: (n) => `共 ${n} 次`,
+        showTotal: (n) => t('taskCenter.scheduleRunCountTotal', { total: n }),
       }}
       style={{ margin: '8px 0' }}
     />
@@ -320,7 +328,11 @@ function ExpandedScheduleTasks({ scheduleId }: { scheduleId: string }) {
 /* ────────────────────────────────────────────────
    Main ScheduleList component
 ──────────────────────────────────────────────── */
-export default function ScheduleList() {
+interface ScheduleListProps {
+  active: boolean;
+}
+
+export default function ScheduleList({ active }: ScheduleListProps) {
   const { t } = useTranslation();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(false);
@@ -332,7 +344,8 @@ export default function ScheduleList() {
   const [uploading, setUploading] = useState(false);
   const [kbOptions, setKbOptions] = useState<{ value: string; label: string }[]>([]);
   const [embeddingReady, setEmbeddingReady] = useState<boolean | null>(null);
-  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<'large' | 'compact'>('large');
+  const [selectedSchedule, setSelectedSchedule] = useState<Schedule | null>(null);
   const [scheduleNameInput, setScheduleNameInput] = useState('');
   // Filter state
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('enabled');
@@ -351,13 +364,15 @@ export default function ScheduleList() {
       const resp = await listSchedules(statusFilter === 'all' || statusFilter === 'disabled');
       setSchedules(resp.items ?? []);
     } catch {
-      message.error(t('taskCenter.loadError'));
+      // API errors are reported by the shared request interceptor.
     } finally {
       setLoading(false);
     }
   }, [t, statusFilter]);
 
-  useEffect(() => { void fetchSchedules(); }, [fetchSchedules]);
+  useEffect(() => {
+    if (active) void fetchSchedules();
+  }, [active, fetchSchedules]);
 
   // Client-side filter: status tab + keyword search
   const displaySchedules = schedules.filter((s) => {
@@ -396,29 +411,23 @@ export default function ScheduleList() {
       await cancelSchedule(id);
       message.success(t('taskCenter.cancelSuccess'));
       void fetchSchedules();
-    } catch {
-      message.error(t('taskCenter.cancelError'));
-    }
+    } catch {}
   };
 
   const handleEnable = async (id: string) => {
     try {
       await enableSchedule(id);
-      message.success('已启用');
+      message.success(t('taskCenter.scheduleEnableSuccess'));
       void fetchSchedules();
-    } catch {
-      message.error('启用失败');
-    }
+    } catch {}
   };
 
   const handleRunNow = async (id: string) => {
     try {
       await runScheduleNow(id);
-      message.success('已触发立即执行，任务正在运行中');
+      message.success(t('taskCenter.scheduleRunNowSuccess'));
       void fetchSchedules();
-    } catch {
-      message.error('立即执行失败');
-    }
+    } catch {}
   };
 
   const handleOpenEdit = (record: Schedule) => {
@@ -451,7 +460,7 @@ export default function ScheduleList() {
       };
       if (editTarget) {
         await updateSchedule(editTarget.id, payload);
-        message.success('修改成功');
+        message.success(t('taskCenter.scheduleUpdateSuccess'));
       } else {
         await createSchedule(payload);
         message.success(t('taskCenter.createSuccess'));
@@ -463,11 +472,8 @@ export default function ScheduleList() {
       setFileList([]);
       setUploadedPaths([]);
       void fetchSchedules();
-    } catch (err: unknown) {
-      const isValidation = err != null && typeof err === 'object' && 'errorFields' in err;
-      if (!isValidation) {
-        message.error(editTarget ? '修改失败' : t('taskCenter.createError'));
-      }
+    } catch {
+      // Form validation stays local; API errors use the shared interceptor.
     } finally {
       setSubmitting(false);
     }
@@ -484,103 +490,15 @@ export default function ScheduleList() {
     setModalOpen(true);
   };
 
-  const columns: ColumnsType<Schedule> = [
-    {
-      title: t('taskCenter.scheduleName'),
-      dataIndex: 'name',
-      render: (v: string, record: Schedule) => {
-        const display = v || record.prompt_template?.slice(0, 20) + (record.prompt_template?.length > 20 ? '…' : '');
-        return record.remark ? (
-          <Tooltip title={record.remark}>
-            <span style={{ borderBottom: '1px dashed #aaa', cursor: 'help' }}>{display}</span>
-          </Tooltip>
-        ) : display;
-      },
-    },
-    {
-      title: t('taskCenter.scheduleDescription'),
-      dataIndex: 'prompt_template',
-      ellipsis: true,
-      render: (v: string) => (
-        <Tooltip title={v}>
-          <span>{v?.length > 30 ? `${v.slice(0, 30)}…` : v}</span>
-        </Tooltip>
-      ),
-    },
-    {
-      title: t('taskCenter.scheduleAttachments'),
-      dataIndex: 'file_ids',
-      width: 60,
-      render: (v: string[]) => (v?.length ? `${v.length}` : '—'),
-    },
-    {
-      title: t('taskCenter.scheduleTriggerPeriod'),
-      dataIndex: 'cron_expr',
-      width: 180,
-      render: (v: string) => describeCron(v),
-    },
-    {
-      title: '已执行次数',
-      dataIndex: 'run_count',
-      width: 100,
-      render: (v: number, record: Schedule) => (
-        <Button
-          type='link'
-          size='small'
-          style={{ padding: 0 }}
-          onClick={() => {
-            setExpandedKeys((prev) =>
-              prev.includes(record.id) ? prev.filter((k) => k !== record.id) : [...prev, record.id],
-            );
-          }}
-        >
-          {v ?? 0}
-        </Button>
-      ),
-    },
-    {
-      title: t('taskCenter.nextRunAt'),
-      dataIndex: 'next_run_at',
-      width: 160,
-      render: (v: string) => (v ? dayjs(v).format('YYYY/MM/DD HH:mm:ss') : '—'),
-    },
-    {
-      title: t('taskCenter.enabled'),
-      dataIndex: 'enabled',
-      width: 70,
-      render: (v: boolean) =>
-        v ? <Tag color='green'>On</Tag> : <Tag color='default'>Off</Tag>,
-    },
-    {
-      title: '',
-      key: 'actions',
-      width: 180,
-      render: (_: unknown, record: Schedule) => (
-        <Space size={4}>
-          <Button size='small' onClick={() => handleOpenEdit(record)}>编辑</Button>
-          <Button size='small' onClick={() => handleRunNow(record.id)}>立即执行</Button>
-          {record.enabled
-            ? <Button size='small' onClick={() => handleDisable(record.id)}>{t('taskCenter.cancelSchedule')}</Button>
-            : <Button size='small' type='primary' onClick={() => handleEnable(record.id)}>启用</Button>
-          }
-        </Space>
-      ),
-    },
-  ];
-
   return (
-    <div>
-      <Space style={{ marginBottom: 12, flexWrap: 'wrap' }} size={[8, 8]}>
-        <Button type='primary' icon={<PlusOutlined />} onClick={handleOpenModal}>
-          {t('taskCenter.newSchedule')}
-        </Button>
+    <div className='schedule-plans'>
+      <div className='schedule-toolbar'>
         <Input
           prefix={<SearchOutlined style={{ color: '#bbb' }} />}
-          placeholder='搜索任务名称或描述'
+          placeholder={t('taskCenter.scheduleSearchPlaceholder')}
           allowClear
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
-          style={{ width: 220 }}
         />
         <Space.Compact>
           {(['enabled', 'all', 'disabled'] as const).map((v) => (
@@ -590,31 +508,56 @@ export default function ScheduleList() {
               type={statusFilter === v ? 'primary' : 'default'}
               onClick={() => setStatusFilter(v)}
             >
-              {v === 'enabled' ? '启用中' : v === 'disabled' ? '已停用' : '全部'}
+              {v === 'enabled' ? t('taskCenter.scheduleStatusEnabled') : v === 'disabled' ? t('taskCenter.scheduleStatusDisabled') : t('taskCenter.scheduleStatusAll')}
             </Button>
           ))}
         </Space.Compact>
-      </Space>
-      <Table<Schedule>
-        rowKey='id'
-        loading={loading}
-        dataSource={displaySchedules}
-        columns={columns}
-        pagination={false}
-        expandable={{
-          expandedRowKeys: expandedKeys,
-          onExpandedRowsChange: (keys) => setExpandedKeys(keys as string[]),
-          expandedRowRender: (record) => <ExpandedScheduleTasks scheduleId={record.id} />,
-          rowExpandable: (record) => (record.run_count ?? 0) > 0,
-          showExpandColumn: false,
-        }}
-      />
+        <div className='schedule-toolbar-spacer' />
+        <Segmented value={viewMode} onChange={(value) => setViewMode(value as 'large' | 'compact')} options={[
+          { value: 'large', label: t('taskCenter.largeCards'), icon: <UnorderedListOutlined /> },
+          { value: 'compact', label: t('taskCenter.smallCards'), icon: <AppstoreOutlined /> },
+        ]} />
+        <Button type='primary' icon={<PlusOutlined />} onClick={handleOpenModal}>{t('taskCenter.newSchedule')}</Button>
+      </div>
+      <Spin spinning={loading}>
+        {displaySchedules.length ? (
+          <div className={`schedule-grid ${viewMode}`}>
+            {displaySchedules.map((schedule) => (
+              <article className='schedule-card' key={schedule.id} onClick={() => setSelectedSchedule(schedule)}>
+                <div className='schedule-card-identity'>
+                  <span className='schedule-icon'><CalendarOutlined /></span>
+                  <div><h3>{schedule.name || schedule.prompt_template.slice(0, 24)}</h3><p>{schedule.prompt_template}</p></div>
+                </div>
+                <div className='schedule-card-timing'>
+                  <strong><CalendarOutlined /> {describeCron(schedule.cron_expr, t)}</strong>
+                  <span>{t('taskCenter.nextRunAt')}：{schedule.next_run_at ? dayjs(schedule.next_run_at).format('YYYY/MM/DD HH:mm') : '—'}</span>
+                  {viewMode === 'large' && <span>{t('taskCenter.lastRun')}：{schedule.last_run_at ? dayjs(schedule.last_run_at).format('YYYY/MM/DD HH:mm') : '—'}</span>}
+                </div>
+                <div className='schedule-card-actions' onClick={(event) => event.stopPropagation()}>
+                  <label><Switch size='small' checked={schedule.enabled} onChange={(checked) => void (checked ? handleEnable(schedule.id) : handleDisable(schedule.id))} /> {schedule.enabled ? t('taskCenter.scheduleStatusEnabled') : t('taskCenter.scheduleStatusDisabled')}</label>
+                  <span>{t('taskCenter.scheduleRunTotal', { total: schedule.run_count ?? 0 })}</span>
+                  <div><Button type={viewMode === 'large' ? 'primary' : 'default'} icon={<PlayCircleOutlined />} onClick={() => void handleRunNow(schedule.id)}>{viewMode === 'large' ? t('taskCenter.scheduleRunNow') : null}</Button><Button icon={<EllipsisOutlined />} onClick={() => handleOpenEdit(schedule)} /></div>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : <Empty description={t('taskCenter.empty')} />}
+      </Spin>
+      <Drawer className='schedule-detail-drawer' width={460} open={Boolean(selectedSchedule)} onClose={() => setSelectedSchedule(null)} title={selectedSchedule?.name || t('taskCenter.scheduleName')} footer={selectedSchedule ? <Button type='primary' block size='large' onClick={() => handleOpenEdit(selectedSchedule)}>{t('taskCenter.scheduleEdit')}</Button> : null}>
+        {selectedSchedule && <div className='schedule-detail-content'>
+          <section><h3>{t('taskCenter.scheduleDescription')}</h3><p>{selectedSchedule.prompt_template}</p></section>
+          <section><h3>{t('taskCenter.scheduleTriggerPeriod')}</h3><p>{describeCron(selectedSchedule.cron_expr, t)} · {selectedSchedule.timezone}</p></section>
+          <section><h3>{t('taskCenter.nextRunAt')}</h3><p>{selectedSchedule.next_run_at ? dayjs(selectedSchedule.next_run_at).format('YYYY/MM/DD HH:mm:ss') : '—'}</p></section>
+          <section><h3>{t('taskCenter.lastRun')}</h3><p>{selectedSchedule.last_run_at ? dayjs(selectedSchedule.last_run_at).format('YYYY/MM/DD HH:mm:ss') : '—'}</p></section>
+          <section><h3>{t('taskCenter.scheduleTaskCount')}</h3><ExpandedScheduleTasks scheduleId={selectedSchedule.id} /></section>
+        </div>}
+      </Drawer>
       <Modal
         title={
           <Input
             value={scheduleNameInput}
             onChange={(e) => setScheduleNameInput(e.target.value)}
-            placeholder={editTarget ? '任务名称' : '新定时任务'}
+            placeholder={editTarget ? t('taskCenter.scheduleNameInputLabel') : t('taskCenter.scheduleNewTitle')}
             variant='borderless'
             style={{ fontWeight: 600, fontSize: 16, padding: 0, width: '100%' }}
             maxLength={100}
@@ -630,18 +573,18 @@ export default function ScheduleList() {
           setFileList([]);
           setUploadedPaths([]);
         }}
-        okText={editTarget ? '保存' : '创建'}
+        okText={editTarget ? t('taskCenter.scheduleSaveBtn') : t('taskCenter.scheduleCreateBtn')}
         confirmLoading={submitting || uploading}
         width={600}
       >
         <Form key={modalKey} form={form} layout='vertical' size='small'>
-          <Form.Item name='prompt_template' label='任务描述' rules={[{ required: true, message: '请输入任务描述' }]}>
-            <Input.TextArea rows={3} placeholder='描述你希望系统定期执行的任务' />
+          <Form.Item name='prompt_template' label={t('taskCenter.scheduleDescription')} rules={[{ required: true, message: t('taskCenter.scheduleDescriptionRequired') }]}>
+            <Input.TextArea rows={3} placeholder={t('taskCenter.scheduleDescriptionPlaceholder')} />
           </Form.Item>
-          <Form.Item name='remark' label='备注（选填）'>
-            <Input placeholder='内部备注，不影响执行' />
+          <Form.Item name='remark' label={t('taskCenter.scheduleRemarkOptional')}>
+            <Input placeholder={t('taskCenter.scheduleRemarkPlaceholder')} />
           </Form.Item>
-          <Form.Item label='附件（最多3个）'>
+          <Form.Item label={t('taskCenter.scheduleAttachmentsLabel')}>
             <Upload
               fileList={fileList}
               maxCount={3}
@@ -657,7 +600,9 @@ export default function ScheduleList() {
                   setUploadedPaths((prev) => [...prev, path]);
                   onSuccess?.(path);
                 } catch (err) {
-                  message.error('附件上传失败');
+                  if (!(err as { isAxiosError?: boolean })?.isAxiosError) {
+                    message.error(localizeErrorCode('2000509'));
+                  }
                   onError?.(err as Error);
                 } finally {
                   setUploading(false);
@@ -675,12 +620,12 @@ export default function ScheduleList() {
                 }
               }}
             >
-              <Button size='small' icon={<UploadOutlined />}>上传文件</Button>
+              <Button size='small' icon={<UploadOutlined />}>{t('taskCenter.scheduleUploadFileBtn')}</Button>
             </Upload>
           </Form.Item>
           <Form.Item
             name='kb_ids'
-            label='知识库（选填）'
+            label={t('taskCenter.scheduleKbOptional')}
             valuePropName='value'
           >
             <KnowledgeSelect
@@ -688,7 +633,7 @@ export default function ScheduleList() {
               embeddingReady={embeddingReady}
             />
           </Form.Item>
-          <Form.Item name='cron_expr' label='执行时间' rules={[{ required: true }]}>
+          <Form.Item name='cron_expr' label={t('taskCenter.scheduleExecutionTime')} rules={[{ required: true }]}>
             <VisualScheduler />
           </Form.Item>
         </Form>

@@ -62,7 +62,6 @@ func UpdateTaskStatus(ctx context.Context, db *gorm.DB, id, status string) error
 
 // UpdateTaskStatusBySession updates the TaskCenter record whose plugin_session_id matches.
 // Used by the plugin EventLoop to sync task status when a session completes or fails.
-// Terminal status is unified as "completed" (not "succeeded").
 func UpdateTaskStatusBySession(ctx context.Context, db *gorm.DB, sessionID, status string) error {
 	updates := map[string]any{
 		"status":     status,
@@ -73,7 +72,7 @@ func UpdateTaskStatusBySession(ctx context.Context, db *gorm.DB, sessionID, stat
 		updates["finished_at"] = now
 	}
 	return db.WithContext(ctx).Model(&orm.TaskCenterTask{}).
-		Where("plugin_session_id = ? AND status NOT IN ('completed','failed','canceled')", sessionID).
+		Where("plugin_session_id = ? AND status NOT IN ('succeeded','failed','canceled')", sessionID).
 		Updates(updates).Error
 }
 
@@ -90,7 +89,7 @@ func CancelTask(ctx context.Context, db *gorm.DB, userID, id string) error {
 
 func isTerminal(status string) bool {
 	switch status {
-	case "completed", "succeeded", "failed", "canceled":
+	case "succeeded", "failed", "canceled":
 		return true
 	}
 	return false
@@ -235,7 +234,7 @@ func loadStepsForConversation(ctx context.Context, db *gorm.DB, convID string) [
 //
 //  1. Plugin task (plugin_session_id set): derive from plugin_sessions.status.
 //  2. No plugin: check whether chat_histories has a row for this conversation.
-//     - Row exists  → SSE finished and was persisted → "completed".
+//     - Row exists  → SSE finished and was persisted → "succeeded".
 //     - No row, task is older than 2 h → timed out with no output → "failed".
 //     - No row, task is recent → still running → keep "running".
 func resolveTaskStatus(ctx context.Context, db *gorm.DB, t orm.TaskCenterTask) string {
@@ -257,7 +256,7 @@ func resolveTaskStatus(ctx context.Context, db *gorm.DB, t orm.TaskCenterTask) s
 			case "waiting":
 				return "waiting"
 			case "completed":
-				return "completed"
+				return "succeeded"
 			case "failed":
 				return "failed"
 			}
@@ -275,7 +274,7 @@ func resolveTaskStatus(ctx context.Context, db *gorm.DB, t orm.TaskCenterTask) s
 		Where("conversation_id = ?", t.ConversationID).
 		Count(&histCount)
 	if histCount > 0 {
-		return "completed"
+		return "succeeded"
 	}
 	if time.Since(t.CreatedAt) > 2*time.Hour {
 		return "failed"
@@ -313,43 +312,11 @@ func ListTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	offset := (page - 1) * pageSize
 
-	query := db.WithContext(r.Context()).Where("tct.user_id = ? AND tct.archived_at IS NULL", userID)
-	if status != "" {
-		query = query.Where("tct.status = ?", status)
-	}
-	if taskType != "" {
-		query = query.Where("tct.task_type = ?", taskType)
-	}
-	if keyword != "" {
-		like := "%" + keyword + "%"
-		query = query.Where("tct.title LIKE ? OR c.display_name LIKE ?", like, like)
-	}
-
 	type rawRow struct {
 		orm.TaskCenterTask
 		ConvDisplayName string  `gorm:"column:conv_display_name"`
 		ScheduleName    *string `gorm:"column:schedule_name"`
 	}
-
-	var total int64
-	countQ := db.WithContext(r.Context()).
-		Table("task_center_tasks tct").
-		Joins("LEFT JOIN conversations c ON c.id = tct.conversation_id").
-		Joins("LEFT JOIN user_schedules us ON us.id = tct.schedule_id").
-		Joins("LEFT JOIN plugin_sessions ps ON ps.id = tct.plugin_session_id").
-		Where("tct.user_id = ? AND tct.archived_at IS NULL", userID).
-		Where("tct.plugin_session_id IS NULL OR ps.dismissed = false")
-	if status != "" {
-		countQ = countQ.Where("tct.status = ?", status)
-	}
-	if taskType != "" {
-		countQ = countQ.Where("tct.task_type = ?", taskType)
-	}
-	if keyword != "" {
-		like := "%" + keyword + "%"
-		countQ = countQ.Where("tct.title LIKE ? OR c.display_name LIKE ?", like, like)
-	}
-	_ = countQ.Count(&total)
 
 	var rows []rawRow
 	dataQ := db.WithContext(r.Context()).
@@ -360,9 +327,6 @@ func ListTasks(w http.ResponseWriter, r *http.Request) {
 		Joins("LEFT JOIN plugin_sessions ps ON ps.id = tct.plugin_session_id").
 		Where("tct.user_id = ? AND tct.archived_at IS NULL", userID).
 		Where("tct.plugin_session_id IS NULL OR ps.dismissed = false")
-	if status != "" {
-		dataQ = dataQ.Where("tct.status = ?", status)
-	}
 	if taskType != "" {
 		dataQ = dataQ.Where("tct.task_type = ?", taskType)
 	}
@@ -370,30 +334,64 @@ func ListTasks(w http.ResponseWriter, r *http.Request) {
 		like := "%" + keyword + "%"
 		dataQ = dataQ.Where("tct.title LIKE ? OR c.display_name LIKE ?", like, like)
 	}
-	if err := dataQ.Order("tct.created_at DESC").Offset(offset).Limit(pageSize).Find(&rows).Error; err != nil {
+	// Status must be resolved from live plugin/chat state before filtering. The
+	// stored task_center_tasks.status can lag behind and would otherwise exclude
+	// ordinary completed tasks or put waiting plugin tasks under "running".
+	if err := dataQ.Order("tct.created_at DESC").Find(&rows).Error; err != nil {
 		common.ReplyErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	items := make([]taskResponse, 0, len(rows))
+	type resolvedRow struct {
+		row  rawRow
+		task orm.TaskCenterTask
+	}
+	resolved := make([]resolvedRow, 0, len(rows))
+	statusCounts := map[string]int{
+		"all":       0,
+		"waiting":   0,
+		"running":   0,
+		"succeeded": 0,
+		"failed":    0,
+	}
 	for _, row := range rows {
 		t := row.TaskCenterTask
-		effectiveStatus := resolveTaskStatus(r.Context(), db, t)
-		t.Status = effectiveStatus
+		t.Status = resolveTaskStatus(r.Context(), db, t)
+		statusCounts["all"]++
+		if _, tracked := statusCounts[t.Status]; tracked {
+			statusCounts[t.Status]++
+		}
+		if status != "" && t.Status != status {
+			continue
+		}
+		resolved = append(resolved, resolvedRow{row: row, task: t})
+	}
+	total := len(resolved)
+	if offset > total {
+		offset = total
+	}
+	end := offset + pageSize
+	if end > total {
+		end = total
+	}
 
+	items := make([]taskResponse, 0, end-offset)
+	for _, resolvedItem := range resolved[offset:end] {
+		t := resolvedItem.task
 		var steps []stepInfo
 		if t.PluginSessionID != nil && *t.PluginSessionID != "" {
 			steps = loadStepsForPluginSession(r.Context(), db, *t.PluginSessionID)
 		} else {
 			steps = loadStepsForConversation(r.Context(), db, t.ConversationID)
 		}
-		items = append(items, toResponse(t, row.ConvDisplayName, row.ScheduleName, steps))
+		items = append(items, toResponse(t, resolvedItem.row.ConvDisplayName, resolvedItem.row.ScheduleName, steps))
 	}
 	common.ReplyJSON(w, map[string]any{
-		"items":     items,
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
+		"items":         items,
+		"total":         total,
+		"page":          page,
+		"page_size":     pageSize,
+		"status_counts": statusCounts,
 	})
 }
 

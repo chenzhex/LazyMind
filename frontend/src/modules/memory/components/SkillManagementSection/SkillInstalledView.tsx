@@ -1,4 +1,5 @@
 import { Button, Empty, Input, Select, Table } from "antd";
+import { ApartmentOutlined } from "@ant-design/icons";
 import { getLocalizedTablePagination } from "@/components/ui/pagination";
 import type { ColumnsType } from "antd/es/table";
 import type { SkillTreeNode, StructuredAsset } from "../../shared";
@@ -18,6 +19,15 @@ interface SkillInstalledViewProps {
   source: "all" | "builtin" | "admin" | "personal";
   onSourceChange: (value: "all" | "builtin" | "admin" | "personal") => void;
   onReset: () => void;
+  organizeMode: boolean;
+  organizeLoading: boolean;
+  selectedOrganizeSkillIds: string[];
+  onOrganizeSelectionChange: (
+    records: StructuredAsset[],
+    selected: boolean,
+  ) => void;
+  onOrganizeCancel: () => void;
+  onOrganizeSubmit: () => void;
   columns: ColumnsType<StructuredAsset>;
   page: number;
   pageSize: number;
@@ -32,7 +42,6 @@ const defaultPageSizeOptions = [6, 12, 20, 50];
 export default function SkillInstalledView({
   t,
   loading,
-  skillAssets,
   dataSource,
   searchInput,
   onSearchInputChange,
@@ -44,6 +53,12 @@ export default function SkillInstalledView({
   source,
   onSourceChange,
   onReset,
+  organizeMode,
+  organizeLoading,
+  selectedOrganizeSkillIds,
+  onOrganizeSelectionChange,
+  onOrganizeCancel,
+  onOrganizeSubmit,
   columns,
   page,
   pageSize,
@@ -74,7 +89,7 @@ export default function SkillInstalledView({
           value={searchInput}
           onChange={(event) => onSearchInputChange(event.target.value)}
           onSearch={onSearch}
-          placeholder={t("admin.memorySearchPlaceholder")}
+          placeholder={t("admin.memorySkillSearchPlaceholder")}
           className="memory-skill-installed-search"
         />
         <Select
@@ -100,8 +115,46 @@ export default function SkillInstalledView({
           ]}
           onChange={onSourceChange}
         />
-        <Button onClick={onReset}>{t("admin.memoryReset")}</Button>
+        <Button type="default" className="memory-skill-reset-button" onClick={onReset}>
+          {t("admin.memoryReset")}
+        </Button>
       </div>
+
+      {organizeMode ? (
+        <div
+          className="memory-skill-organize-bar"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="memory-skill-organize-bar__summary">
+            <span className="memory-skill-organize-bar__icon" aria-hidden="true">
+              <ApartmentOutlined />
+            </span>
+            <span className="memory-skill-organize-bar__copy">
+              <strong>
+                {t("admin.memorySkillOrganizeSelected", {
+                  count: selectedOrganizeSkillIds.length,
+                })}
+              </strong>
+              <span>{t("admin.memorySkillOrganizeLimit")}</span>
+            </span>
+          </div>
+          <div className="memory-skill-organize-bar__actions">
+            <Button onClick={onOrganizeCancel} disabled={organizeLoading}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              type="primary"
+              icon={<ApartmentOutlined />}
+              loading={organizeLoading}
+              disabled={selectedOrganizeSkillIds.length === 0}
+              onClick={onOrganizeSubmit}
+            >
+              {t("admin.memorySkillOrganizeSubmit")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="memory-list-content" ref={listContentRef}>
         <Table<StructuredAsset>
@@ -110,11 +163,31 @@ export default function SkillInstalledView({
           loading={loading}
           dataSource={dataSource}
           columns={columns}
-          expandable={{
-            defaultExpandAllRows: true,
-            rowExpandable: (record) =>
-              skillAssets.some((item) => item.parentId === record.id),
-          }}
+          rowSelection={
+            organizeMode
+              ? {
+                  selectedRowKeys: selectedOrganizeSkillIds,
+                  preserveSelectedRowKeys: true,
+                  columnWidth: 48,
+                  onSelect: (record: StructuredAsset, selected: boolean) =>
+                    onOrganizeSelectionChange([record], selected),
+                  onSelectAll: (
+                    selected: boolean,
+                    _selectedRows: StructuredAsset[],
+                    changedRows: StructuredAsset[],
+                  ) =>
+                    onOrganizeSelectionChange(changedRows, selected),
+                  getCheckboxProps: (record: StructuredAsset) => ({
+                    disabled:
+                      selectedOrganizeSkillIds.length >= 20 &&
+                      !selectedOrganizeSkillIds.includes(record.id),
+                    "aria-label": t("admin.memorySkillOrganizeSelectRow", {
+                      name: record.name,
+                    }),
+                  }),
+                }
+              : undefined
+          }
           pagination={pagination}
           locale={{
             emptyText: (

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -43,7 +42,7 @@ func (m *CoreServiceManager) Run(ctx context.Context, cfg RuntimeConfig, paths R
 			return err
 		}
 	}
-	if err := m.buildCore(ctx, paths); err != nil {
+	if err := m.buildCore(ctx, cfg, paths); err != nil {
 		return err
 	}
 	if err := m.waitForCoreDatabase(ctx, cfg, paths); err != nil {
@@ -55,11 +54,17 @@ func (m *CoreServiceManager) Run(ctx context.Context, cfg RuntimeConfig, paths R
 	cmd.Env = append(os.Environ(), coreServiceEnv(cfg, paths)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	configureChildProcess(cmd, false)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start core failed: %w", err)
 	}
+	releaseJob, err := attachManagedProcess(paths, coreProcessName, cmd.Process)
+	if err != nil {
+		_ = forceKillProcessTree(cmd.Process.Pid)
+		return fmt.Errorf("attach core process containment failed: %w", err)
+	}
+	defer releaseJob()
 	if err := os.WriteFile(paths.CorePIDFile, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o600); err != nil {
 		_ = cmd.Process.Kill()
 		return err
@@ -78,7 +83,7 @@ func (m *CoreServiceManager) Run(ctx context.Context, cfg RuntimeConfig, paths R
 		return err
 	}
 
-	err := <-waitErr
+	err = <-waitErr
 	_ = os.Remove(paths.CorePIDFile)
 	unregisterLocalProcess(paths, coreProcessName, cmd.Process.Pid)
 	if ctx.Err() != nil {
@@ -90,7 +95,13 @@ func (m *CoreServiceManager) Run(ctx context.Context, cfg RuntimeConfig, paths R
 	return nil
 }
 
-func (m *CoreServiceManager) buildCore(ctx context.Context, paths RuntimePaths) error {
+func (m *CoreServiceManager) buildCore(ctx context.Context, cfg RuntimeConfig, paths RuntimePaths) error {
+	if cfg.Profile == "desktop" {
+		if info, err := os.Stat(paths.CoreBin); err == nil && !info.IsDir() {
+			return nil
+		}
+		return fmt.Errorf("desktop core binary not found: %s", paths.CoreBin)
+	}
 	if err := os.MkdirAll(filepath.Dir(paths.CoreBin), 0o755); err != nil {
 		return err
 	}
@@ -131,9 +142,8 @@ func (m *CoreServiceManager) Down(ctx context.Context, cfg RuntimeConfig, paths 
 		_ = os.Remove(paths.CorePIDFile)
 		return nil
 	}
-	if err := proc.Signal(os.Interrupt); err != nil {
-		_ = proc.Kill()
-	}
+	_ = proc
+	_ = interruptProcess(pid)
 
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
@@ -142,10 +152,10 @@ func (m *CoreServiceManager) Down(ctx context.Context, cfg RuntimeConfig, paths 
 	for {
 		select {
 		case <-ctx.Done():
-			_ = proc.Kill()
+			_ = forceStopManagedProcess(paths, coreProcessName, pid)
 			return ctx.Err()
 		case <-deadline.C:
-			_ = proc.Kill()
+			_ = forceStopManagedProcess(paths, coreProcessName, pid)
 			_ = os.Remove(paths.CorePIDFile)
 			return nil
 		case <-ticker.C:

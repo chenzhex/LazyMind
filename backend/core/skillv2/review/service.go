@@ -17,6 +17,7 @@ import (
 	skilldiff "lazymind/core/skillv2/diff"
 	skillsearch "lazymind/core/skillv2/search"
 	skillservice "lazymind/core/skillv2/service"
+	"lazymind/core/versionfs"
 )
 
 const (
@@ -129,6 +130,7 @@ func (s *Service) PrepareFile(ctx context.Context, req PrepareFileRequest) (skil
 	}
 	file := req.File
 	s.annotateFile(&file, session, decisions, canUndo)
+	file.DiffEntryLines = reviewDisplayDiffEntryLines(file.DiffEntryLines)
 	return file, nil
 }
 
@@ -186,7 +188,7 @@ func (s *Service) Action(ctx context.Context, req ActionRequest) (ActionResponse
 			if !known[path][hunkID] {
 				return fmt.Errorf("unknown hunk_id")
 			}
-			before := decisions[decisionKey(path, hunkID)]
+			before := decisions[versionfs.DecisionKey(path, hunkID)]
 			if before == "" {
 				before = decisionPending
 			}
@@ -200,7 +202,7 @@ func (s *Service) Action(ctx context.Context, req ActionRequest) (ActionResponse
 				AfterDecision:   decision,
 				CreatedAt:       now,
 			})
-			decisions[decisionKey(path, hunkID)] = decision
+			decisions[versionfs.DecisionKey(path, hunkID)] = decision
 		}
 		if err := tx.Create(&rows).Error; err != nil {
 			return err
@@ -315,58 +317,22 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (CommitResponse
 		if err != nil {
 			return err
 		}
-		nextNo, err := nextRevisionNo(tx, req.SkillID)
+		commit, err := versionfs.NewEngine(versionfs.EngineDeps{DB: s.db, Store: reviewVersionStore{service: s}, Clock: s.clock}).CommitEntriesTx(ctx, tx, versionfs.CommitEntriesRequest{
+			ResourceID:             req.SkillID,
+			UserID:                 req.UserID,
+			ParentRevisionID:       session.BaseRevisionID,
+			ExpectedHeadRevisionID: session.BaseRevisionID,
+			ExpectedDraftVersion:   session.DraftVersionAtStart,
+			ChangeSource:           "draft_review",
+			Entries:                toVersionEntries(finalEntries),
+		})
 		if err != nil {
-			return err
-		}
-		revisionID := uuid.NewString()
-		now := s.clock.Now()
-		if err := tx.Create(&skillRevisionRow{
-			ID:               revisionID,
-			SkillID:          req.SkillID,
-			ParentRevisionID: &session.BaseRevisionID,
-			RevisionNo:       nextNo,
-			TreeHash:         hashTree(finalEntries),
-			ChangeSource:     "draft_review",
-			CreatedBy:        nullableString(req.UserID),
-			CreatedAt:        now,
-		}).Error; err != nil {
-			return err
-		}
-		if err := createRevisionEntries(tx, revisionID, finalEntries); err != nil {
-			return err
-		}
-		if err := tx.Model(&skillRow{}).Where("id = ?", req.SkillID).Updates(map[string]any{
-			"head_revision_id": revisionID,
-			"version":          gorm.Expr("version + 1"),
-			"updated_at":       now,
-		}).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("skill_id = ?", req.SkillID).Delete(&skillDraftEntryRow{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&skillDraftRow{}).Where("skill_id = ?", req.SkillID).Updates(map[string]any{
-			"base_revision_id": revisionID,
-			"task_id":          "",
-			"conversation_id":  nil,
-			"updated_by":       nullableString(req.UserID),
-			"version":          gorm.Expr("version + 1"),
-			"draft_updated_at": nil,
-			"updated_at":       now,
-		}).Error; err != nil {
 			return err
 		}
 		if err := deleteReviewSession(ctx, tx, session.ID); err != nil {
 			return err
 		}
-		if err := cleanupUnreferencedBlobs(ctx, tx, s.blobStore); err != nil {
-			return err
-		}
-		if err := skillsearch.RebuildSkillTx(ctx, tx, req.SkillID, now); err != nil {
-			return err
-		}
-		out = CommitResponse{RevisionID: revisionID, RevisionNo: nextNo}
+		out = CommitResponse{RevisionID: commit.RevisionID, RevisionNo: commit.RevisionNo}
 		return nil
 	})
 	return out, err
@@ -374,6 +340,174 @@ func (s *Service) Commit(ctx context.Context, req CommitRequest) (CommitResponse
 
 func MarkSkillReviews(ctx context.Context, tx *gorm.DB, skillID, status, userID string, now time.Time) error {
 	return markSkillReviews(ctx, tx, skillID, status, userID, now)
+}
+
+type reviewVersionStore struct {
+	service *Service
+}
+
+func (s reviewVersionStore) LoadHead(ctx context.Context, tx *gorm.DB, skillID string) (versionfs.HeadState, error) {
+	var skill skillRow
+	if err := tx.WithContext(ctx).Where("id = ?", skillID).Take(&skill).Error; err != nil {
+		return versionfs.HeadState{}, err
+	}
+	return versionfs.HeadState{RevisionID: valueOrEmpty(skill.HeadRevisionID)}, nil
+}
+
+func (s reviewVersionStore) LoadDraft(ctx context.Context, tx *gorm.DB, skillID string) (versionfs.DraftState, error) {
+	var draft skillDraftRow
+	if err := tx.WithContext(ctx).Where("skill_id = ?", skillID).Take(&draft).Error; err != nil {
+		return versionfs.DraftState{}, err
+	}
+	return versionfs.DraftState{BaseRevisionID: valueOrEmpty(draft.BaseRevisionID), Version: draft.Version}, nil
+}
+
+func (s reviewVersionStore) HasDraftChanges(ctx context.Context, tx *gorm.DB, skillID string, draft versionfs.DraftState) (bool, error) {
+	var count int64
+	if err := tx.WithContext(ctx).Model(&skillDraftEntryRow{}).Where("skill_id = ?", skillID).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s reviewVersionStore) ClaimDraft(ctx context.Context, tx *gorm.DB, skillID string, draft versionfs.DraftState, userID string, now time.Time) (versionfs.DraftState, error) {
+	updates := map[string]any{
+		"version":          gorm.Expr("version + 1"),
+		"updated_at":       now,
+		"draft_updated_at": now,
+	}
+	if userID != "" {
+		updates["updated_by"] = nullableString(userID)
+	}
+	result := tx.WithContext(ctx).Model(&skillDraftRow{}).Where("skill_id = ? AND version = ?", skillID, draft.Version).Updates(updates)
+	if result.Error != nil {
+		return versionfs.DraftState{}, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return versionfs.DraftState{}, versionfs.ErrStaleDraftVersion
+	}
+	draft.Version++
+	return draft, nil
+}
+
+func (s reviewVersionStore) DraftEntries(ctx context.Context, tx *gorm.DB, skillID string, baseRevisionID string) (map[string]versionfs.Entry, error) {
+	entries, err := mergedEntriesForDraft(ctx, tx, skillID, baseRevisionID)
+	if err != nil {
+		return nil, err
+	}
+	return toVersionEntries(entries), nil
+}
+
+func (s reviewVersionStore) RevisionEntries(ctx context.Context, tx *gorm.DB, skillID string, revisionID string) (map[string]versionfs.Entry, error) {
+	entries, err := entriesForRevision(ctx, tx, skillID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	return toVersionEntries(entries), nil
+}
+
+func (s reviewVersionStore) EnsureBlobs(ctx context.Context, tx *gorm.DB, entries map[string]versionfs.Entry) error {
+	return nil
+}
+
+func (s reviewVersionStore) NextRevisionNo(ctx context.Context, tx *gorm.DB, skillID string) (int64, error) {
+	return nextRevisionNo(tx, skillID)
+}
+
+func (s reviewVersionStore) CreateRevision(ctx context.Context, tx *gorm.DB, revision versionfs.RevisionRecord, entries map[string]versionfs.Entry) error {
+	parent := revision.ParentRevisionID
+	row := skillRevisionRow{
+		ID:               revision.ID,
+		SkillID:          revision.ResourceID,
+		ParentRevisionID: &parent,
+		RevisionNo:       revision.RevisionNo,
+		TreeHash:         revision.TreeHash,
+		ChangeSource:     revision.ChangeSource,
+		CreatedBy:        nullableString(revision.CreatedBy),
+		CreatedAt:        revision.CreatedAt,
+	}
+	if err := tx.WithContext(ctx).Create(&row).Error; err != nil {
+		return err
+	}
+	return createRevisionEntries(tx, revision.ID, fromVersionEntries(entries))
+}
+
+func (s reviewVersionStore) UpdateHead(ctx context.Context, tx *gorm.DB, skillID string, previousRevisionID string, revisionID string, now time.Time) error {
+	result := tx.WithContext(ctx).Model(&skillRow{}).Where("id = ? AND head_revision_id = ?", skillID, previousRevisionID).Updates(map[string]any{
+		"head_revision_id": revisionID,
+		"version":          gorm.Expr("version + 1"),
+		"updated_at":       now,
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return versionfs.ErrHeadRevisionConflict
+	}
+	return nil
+}
+
+func (s reviewVersionStore) ResetDraftAfterCommit(ctx context.Context, tx *gorm.DB, skillID string, revisionID string, draft versionfs.DraftState, userID string, now time.Time) error {
+	if err := tx.WithContext(ctx).Where("skill_id = ?", skillID).Delete(&skillDraftEntryRow{}).Error; err != nil {
+		return err
+	}
+	return tx.WithContext(ctx).Model(&skillDraftRow{}).Where("skill_id = ?", skillID).Updates(map[string]any{
+		"base_revision_id": revisionID,
+		"task_id":          "",
+		"conversation_id":  nil,
+		"updated_by":       nullableString(userID),
+		"version":          draft.Version,
+		"draft_updated_at": nil,
+		"updated_at":       now,
+	}).Error
+}
+
+func (s reviewVersionStore) ResetDraftAfterRollback(ctx context.Context, tx *gorm.DB, skillID string, revisionID string, targetEntries map[string]versionfs.Entry, draft versionfs.DraftState, userID string, now time.Time) error {
+	return tx.WithContext(ctx).Model(&skillDraftRow{}).Where("skill_id = ?", skillID).Updates(map[string]any{
+		"base_revision_id": revisionID,
+		"updated_by":       nullableString(userID),
+		"version":          draft.Version,
+		"updated_at":       now,
+	}).Error
+}
+
+func (s reviewVersionStore) MarkActiveReviews(ctx context.Context, tx *gorm.DB, skillID string, status string, userID string, now time.Time) error {
+	return markSkillReviews(ctx, tx, skillID, status, userID, now)
+}
+
+func (s reviewVersionStore) EnforceRevisionLimit(ctx context.Context, tx *gorm.DB, skillID string, protected map[string]bool) error {
+	return nil
+}
+
+func (s reviewVersionStore) AfterCommit(ctx context.Context, tx *gorm.DB, revision versionfs.RevisionRecord, entries map[string]versionfs.Entry) error {
+	return skillsearch.RebuildSkillTx(ctx, tx, revision.ResourceID, revision.CreatedAt)
+}
+
+func (s reviewVersionStore) AfterRollback(ctx context.Context, tx *gorm.DB, skillID string, revisionID string, entries map[string]versionfs.Entry, now time.Time) error {
+	return skillsearch.RebuildSkillTx(ctx, tx, skillID, now)
+}
+
+func (s reviewVersionStore) ListBlobHashes(ctx context.Context, tx *gorm.DB) ([]string, error) {
+	var blobs []skillBlobRow
+	if err := tx.WithContext(ctx).Find(&blobs).Error; err != nil {
+		return nil, err
+	}
+	hashes := make([]string, 0, len(blobs))
+	for _, blob := range blobs {
+		hashes = append(hashes, blob.Hash)
+	}
+	return hashes, nil
+}
+
+func (s reviewVersionStore) BlobReferenced(ctx context.Context, tx *gorm.DB, hash string) (bool, error) {
+	return blobReferenced(tx, hash)
+}
+
+func (s reviewVersionStore) DeleteBlob(ctx context.Context, tx *gorm.DB, hash string) error {
+	if s.service == nil || s.service.blobStore == nil {
+		return nil
+	}
+	return s.service.blobStore.DeleteBlob(ctx, tx, hash)
 }
 
 func (s *Service) ensureSession(ctx context.Context, db *gorm.DB, skillID, userID string) (reviewSessionRow, error) {
@@ -459,13 +593,13 @@ func (s *Service) reviewedEntries(ctx context.Context, tx *gorm.DB, session revi
 		if err != nil {
 			return nil, err
 		}
-		hunks := hunkLines(file)
+		hunks := versionfs.HunkLines(reviewFileFromSkill(file))
 		if len(hunks) == 0 {
 			continue
 		}
 		fileDecision := ""
 		for _, hunk := range hunks {
-			decision := decisions[decisionKey(path, hunk.HunkID)]
+			decision := decisions[versionfs.DecisionKey(path, hunk.HunkID)]
 			if decision == "" || decision == decisionPending {
 				return nil, fmt.Errorf("pending hunks exist")
 			}
@@ -503,33 +637,9 @@ func (s *Service) reviewedEntries(ctx context.Context, tx *gorm.DB, session revi
 }
 
 func (s *Service) mergeTextFile(ctx context.Context, tx *gorm.DB, path string, file skilldiff.DiffFile, decisions map[string]string) (mergedEntry, error) {
-	if file.Binary || file.TooLarge {
-		return mergedEntry{}, fmt.Errorf("cannot merge hunks")
-	}
-	var out []string
-	currentDecision := decisionPending
-	for _, line := range file.DiffEntryLines {
-		switch line.Type {
-		case "HUNK":
-			currentDecision = decisions[decisionKey(path, line.HunkID)]
-			if currentDecision == "" || currentDecision == decisionPending {
-				return mergedEntry{}, fmt.Errorf("pending hunks exist")
-			}
-		case "CONTEXT":
-			out = append(out, line.Text)
-		case "DELETION":
-			if currentDecision == decisionRejected {
-				out = append(out, line.Text)
-			}
-		case "ADDITION":
-			if currentDecision == decisionAccepted {
-				out = append(out, line.Text)
-			}
-		}
-	}
-	content := strings.Join(out, "\n")
-	if len(out) > 0 {
-		content += "\n"
+	content, err := versionfs.MergeTextFile(reviewFileFromSkill(file), decisions)
+	if err != nil {
+		return mergedEntry{}, err
 	}
 	blob, err := s.blobStore.Put(ctx, tx, path, []byte(content), s.clock)
 	if err != nil {
@@ -547,7 +657,7 @@ func (s *Service) hunksByPath(ctx context.Context, tx *gorm.DB, session reviewSe
 			return nil, err
 		}
 		out[path] = map[string]bool{}
-		for _, hunk := range hunkLines(file) {
+		for _, hunk := range versionfs.HunkLines(reviewFileFromSkill(file)) {
 			out[path][hunk.HunkID] = true
 		}
 	}
@@ -574,141 +684,80 @@ func (s *Service) diffFileForPath(ctx context.Context, tx *gorm.DB, session revi
 }
 
 func (s *Service) annotateFile(file *skilldiff.DiffFile, session reviewSessionRow, decisions map[string]string, canUndo bool) {
-	ensureSyntheticHunk(file)
-	hunkIndex := 0
-	for i := range file.DiffEntryLines {
-		if file.DiffEntryLines[i].Type != "HUNK" {
+	reviewFile := reviewFileFromSkill(*file)
+	versionfs.AnnotateReviewFile(&reviewFile, versionfs.ReviewSessionMeta{
+		ID:                session.ID,
+		Path:              file.Path,
+		Status:            file.Status,
+		Version:           session.Version,
+		DraftVersion:      session.DraftVersionAtStart,
+		BaseRevisionID:    session.BaseRevisionID,
+		DraftSnapshotHash: session.DraftSnapshotHash,
+	}, decisions, canUndo)
+	applyReviewFileToSkill(reviewFile, file)
+}
+
+func reviewDisplayDiffEntryLines(lines []skilldiff.DiffEntryLine) []skilldiff.DiffEntryLine {
+	out := make([]skilldiff.DiffEntryLine, 0, len(lines))
+	for i := 0; i < len(lines); {
+		line := lines[i]
+		if line.Type != "HUNK" {
+			out = append(out, line)
+			i++
 			continue
 		}
-		hunkIndex++
-		end := len(file.DiffEntryLines)
-		for j := i + 1; j < len(file.DiffEntryLines); j++ {
-			if file.DiffEntryLines[j].Type == "HUNK" {
+		end := len(lines)
+		for j := i + 1; j < len(lines); j++ {
+			if lines[j].Type == "HUNK" {
 				end = j
 				break
 			}
 		}
-		id, oldStart, oldLines, newStart, newLines := hunkID(session.ID, file.Path, file.Status, hunkIndex, file.DiffEntryLines[i:end])
-		decision := decisions[decisionKey(file.Path, id)]
-		if decision == "" {
-			decision = decisionPending
-		}
-		file.DiffEntryLines[i].HunkID = id
-		file.DiffEntryLines[i].Decision = decision
-		file.DiffEntryLines[i].OldStart = oldStart
-		file.DiffEntryLines[i].OldLines = oldLines
-		file.DiffEntryLines[i].NewStart = newStart
-		file.DiffEntryLines[i].NewLines = newLines
-	}
-	file.ReviewID = session.ID
-	file.ReviewVersion = session.Version
-	file.DraftVersion = session.DraftVersionAtStart
-	file.BaseRevisionID = session.BaseRevisionID
-	file.DraftSnapshotHash = session.DraftSnapshotHash
-	file.CanUndo = canUndo
-	for _, line := range file.DiffEntryLines {
-		if line.Type != "HUNK" {
-			continue
-		}
-		file.HunkCount++
-		switch line.Decision {
+		switch strings.TrimSpace(line.Decision) {
 		case decisionAccepted:
-			file.AcceptedCount++
+			out = append(out, line)
+			out = append(out, resolvedHunkLines(lines[i+1:end], decisionAccepted)...)
 		case decisionRejected:
-			file.RejectedCount++
+			out = append(out, line)
+			out = append(out, resolvedHunkLines(lines[i+1:end], decisionRejected)...)
 		default:
-			file.PendingCount++
+			out = append(out, lines[i:end]...)
 		}
+		i = end
 	}
+	return out
 }
 
-func ensureSyntheticHunk(file *skilldiff.DiffFile) {
-	if len(file.DiffEntryLines) > 0 || file.Type != "file" || file.Status == "unchanged" {
-		return
-	}
-	text := "@@ file " + file.Status + " @@"
-	file.DiffEntryLines = []skilldiff.DiffEntryLine{{
-		Type:     "HUNK",
-		Text:     text,
-		HTML:     html.EscapeString(text),
-		OldLine:  1,
-		NewLine:  1,
-		OldStart: 1,
-		NewStart: 1,
-	}}
-}
-
-func hunkID(sessionID, path, status string, index int, lines []skilldiff.DiffEntryLine) (string, int, int, int, int) {
-	oldStart, newStart := 0, 0
-	oldLines, newLines := 0, 0
-	var deleted, added []string
+func resolvedHunkLines(lines []skilldiff.DiffEntryLine, decision string) []skilldiff.DiffEntryLine {
+	out := make([]skilldiff.DiffEntryLine, 0, len(lines))
 	for _, line := range lines {
 		switch line.Type {
 		case "CONTEXT":
-			if line.OldLine > 0 {
-				if oldStart == 0 {
-					oldStart = line.OldLine
-				}
-				oldLines++
-			}
-			if line.NewLine > 0 {
-				if newStart == 0 {
-					newStart = line.NewLine
-				}
-				newLines++
+			out = append(out, line)
+		case "ADDITION":
+			if decision == decisionAccepted {
+				out = append(out, resolvedContextLine(line, line.NewLine))
 			}
 		case "DELETION":
-			if line.OldLine > 0 {
-				if oldStart == 0 {
-					oldStart = line.OldLine
-				}
-				oldLines++
+			if decision == decisionRejected {
+				out = append(out, resolvedContextLine(line, line.OldLine))
 			}
-			deleted = append(deleted, line.Text)
-		case "ADDITION":
-			if line.NewLine > 0 {
-				if newStart == 0 {
-					newStart = line.NewLine
-				}
-				newLines++
-			}
-			added = append(added, line.Text)
-		case "HUNK":
-			if line.OldLine > 0 && oldStart == 0 {
-				oldStart = line.OldLine
-			}
-			if line.NewLine > 0 && newStart == 0 {
-				newStart = line.NewLine
-			}
-		}
-	}
-	if oldStart == 0 {
-		oldStart = 1
-	}
-	if newStart == 0 {
-		newStart = 1
-	}
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		sessionID,
-		path,
-		status,
-		strconv.Itoa(index),
-		strconv.Itoa(oldStart),
-		strconv.Itoa(newStart),
-		hashStrings(deleted),
-		hashStrings(added),
-	}, "\x00")))
-	return "hunk_" + fmt.Sprintf("%04d", index) + "_" + hex.EncodeToString(sum[:])[:12], oldStart, oldLines, newStart, newLines
-}
-
-func hunkLines(file skilldiff.DiffFile) []skilldiff.DiffEntryLine {
-	out := []skilldiff.DiffEntryLine{}
-	for _, line := range file.DiffEntryLines {
-		if line.Type == "HUNK" {
+		default:
 			out = append(out, line)
 		}
 	}
 	return out
+}
+
+func resolvedContextLine(line skilldiff.DiffEntryLine, lineNo int) skilldiff.DiffEntryLine {
+	return skilldiff.DiffEntryLine{
+		Type:                    "CONTEXT",
+		Text:                    line.Text,
+		HTML:                    html.EscapeString(line.Text),
+		OldLine:                 lineNo,
+		NewLine:                 lineNo,
+		DisplayNoNewLineWarning: line.DisplayNoNewLineWarning,
+	}
 }
 
 func draftReviewSnapshot(ctx context.Context, db *gorm.DB, skillID string) (string, int64, string, error) {
@@ -769,7 +818,7 @@ func (s *Service) currentDecisions(ctx context.Context, db *gorm.DB, reviewID st
 			return nil, err
 		}
 		for _, item := range items {
-			out[decisionKey(item.Path, item.HunkID)] = item.AfterDecision
+			out[versionfs.DecisionKey(item.Path, item.HunkID)] = item.AfterDecision
 		}
 	}
 	return out, nil
@@ -859,19 +908,7 @@ func mergedEntriesForDraft(ctx context.Context, db *gorm.DB, skillID, baseRevisi
 	if err := db.WithContext(ctx).Where("skill_id = ?", skillID).Order("path ASC").Find(&overlays).Error; err != nil {
 		return nil, err
 	}
-	for _, overlay := range overlays {
-		if overlay.Op == "delete" {
-			for path := range entries {
-				if path == overlay.Path || isDescendantPath(overlay.Path, path) {
-					delete(entries, path)
-				}
-			}
-			continue
-		}
-		hash := overlay.BlobHash
-		entries[overlay.Path] = mergedEntry{Path: overlay.Path, EntryType: overlay.EntryType, BlobHash: hash, Size: overlay.Size, Mime: overlay.Mime, FileType: overlay.FileType, Binary: overlay.Binary, Mode: overlay.Mode}
-	}
-	return entries, nil
+	return fromVersionEntries(versionfs.MergeEntries(toVersionEntries(entries), toVersionOverlays(overlays))), nil
 }
 
 func createRevisionEntries(tx *gorm.DB, revisionID string, entries map[string]mergedEntry) error {
@@ -894,26 +931,6 @@ func createRevisionEntries(tx *gorm.DB, revisionID string, entries map[string]me
 		return nil
 	}
 	return tx.Create(&rows).Error
-}
-
-func cleanupUnreferencedBlobs(ctx context.Context, tx *gorm.DB, blobStore *skillservice.BlobStore) error {
-	var blobs []skillBlobRow
-	if err := tx.Find(&blobs).Error; err != nil {
-		return err
-	}
-	for _, blob := range blobs {
-		referenced, err := blobReferenced(tx, blob.Hash)
-		if err != nil {
-			return err
-		}
-		if referenced {
-			continue
-		}
-		if err := blobStore.DeleteBlob(ctx, tx, blob.Hash); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func blobReferenced(tx *gorm.DB, hash string) (bool, error) {
@@ -966,50 +983,16 @@ func nextRevisionNo(tx *gorm.DB, skillID string) (int64, error) {
 	return maxNo + 1, nil
 }
 
-func hashTree(entries map[string]mergedEntry) string {
-	lines := make([]string, 0, len(entries))
-	for _, entry := range sortedEntries(entries) {
-		hash := ""
-		if entry.BlobHash != nil {
-			hash = *entry.BlobHash
-		}
-		lines = append(lines, entry.Path+"\x00"+entry.EntryType+"\x00"+hash)
-	}
-	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
-	return hex.EncodeToString(sum[:])
-}
-
 func sortedEntries(entries map[string]mergedEntry) []mergedEntry {
-	out := make([]mergedEntry, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, entry)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out
+	return fromVersionEntrySlice(versionfs.SortedEntries(toVersionEntries(entries)))
 }
 
 func cloneEntries(entries map[string]mergedEntry) map[string]mergedEntry {
-	out := make(map[string]mergedEntry, len(entries))
-	for path, entry := range entries {
-		out[path] = entry
-	}
-	return out
+	return fromVersionEntries(versionfs.CloneEntries(toVersionEntries(entries)))
 }
 
 func unionEntryPaths(a, b map[string]mergedEntry) []string {
-	seen := map[string]bool{}
-	for path := range a {
-		seen[path] = true
-	}
-	for path := range b {
-		seen[path] = true
-	}
-	paths := make([]string, 0, len(seen))
-	for path := range seen {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	return paths
+	return versionfs.UnionEntryPaths(toVersionEntries(a), toVersionEntries(b))
 }
 
 func uniquePaths(items []ActionItem) []string {
@@ -1029,20 +1012,7 @@ func uniquePaths(items []ActionItem) []string {
 }
 
 func entrySignature(entry mergedEntry) string {
-	hash := ""
-	if entry.BlobHash != nil {
-		hash = *entry.BlobHash
-	}
-	return strings.Join([]string{entry.EntryType, hash, entry.FileType}, "\x00")
-}
-
-func decisionKey(path, hunkID string) string {
-	return path + "\x00" + hunkID
-}
-
-func hashStrings(values []string) string {
-	sum := sha256.Sum256([]byte(strings.Join(values, "\n")))
-	return hex.EncodeToString(sum[:])
+	return versionfs.EntrySignature(toVersionEntry(entry))
 }
 
 func nullableString(v string) *string {
@@ -1052,8 +1022,160 @@ func nullableString(v string) *string {
 	return &v
 }
 
-func isDescendantPath(parent, candidate string) bool {
-	return strings.HasPrefix(candidate, parent+"/")
+func valueOrEmpty(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func reviewFileFromSkill(file skilldiff.DiffFile) versionfs.ReviewFile {
+	lines := make([]versionfs.DiffLine, 0, len(file.DiffEntryLines))
+	for _, line := range file.DiffEntryLines {
+		lines = append(lines, versionfs.DiffLine{
+			Type:                    line.Type,
+			Text:                    line.Text,
+			HTML:                    line.HTML,
+			OldLine:                 line.OldLine,
+			NewLine:                 line.NewLine,
+			DisplayNoNewLineWarning: line.DisplayNoNewLineWarning,
+			HunkID:                  line.HunkID,
+			Decision:                line.Decision,
+			OldStart:                line.OldStart,
+			OldLines:                line.OldLines,
+			NewStart:                line.NewStart,
+			NewLines:                line.NewLines,
+		})
+	}
+	return versionfs.ReviewFile{
+		Path:              file.Path,
+		Type:              file.Type,
+		Status:            file.Status,
+		Binary:            file.Binary,
+		TooLarge:          file.TooLarge,
+		ReviewID:          file.ReviewID,
+		ReviewVersion:     file.ReviewVersion,
+		DraftVersion:      file.DraftVersion,
+		BaseRevisionID:    file.BaseRevisionID,
+		DraftSnapshotHash: file.DraftSnapshotHash,
+		CanUndo:           file.CanUndo,
+		HunkCount:         file.HunkCount,
+		PendingCount:      file.PendingCount,
+		AcceptedCount:     file.AcceptedCount,
+		RejectedCount:     file.RejectedCount,
+		DiffLines:         lines,
+	}
+}
+
+func applyReviewFileToSkill(src versionfs.ReviewFile, dst *skilldiff.DiffFile) {
+	lines := make([]skilldiff.DiffEntryLine, 0, len(src.DiffLines))
+	for _, line := range src.DiffLines {
+		lines = append(lines, skilldiff.DiffEntryLine{
+			Type:                    line.Type,
+			Text:                    line.Text,
+			HTML:                    line.HTML,
+			OldLine:                 line.OldLine,
+			NewLine:                 line.NewLine,
+			DisplayNoNewLineWarning: line.DisplayNoNewLineWarning,
+			HunkID:                  line.HunkID,
+			Decision:                line.Decision,
+			OldStart:                line.OldStart,
+			OldLines:                line.OldLines,
+			NewStart:                line.NewStart,
+			NewLines:                line.NewLines,
+		})
+	}
+	dst.ReviewID = src.ReviewID
+	dst.ReviewVersion = src.ReviewVersion
+	dst.DraftVersion = src.DraftVersion
+	dst.BaseRevisionID = src.BaseRevisionID
+	dst.DraftSnapshotHash = src.DraftSnapshotHash
+	dst.CanUndo = src.CanUndo
+	dst.HunkCount = src.HunkCount
+	dst.PendingCount = src.PendingCount
+	dst.AcceptedCount = src.AcceptedCount
+	dst.RejectedCount = src.RejectedCount
+	dst.DiffEntryLines = lines
+}
+
+func toVersionEntries(entries map[string]mergedEntry) map[string]versionfs.Entry {
+	out := make(map[string]versionfs.Entry, len(entries))
+	for path, entry := range entries {
+		out[path] = toVersionEntry(entry)
+	}
+	return out
+}
+
+func toVersionEntry(entry mergedEntry) versionfs.Entry {
+	hash := ""
+	if entry.BlobHash != nil {
+		hash = *entry.BlobHash
+	}
+	return versionfs.Entry{
+		Path:      entry.Path,
+		EntryType: entry.EntryType,
+		BlobHash:  hash,
+		Size:      entry.Size,
+		Mime:      entry.Mime,
+		FileType:  entry.FileType,
+		Binary:    entry.Binary,
+		Mode:      entry.Mode,
+	}
+}
+
+func fromVersionEntries(entries map[string]versionfs.Entry) map[string]mergedEntry {
+	out := make(map[string]mergedEntry, len(entries))
+	for path, entry := range entries {
+		out[path] = fromVersionEntry(entry)
+	}
+	return out
+}
+
+func fromVersionEntrySlice(entries []versionfs.Entry) []mergedEntry {
+	out := make([]mergedEntry, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, fromVersionEntry(entry))
+	}
+	return out
+}
+
+func toVersionOverlays(overlays []skillDraftEntryRow) []versionfs.Overlay {
+	out := make([]versionfs.Overlay, 0, len(overlays))
+	for _, overlay := range overlays {
+		hash := ""
+		if overlay.BlobHash != nil {
+			hash = *overlay.BlobHash
+		}
+		out = append(out, versionfs.Overlay{
+			Path:      overlay.Path,
+			Op:        overlay.Op,
+			EntryType: overlay.EntryType,
+			BlobHash:  hash,
+			Size:      overlay.Size,
+			Mime:      overlay.Mime,
+			FileType:  overlay.FileType,
+			Binary:    overlay.Binary,
+			Mode:      overlay.Mode,
+		})
+	}
+	return out
+}
+
+func fromVersionEntry(entry versionfs.Entry) mergedEntry {
+	var hash *string
+	if entry.BlobHash != "" {
+		hash = &entry.BlobHash
+	}
+	return mergedEntry{
+		Path:      entry.Path,
+		EntryType: entry.EntryType,
+		BlobHash:  hash,
+		Size:      entry.Size,
+		Mime:      entry.Mime,
+		FileType:  entry.FileType,
+		Binary:    entry.Binary,
+		Mode:      entry.Mode,
+	}
 }
 
 type clock interface {
@@ -1159,7 +1281,7 @@ type skillDraftRow struct {
 	SkillID        string     `gorm:"column:skill_id;type:varchar(36);primaryKey"`
 	BaseRevisionID *string    `gorm:"column:base_revision_id;type:varchar(36)"`
 	TaskID         string     `gorm:"column:task_id;type:text"`
-	ConversationID *string    `gorm:"column:conversation_id;type:varchar(36)"`
+	ConversationID *string    `gorm:"column:conversation_id;type:varchar(128)"`
 	UpdatedBy      *string    `gorm:"column:updated_by;type:text"`
 	Version        int64      `gorm:"column:version"`
 	DraftUpdatedAt *time.Time `gorm:"column:draft_updated_at"`

@@ -1,6 +1,7 @@
 
 
 import { SSE } from "./sse";
+import i18n from "@/i18n";
 
 export interface StreamCallbacks {
   message?: (e: CustomEvent) => void;
@@ -32,6 +33,19 @@ class StreamManager {
     sse: SSE,
     callbacks: StreamCallbacks,
   ): void {
+    this.streams.forEach((existing, existingConversationId) => {
+      if (existingConversationId !== conversationId) {
+        try {
+          existing.close();
+        } catch (error) {
+          console.warn("Failed to close stale stream:", error);
+        }
+        this.streams.delete(existingConversationId);
+        this.callbacks.delete(existingConversationId);
+        this.streamStates.delete(existingConversationId);
+      }
+    });
+
     const existingStream = this.streams.get(conversationId);
     if (existingStream) {
       const oldCallbacks = this.callbacks.get(conversationId);
@@ -288,7 +302,7 @@ class StreamManager {
         }
         stream.close();
       } catch (error) {
-        console.error("[StreamManager] 关闭流失败:", error);
+        console.error(i18n.t("chat.streamCloseFailedLog"), error);
       }
     }
 

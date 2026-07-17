@@ -1,5 +1,6 @@
 import type { DataNode } from "antd/es/tree";
 import type {
+  DataSourceItem,
   FeishuTargetType,
   NotionTargetType,
   SourceFormValues,
@@ -67,6 +68,20 @@ export function toScanFeishuTargetType(targetType: FeishuTargetType) {
 
 export function toUiFeishuTargetType(targetType?: string): FeishuTargetType | undefined {
   return normalizeFeishuTargetType(targetType);
+}
+
+export function normalizeFeishuTargetRef(targetRef: string) {
+  const normalizedRef = targetRef.trim();
+  const parts = normalizedRef.split(":");
+  if (
+    parts.length === 4 &&
+    parts[0] === "feishu" &&
+    parts[1] === "wiki" &&
+    parts[2] !== "space"
+  ) {
+    return `wiki:${parts[2]}:${parts[3]}`;
+  }
+  return normalizedRef;
 }
 
 export function parseManualFeishuTargetValue(value: string) {
@@ -150,7 +165,9 @@ export function collectFeishuTargetRefs(
 ) {
   nodes.forEach((node) => {
     const value = `${node.value || ""}`.trim();
-    const targetRef = `${node.targetRef || node.value || ""}`.trim();
+    const targetRef = normalizeFeishuTargetRef(
+      `${node.targetRef || node.value || ""}`,
+    );
     const nodeRef = `${node.nodeRef || ""}`.trim();
 
     if (targetRef) {
@@ -172,9 +189,39 @@ export function normalizeFeishuTargetRefs(value?: SourceFormValues["target"]) {
   return values
     .map((item) => {
       const normalizedValue = `${item || ""}`.trim();
-      return parseManualFeishuTargetValue(normalizedValue)?.targetRef || normalizedValue;
+      const targetRef =
+        parseManualFeishuTargetValue(normalizedValue)?.targetRef || normalizedValue;
+      return normalizeFeishuTargetRef(targetRef);
     })
     .filter(Boolean);
+}
+
+export function buildFeishuTargetSeedNodes(
+  selectedValues: string[],
+  record: Pick<DataSourceItem, "targetLabels" | "targetTypes" | "targetType">,
+): FeishuTargetTreeNode[] {
+  return selectedValues
+    .map((value) => {
+      const normalizedValue = `${value || ""}`.trim();
+      if (!normalizedValue) {
+        return null;
+      }
+      const title = record.targetLabels?.[normalizedValue] || normalizedValue;
+      const targetType =
+        record.targetTypes?.[normalizedValue] ||
+        record.targetType ||
+        "wiki_space";
+      return {
+        key: normalizedValue,
+        value: normalizedValue,
+        title,
+        isLeaf: true,
+        selectable: true,
+        targetRef: normalizedValue,
+        targetType: toUiFeishuTargetType(targetType) || "wiki_space",
+      } satisfies FeishuTargetTreeNode;
+    })
+    .filter((node): node is FeishuTargetTreeNode => Boolean(node));
 }
 
 export function normalizeCloudTargetRefs(value?: SourceFormValues["target"]) {

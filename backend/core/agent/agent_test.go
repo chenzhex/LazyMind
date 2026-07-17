@@ -513,6 +513,56 @@ func TestGetThreadTraceDetailProxiesEvoResponse(t *testing.T) {
 	}
 }
 
+func TestCompareThreadTracesProxiesEvoResponse(t *testing.T) {
+	db := newAgentTestDB(t)
+	store.Init(db.DB, nil, nil)
+	t.Cleanup(func() { store.Init(nil, nil, nil) })
+
+	now := time.Now().UTC()
+	if err := db.DB.Create(&orm.AgentThread{
+		ThreadID:     "thr_1",
+		Status:       "created",
+		CreateUserID: "u1",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/threads/thr_1/results/traces:compare" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("a"); got != "trace-a" {
+			t.Fatalf("expected query a=trace-a, got %q", got)
+		}
+		if got := r.URL.Query().Get("b"); got != "trace-b" {
+			t.Fatalf("expected query b=trace-b, got %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"query": "question",
+			"a":     map[string]any{"trace_id": "trace-a"},
+			"b":     map[string]any{"trace_id": "trace-b"},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_EVO_SERVICE_URL", server.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/core/agent/threads/thr_1/results/traces:compare?a=trace-a&b=trace-b", nil)
+	req.Header.Set("X-User-Id", "u1")
+	req = mux.SetURLVars(req, map[string]string{"thread_id": "thr_1"})
+	rec := httptest.NewRecorder()
+
+	CompareThreadTraces(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ok, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "trace-a") || !strings.Contains(body, "trace-b") {
+		t.Fatalf("expected proxied trace compare body, got %s", body)
+	}
+}
+
 func TestIsThreadFlowRunningKeepsRunningAndPending(t *testing.T) {
 	cases := []struct {
 		status string

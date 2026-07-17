@@ -12,6 +12,7 @@ import (
 
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
+	"lazymind/core/skillv2/taskguard"
 )
 
 type Scheduler struct {
@@ -212,15 +213,19 @@ func (s *Scheduler) processClaimedState(ctx context.Context, userID string, now 
 				"updated_at":              now,
 			})
 		}
-		stats, err := CountSkillReviewHistoryStats(ctx, tx, state.UserID, start, end)
+		stage := s.stageFor(state.StageIndex)
+		stats, err := CountSkillReviewHistoryStats(ctx, tx, state.UserID, start, end, s.cfg.MinUserTurns, s.cfg.MinToolTurns)
 		if err != nil {
 			return err
 		}
-		if stats.UserTurnCount < s.cfg.MinUserTurns || stats.ToolCallCount < s.cfg.MinToolTurns {
+		stats.QuantityThreshold = stage.QuantityThreshold
+		if stats.QualifiedSessionCount < stage.QuantityThreshold {
 			skipped = true
 			resourceUpdateInfo(logEventSchedulerSkipped).
 				Str("user_id", state.UserID).
 				Str("reason", "skill_review_history_threshold_not_reached").
+				Int("qualified_session_count", stats.QualifiedSessionCount).
+				Int("quantity_threshold", stage.QuantityThreshold).
 				Int("user_turn_count", stats.UserTurnCount).
 				Int("tool_call_count", stats.ToolCallCount).
 				Int("min_user_turns", s.cfg.MinUserTurns).
@@ -233,6 +238,31 @@ func (s *Scheduler) processClaimedState(ctx context.Context, userID string, now 
 				"last_preflight_check_at": now,
 				"locked_by":               "",
 				"locked_until":            nil,
+				"updated_at":              now,
+			})
+		}
+		decision, guardErr := taskguard.EvaluateSkillOperation(ctx, tx, nil, taskguard.SkillOperationRequest{
+			UserID:        state.UserID,
+			Operation:     taskguard.TriggerSkillReview,
+			TriggerSource: "scheduled",
+		})
+		if guardErr != nil && decision.Disposition != taskguard.DispositionDefer {
+			return guardErr
+		}
+		if !decision.Allowed {
+			retryAfter := decision.RetryAfter
+			if retryAfter <= 0 {
+				retryAfter = s.cfg.SchedulerRetryDelay
+			}
+			nextRunAt := now.Add(retryAfter)
+			return s.updateState(tx, state.UserID, map[string]any{
+				"next_run_at":             nextRunAt,
+				"last_quantity_check_at":  now,
+				"last_preflight_check_at": now,
+				"last_error_code":         decision.ReasonCode,
+				"last_error_message":      decision.Message,
+				"locked_by":               "",
+				"locked_until":            nextRunAt,
 				"updated_at":              now,
 			})
 		}
@@ -254,6 +284,8 @@ func (s *Scheduler) processClaimedState(ctx context.Context, userID string, now 
 			Str("user_id", task.UserID).
 			Str("trigger_reason", reason).
 			Str("trigger_id", task.TriggerID).
+			Int("candidate_qualified_session_count", stats.QualifiedSessionCount).
+			Int("quantity_threshold", stage.QuantityThreshold).
 			Int("candidate_user_turn_count", stats.UserTurnCount).
 			Int("candidate_tool_call_count", stats.ToolCallCount).
 			Time("candidate_start_time", start).
@@ -445,18 +477,28 @@ func (s *Scheduler) stageFor(index int) Stage {
 	if stage.Interval <= 0 {
 		stage.Interval = s.cfg.MinInterval
 	}
+	if stage.QuantityThreshold <= 0 {
+		defaultStages := DefaultConfig().Stages
+		if index >= 0 && index < len(defaultStages) {
+			stage.QuantityThreshold = defaultStages[index].QuantityThreshold
+		} else {
+			stage.QuantityThreshold = defaultStages[len(defaultStages)-1].QuantityThreshold
+		}
+	}
 	return stage
 }
 
 func newSkillGenerateTask(userID, triggerReason string, stats HistoryStats, now time.Time) (orm.ResourceUpdateTask, error) {
-	requestID := common.GenerateID()
+	requestID := newSkillReviewRequestID()
 	request := skillGenerateRequestJSON{
-		RequestID:              requestID,
-		UserID:                 strings.TrimSpace(userID),
-		TriggerReason:          triggerReason,
-		CandidateUserTurnCount: stats.UserTurnCount,
-		CandidateToolCallCount: stats.ToolCallCount,
-		SchedulerPreflightAt:   formatTaskTime(now),
+		RequestID:                      requestID,
+		UserID:                         strings.TrimSpace(userID),
+		TriggerReason:                  triggerReason,
+		CandidateUserTurnCount:         stats.UserTurnCount,
+		CandidateToolCallCount:         stats.ToolCallCount,
+		CandidateQualifiedSessionCount: stats.QualifiedSessionCount,
+		QuantityThreshold:              stats.QuantityThreshold,
+		SchedulerPreflightAt:           formatTaskTime(now),
 	}
 	body, err := json.Marshal(request)
 	if err != nil {

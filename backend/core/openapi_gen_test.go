@@ -65,6 +65,35 @@ func TestOpenAPISpecCoversAllRegisteredRoutes(t *testing.T) {
 	}
 }
 
+func TestOpenAPISpecRevisionSchemasIncludeHeadMarker(t *testing.T) {
+	r := mux.NewRouter()
+	registerCoreRoutes(r)
+
+	specJSON, err := buildOpenAPISpecFromRouter(r)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	for _, schemaName := range []string{"RevisionSummary", "skillRevisionOpenAPIResponse"} {
+		schema, ok := schemas[schemaName].(map[string]any)
+		if !ok {
+			t.Fatalf("schema %s missing", schemaName)
+		}
+		properties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("schema %s properties missing", schemaName)
+		}
+		isHead, ok := properties["is_head"].(map[string]any)
+		if !ok || isHead["type"] != "boolean" {
+			t.Fatalf("schema %s is_head property = %#v, want boolean", schemaName, properties["is_head"])
+		}
+	}
+}
+
 func TestOpenAPISpecIncludesAgentEvoContracts(t *testing.T) {
 	r := mux.NewRouter()
 	registerCoreRoutes(r)
@@ -88,6 +117,7 @@ func TestOpenAPISpecIncludesAgentEvoContracts(t *testing.T) {
 		{"get", "/api/core/agent/threads/{thread_id}/gates"},
 		{"get", "/api/core/agent/threads/{thread_id}/gates/{step}/versions/{version}"},
 		{"get", "/api/core/agent/threads/{thread_id}/gates/{step}/versions/{version}:download"},
+		{"get", "/api/core/agent/threads/{thread_id}/results/traces:compare"},
 		{"get", "/api/core/agent/threads/{thread_id}/results/traces/{trace_id}"},
 		{"get", "/api/core/agent/threads/{thread_id}/messages"},
 		{"post", "/api/core/agent/threads/{thread_id}/messages"},
@@ -100,8 +130,8 @@ func TestOpenAPISpecIncludesAgentEvoContracts(t *testing.T) {
 		{"get", "/api/core/agent/candidates/{candidate_id:.*}"},
 		{"get", "/api/core/agent/router/status"},
 		{"get", "/api/core/agent/router/algorithms"},
-		{"post", "/api/core/agent/router/algorithms"},
-		{"post", "/api/core/agent/router/algorithms/{algorithm_id}:action"},
+		{"post", "/api/core/agent/router/algorithms/{algorithm_id}/action"},
+		{"delete", "/api/core/agent/router/algorithms/{algorithm_id}"},
 		{"get", "/api/core/agent/router/ab-strategy"},
 		{"put", "/api/core/agent/router/ab-strategy"},
 	} {
@@ -141,6 +171,14 @@ func TestOpenAPISpecIncludesAgentEvoContracts(t *testing.T) {
 	binarySchema := binaryContent["schema"].(map[string]any)
 	if binarySchema["type"] != "string" || binarySchema["format"] != "binary" {
 		t.Fatalf("unexpected download response schema: %#v", binarySchema)
+	}
+
+	traceCompareOp := openAPIOperationForTest(t, spec, "get", "/api/core/agent/threads/{thread_id}/results/traces:compare")
+	traceCompareParams := openAPIParameterNamesForTest(t, traceCompareOp)
+	for _, name := range []string{"thread_id", "a", "b"} {
+		if _, ok := traceCompareParams[name]; !ok {
+			t.Fatalf("trace compare operation missing parameter %q", name)
+		}
 	}
 
 	paths := spec["paths"].(map[string]any)
@@ -422,18 +460,23 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 		{"put", "/api/core/personalization-setting", true, false, true},
 		{"get", "/api/core/user/ui-preferences", false, false, true},
 		{"patch", "/api/core/user/ui-preferences", true, false, true},
-		{"put", "/api/core/memory", true, false, true},
-		{"get", "/api/core/memory:draft-preview", false, false, true},
-		{"post", "/api/core/memory:generate", true, false, true},
-		{"post", "/api/core/memory:confirm", false, false, true},
-		{"post", "/api/core/memory:discard", false, false, true},
-		{"put", "/api/core/user-preference", true, false, true},
-		{"get", "/api/core/user-preference:draft-preview", false, false, true},
-		{"post", "/api/core/user-preference:generate", true, false, true},
-		{"post", "/api/core/user-preference:confirm", false, false, true},
-		{"post", "/api/core/user-preference:discard", false, false, true},
-		{"get", "/api/core/resource-versions", false, true, true},
-		{"get", "/api/core/resource-versions/{version_id}", false, true, true},
+		{"patch", "/api/core/personal-resource/{resource_type}", true, true, true},
+		{"get", "/api/core/personal-resource/{resource_type}:file", false, true, true},
+		{"put", "/api/core/personal-resource/{resource_type}:file", true, true, true},
+		{"put", "/api/core/personal-resource/{resource_type}:draft", true, true, true},
+		{"get", "/api/core/personal-resource/{resource_type}:draft-preview", false, true, true},
+		{"post", "/api/core/personal-resource/{resource_type}:generate", true, true, true},
+		{"post", "/api/core/personal-resource/{resource_type}/draft-review/{review_id}/actions", true, true, true},
+		{"post", "/api/core/personal-resource/{resource_type}/draft-review/{review_id}:undo", true, true, true},
+		{"post", "/api/core/personal-resource/{resource_type}:commit", true, true, true},
+		{"post", "/api/core/personal-resource/{resource_type}:discard", false, true, true},
+		{"get", "/api/core/personal-resource/{resource_type}/revisions", false, true, true},
+		{"get", "/api/core/personal-resource/{resource_type}/revisions/{revision_id}", false, true, true},
+		{"post", "/api/core/personal-resource/{resource_type}:rollback", true, true, true},
+		{"get", "/api/core/skill-review:summary", false, false, false},
+		{"post", "/api/core/skill-review:run", false, false, false},
+		{"get", "/api/core/skill-review/tasks", false, false, false},
+		{"get", "/api/core/skill-review-results/{review_result_id}", false, false, false},
 		{"get", "/api/core/agent/threads", false, true, true},
 		{"get", "/api/core/conversations/{name}:history", false, true, true},
 	}
@@ -486,6 +529,21 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 		"/api/core/skill/remove",
 		"/api/core/memory/suggestion",
 		"/api/core/user_preference/suggestion",
+		"/api/core/memory",
+		"/api/core/memory:draft-preview",
+		"/api/core/memory:generate",
+		"/api/core/memory:confirm",
+		"/api/core/memory:discard",
+		"/api/core/user-preference",
+		"/api/core/user-preference:draft-preview",
+		"/api/core/user-preference:generate",
+		"/api/core/user-preference:confirm",
+		"/api/core/user-preference:discard",
+		"/api/core/skill-review-results",
+		"/api/core/skill-review-results/{review_result_id}:accept",
+		"/api/core/skill-review-results/{review_result_id}:reject",
+		"/api/core/memory-review-results",
+		"/api/core/resource-versions",
 	}
 	for _, path := range removedPaths {
 		if _, ok := paths[path]; ok {
@@ -524,7 +582,7 @@ func TestOpenAPISpecCoversEvolutionSkillMemoryPreferenceOperations(t *testing.T)
 	}
 }
 
-func TestOpenAPISpecAssignsMetadataFieldsToUserPreference(t *testing.T) {
+func TestOpenAPISpecAssignsMetadataFieldsToPersonalResourcePatch(t *testing.T) {
 	r := mux.NewRouter()
 	registerAllRoutes(r)
 
@@ -560,22 +618,21 @@ func TestOpenAPISpecAssignsMetadataFieldsToUserPreference(t *testing.T) {
 		return properties
 	}
 
-	memoryRequestProps := schemaProperties("memoryUpsertOpenAPIRequest")
-	for _, name := range []string{"content", "auto_evo"} {
-		if _, ok := memoryRequestProps[name]; !ok {
-			t.Fatalf("memoryUpsertOpenAPIRequest expected property %q", name)
+	draftRequestProps := schemaProperties("personalResourceWriteDraftOpenAPIRequest")
+	for _, name := range []string{"content", "expected_draft_version"} {
+		if _, ok := draftRequestProps[name]; !ok {
+			t.Fatalf("personalResourceWriteDraftOpenAPIRequest expected property %q", name)
 		}
 	}
 	for _, name := range []string{"agent_persona", "preferred_name", "response_style"} {
-		if _, ok := memoryRequestProps[name]; ok {
-			t.Fatalf("memoryUpsertOpenAPIRequest has user_preference-only property %q", name)
+		if _, ok := draftRequestProps[name]; ok {
+			t.Fatalf("personalResourceWriteDraftOpenAPIRequest must not include property %q", name)
 		}
 	}
-
-	preferenceRequestProps := schemaProperties("managedStateUpsertOpenAPIRequest")
-	for _, name := range []string{"content", "agent_persona", "preferred_name", "response_style", "auto_evo"} {
-		if _, ok := preferenceRequestProps[name]; !ok {
-			t.Fatalf("managedStateUpsertOpenAPIRequest expected property %q", name)
+	patchRequestProps := schemaProperties("personalResourcePatchOpenAPIRequest")
+	for _, name := range []string{"auto_evo", "agent_persona", "preferred_name", "response_style"} {
+		if _, ok := patchRequestProps[name]; !ok {
+			t.Fatalf("personalResourcePatchOpenAPIRequest expected property %q", name)
 		}
 	}
 
@@ -621,8 +678,8 @@ func TestOpenAPISpecAssignsMetadataFieldsToUserPreference(t *testing.T) {
 		}
 	}
 
-	assertRequestSchemaRef("/api/core/memory", "put", "#/components/schemas/memoryUpsertOpenAPIRequest")
-	assertRequestSchemaRef("/api/core/user-preference", "put", "#/components/schemas/managedStateUpsertOpenAPIRequest")
+	assertRequestSchemaRef("/api/core/personal-resource/{resource_type}:file", "put", "#/components/schemas/personalResourceWriteDraftOpenAPIRequest")
+	assertRequestSchemaRef("/api/core/personal-resource/{resource_type}:draft", "put", "#/components/schemas/personalResourceWriteDraftOpenAPIRequest")
 }
 
 func TestOpenAPISpecMarksUIPreferencesPatchFieldsOptional(t *testing.T) {
@@ -665,7 +722,7 @@ func TestOpenAPISpecMarksUIPreferencesPatchFieldsOptional(t *testing.T) {
 	}
 }
 
-func TestOpenAPISpecIncludesModelMaxInputTokens(t *testing.T) {
+func TestOpenAPISpecIncludesLLMAndVLMMaxInputTokens(t *testing.T) {
 	r := mux.NewRouter()
 	registerAllRoutes(r)
 
@@ -697,11 +754,30 @@ func TestOpenAPISpecIncludesModelMaxInputTokens(t *testing.T) {
 	if !ok {
 		t.Fatalf("max_input_tokens property missing")
 	}
-	if got := maxInputTokens["type"]; got != "integer" {
-		t.Fatalf("max_input_tokens type = %v, want integer", got)
+	if got := maxInputTokens["type"]; got != "string" {
+		t.Fatalf("max_input_tokens type = %v, want string", got)
 	}
 	if got := maxInputTokens["nullable"]; got != true {
 		t.Fatalf("max_input_tokens nullable = %v, want true", got)
+	}
+
+	selectedItemSchema, ok := schemas["selectedModelOpenAPIItem"].(map[string]any)
+	if !ok {
+		t.Fatalf("selectedModelOpenAPIItem schema missing")
+	}
+	selectedProperties, ok := selectedItemSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("selectedModelOpenAPIItem properties missing")
+	}
+	selectedMaxInputTokens, ok := selectedProperties["max_input_tokens"].(map[string]any)
+	if !ok {
+		t.Fatalf("selected models max_input_tokens property missing")
+	}
+	if got := selectedMaxInputTokens["type"]; got != "string" {
+		t.Fatalf("selected models max_input_tokens type = %v, want string", got)
+	}
+	if got := selectedMaxInputTokens["nullable"]; got != true {
+		t.Fatalf("selected models max_input_tokens nullable = %v, want true", got)
 	}
 }
 
@@ -1041,6 +1117,48 @@ func TestOpenAPISpecIncludesToolOperations(t *testing.T) {
 	for _, name := range []string{"tool_groups", "page", "page_size", "total"} {
 		if _, ok := listProperties[name]; !ok {
 			t.Fatalf("toolListOpenAPIResponse expected property %q", name)
+		}
+	}
+}
+
+func TestOpenAPISpecIncludesLocaleHeaderForLocalizedCatalogs(t *testing.T) {
+	r := mux.NewRouter()
+	registerAllRoutes(r)
+
+	specJSON, err := buildOpenAPISpecFromRouter(r)
+	if err != nil {
+		t.Fatalf("build openapi spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		t.Fatalf("decode openapi spec: %v", err)
+	}
+	paths := spec["paths"].(map[string]any)
+	for _, path := range []string{
+		"/api/core/tools",
+		"/api/core/model_providers",
+		"/api/core/model_providers:with_groups",
+	} {
+		pathItem, ok := paths[path].(map[string]any)
+		if !ok {
+			t.Fatalf("path missing from openapi spec: %s", path)
+		}
+		op, ok := pathItem["get"].(map[string]any)
+		if !ok {
+			t.Fatalf("GET operation missing from openapi spec: %s", path)
+		}
+		found := false
+		for _, raw := range op["parameters"].([]any) {
+			parameter, ok := raw.(map[string]any)
+			if ok && parameter["in"] == "header" && parameter["name"] == "Accept-Language" {
+				found = true
+				if parameter["required"] != false {
+					t.Fatalf("Accept-Language should be optional for %s", path)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("Accept-Language header missing for %s", path)
 		}
 	}
 }

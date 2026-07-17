@@ -9,6 +9,7 @@ from lazymind.chat.config import DEFAULT_CHAT_DATASET
 
 class ChatMessageOptions(BaseModel):
     query: str
+    user_query: Optional[str] = None
     history: Optional[List[Dict[str, Any]]] = None
     files: Optional[Dict[str, List[str]]] = None
     current_turn_seq: Optional[int] = None
@@ -56,6 +57,8 @@ class ChatAgentOptions(BaseModel):
 class ChatPluginOptions(BaseModel):
     enable_plugin: Optional[bool] = None
     plugin_context: Optional[Dict[str, Any]] = None
+    catalog: List[Dict[str, Any]] = Field(default_factory=list)
+    disabled_builtin_plugins: List[str] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):

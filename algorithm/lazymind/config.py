@@ -79,6 +79,8 @@ config.add('algo_id', str, 'general_algo', 'ALGO_ID', description='LazyMind algo
 # entrypoint and the router entrypoint can read it without cross-importing router config.
 config.add('enable_router', bool, False, 'ENABLE_ROUTER',
            description='Enable router mode. When false, app.py falls back to the original chat service.')
+config.add('background_jobs_enabled', bool, True, 'BACKGROUND_JOBS_ENABLED',
+           description='Enable non-request background maintenance jobs for this service.')
 config.add('state_backend', str, 'redis', 'STATE_BACKEND',
            description='Short-lived state backend: redis or sqlite.')
 # Marks a process as a router-spawned child that only serves proxied request types
@@ -217,3 +219,10 @@ config.add('evo_code_map', str, None, 'EVO_CODE_MAP', description='Evo code map 
 config.add('evo_chat_source', str, None, 'EVO_CHAT_SOURCE', description='Evo chat source directory.')
 
 os.environ.setdefault('LAZYLLM_READER_USE_CACHE', str(bool(config['reader_use_cache'])).lower())
+
+# MinerU online SSL: default verify (lazyllm mineru_ssl_verify=True).
+# Skip only when LAZYMIND_RUNTIME_MODE=local or LAZYLLM_MINERU_SSL_VERIFY=false.
+_runtime_mode = (config['runtime_mode'] or 'cloud').strip().lower()
+_ssl_verify_env = os.environ.get('LAZYLLM_MINERU_SSL_VERIFY', '').strip().lower()
+if _runtime_mode == 'local' or _ssl_verify_env in ('false', '0', 'no'):
+    os.environ['LAZYLLM_MINERU_SSL_VERIFY'] = 'false'

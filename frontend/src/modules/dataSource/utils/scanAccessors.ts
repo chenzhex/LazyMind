@@ -8,6 +8,7 @@ import {
   type TreeNode,
 } from "@/api/generated/scan-client";
 import { AgentAppsAuth } from "@/components/auth";
+import { localizeErrorCode } from "@/components/request";
 import { DEFAULT_SCAN_TENANT_ID } from "../constants/options";
 
 export type ScanV2Client = ScanApi;
@@ -29,11 +30,11 @@ export interface ScanV2AgentHint {
 export function getScanTenantId() {
   const userInfo = AgentAppsAuth.getUserInfo() as
     | (ReturnType<typeof AgentAppsAuth.getUserInfo> & {
-        tenantId?: string;
-        tenant_id?: string;
-        tenantKey?: string;
-        tenant_key?: string;
-      })
+      tenantId?: string;
+      tenant_id?: string;
+      tenantKey?: string;
+      tenant_key?: string;
+    })
     | null;
 
   return (
@@ -95,6 +96,43 @@ export function getScanBindingAgentId(binding?: ScanV2Binding | null) {
 
 export function getScanBindingTreeKey(binding?: ScanV2Binding | null) {
   return `${binding?.tree_key || binding?.treeKey || ""}`.trim();
+}
+
+export function getFeishuBindingFormTarget(binding?: ScanV2Binding | null) {
+  const treeKey = getScanBindingTreeKey(binding);
+  const targetRef = getScanBindingTarget(binding);
+  return treeKey || targetRef;
+}
+
+export function getScanBindingDisplayName(binding?: ScanV2Binding | null) {
+  const extra = binding as Record<string, unknown> | undefined;
+  return `${binding?.core_parent_document_name || extra?.coreParentDocumentName || ""}`.trim();
+}
+
+export function buildScanBindingTargetLabels(
+  bindings: ScanV2Binding[] = [],
+  fallbackBinding?: ScanV2Binding | null,
+) {
+  const items =
+    bindings.length > 0 ? bindings : fallbackBinding ? [fallbackBinding] : [];
+  const labels: Record<string, string> = {};
+
+  items.forEach((item) => {
+    const displayName = getScanBindingDisplayName(item);
+    if (!displayName) {
+      return;
+    }
+    const targetRef = getScanBindingTarget(item);
+    const treeKey = getScanBindingTreeKey(item);
+    if (targetRef) {
+      labels[targetRef] = displayName;
+    }
+    if (treeKey) {
+      labels[treeKey] = displayName;
+    }
+  });
+
+  return labels;
 }
 
 export function inferSourceKind(source?: ScanV2Source | null, binding?: ScanV2Binding | null) {
@@ -161,8 +199,13 @@ export function getBindingSchedule(binding?: ScanV2Binding | null) {
 export function getBindingLastError(binding?: ScanV2Binding | null) {
   const error = binding?.last_error || binding?.lastError;
   if (!error) return "";
-  if (typeof error === "string") return error;
-  return error.message || error.error || JSON.stringify(error);
+  if (typeof error === "string") {
+    return localizeErrorCode(error, localizeErrorCode("2000509"));
+  }
+  return localizeErrorCode(
+    error.code || error.error_code,
+    localizeErrorCode("2000509"),
+  );
 }
 
 export function getDocumentDisplayName(item: ScanV2Document) {

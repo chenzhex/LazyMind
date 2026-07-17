@@ -25,14 +25,40 @@ def resolve_skill_editor_identity(
 ) -> Dict[str, Any]:
     raw_name = str(name or '').strip()
     raw_category = str(category or '').strip()
-    if raw_category and '/' in raw_name:
-        return {'error': 'Pass either category plus name, or name as category/name; do not use both.'}
-
-    if not raw_category and '/' in raw_name:
+    if '/' in raw_name:
         parts = [part for part in raw_name.split('/') if part]
         if len(parts) != 2 or raw_name.startswith('/') or raw_name.endswith('/') or '//' in raw_name:
-            return {'error': f"Skill key {raw_name!r} is invalid; expected category/name."}
-        raw_category, raw_name = parts
+            return {'error': f'Skill key {raw_name!r} is invalid; expected category/name.'}
+        key_category, raw_name = parts
+        normalized_key_category = normalize_skill_category(key_category)
+        if not normalized_key_category:
+            return {
+                'error': (
+                    f'Category {key_category!r} is invalid; it must be a single '
+                    "ASCII-safe path segment (only letters, digits, '-', '_' "
+                    "and '.'; no spaces, no Chinese, no '/')."
+                )
+            }
+        if raw_category:
+            normalized_category = normalize_skill_category(raw_category)
+            if not normalized_category:
+                return {
+                    'error': (
+                        f'Category {raw_category!r} is invalid; it must be a single '
+                        "ASCII-safe path segment (only letters, digits, '-', '_' "
+                        "and '.'; no spaces, no Chinese, no '/')."
+                    )
+                }
+            if normalized_category != normalized_key_category:
+                return {
+                    'error': (
+                        f'Skill key {name!r} conflicts with category {category!r}; '
+                        'they must refer to the same category.'
+                    )
+                }
+            raw_category = normalized_category
+        else:
+            raw_category = normalized_key_category
 
     if raw_category:
         name_error = validate_skill_name(raw_name)

@@ -34,6 +34,38 @@ func TestBuildChatRequestBodyUsesConversationIDDerivedSessionID(t *testing.T) {
 	}
 }
 
+func TestPluginStepParamsFromEventParamsPreservesChatSessionID(t *testing.T) {
+	params := pluginStepParamsFromEventParams(map[string]any{
+		"plugin_id":              "writer-plugin",
+		"step_id":                "generate_outline",
+		"session_id":             "ps-1",
+		"chat_session_id":        "conv-1_123",
+		"user_input":             "go",
+		"is_cold_start":          false,
+		"retry_hint":             "retry",
+		"partial_indices":        map[string]any{"outline": []any{float64(1), float64(3)}},
+		"history_files_per_turn": map[string]any{"2": []any{"a.png", "b.pdf"}},
+		"filters":                map[string]any{"kb_id": "kb-1"},
+		"user_id":                "user-1",
+	})
+
+	if params.PluginID != "writer-plugin" || params.StepID != "generate_outline" || params.SessionID != "ps-1" {
+		t.Fatalf("unexpected basic params: %+v", params)
+	}
+	if params.ChatSessionID != "conv-1_123" {
+		t.Fatalf("expected chat_session_id to be preserved, got %q", params.ChatSessionID)
+	}
+	if got := params.PartialIndices["outline"]; len(got) != 2 || got[0] != 1 || got[1] != 3 {
+		t.Fatalf("unexpected partial_indices: %#v", params.PartialIndices)
+	}
+	if got := params.HistoryFilesPerTurn["2"]; len(got) != 2 || got[0] != "a.png" || got[1] != "b.pdf" {
+		t.Fatalf("unexpected history_files_per_turn: %#v", params.HistoryFilesPerTurn)
+	}
+	if params.Filters["kb_id"] != "kb-1" || params.UserID != "user-1" || params.RetryHint != "retry" {
+		t.Fatalf("unexpected remaining params: %+v", params)
+	}
+}
+
 func TestBuildChatRequestBodyUsesDatasetListFilters(t *testing.T) {
 	body := buildChatRequestBody(nil, nil, "conv-1", "", "hello", nil, map[string]any{
 		"conversation": map[string]any{
@@ -332,6 +364,17 @@ func TestGetConversationDetailReturnsStoredMultimodalInput(t *testing.T) {
 	}
 }
 
+func TestChatHistoryResponseIncludesMentions(t *testing.T) {
+	item := chatHistoryToResponseItem(orm.ChatHistory{
+		RawContent: "查看知识库1",
+		Ext:        json.RawMessage(`{"input":[{"input_type":"text","text":"查看知识库1"}],"mentions":[{"mention_id":"m1","type":"knowledge_base","resource_id":"ds_1","display_name":"知识库1","start":2,"end":7}]}`),
+	})
+	mentions, ok := item["mentions"].([]any)
+	if !ok || len(mentions) != 1 {
+		t.Fatalf("mentions missing from history response: %#v", item["mentions"])
+	}
+}
+
 func TestGetConversationDetailFiltersMissingDatasets(t *testing.T) {
 	db, err := orm.Connect(orm.DriverSQLite, t.TempDir()+"/chat-detail-datasets.db")
 	if err != nil {
@@ -465,6 +508,7 @@ func TestGetConversationHistoryReturnsStoredMultimodalInput(t *testing.T) {
 		RawContent:     "记住这个是王牌超",
 		Content:        "记住这个是王牌超",
 		Result:         "好的",
+		ToolCallTurns:  8,
 		Ext:            ext,
 		TimeMixin:      orm.TimeMixin{CreateTime: now, UpdateTime: now},
 	}).Error; err != nil {
@@ -484,7 +528,8 @@ func TestGetConversationHistoryReturnsStoredMultimodalInput(t *testing.T) {
 	var resp struct {
 		ConversationID string `json:"conversation_id"`
 		History        []struct {
-			Input []map[string]any `json:"input"`
+			Input         []map[string]any `json:"input"`
+			ToolCallTurns int              `json:"tool_call_turns"`
 		} `json:"history"`
 		TotalSize int `json:"total_size"`
 	}
@@ -505,6 +550,9 @@ func TestGetConversationHistoryReturnsStoredMultimodalInput(t *testing.T) {
 	}
 	if got := resp.History[0].Input[1]["uri"]; got != "/var/lib/lazymind/uploads/tmp/users/u1/files/upload_a.jpg" {
 		t.Fatalf("expected image uri in history response, got %#v", got)
+	}
+	if got := resp.History[0].ToolCallTurns; got != 8 {
+		t.Fatalf("expected tool_call_turns 8, got %d", got)
 	}
 }
 
@@ -555,7 +603,8 @@ func TestBuildChatRequestBodyFilesMergeDedupesAndSkipsHTTP(t *testing.T) {
 
 func TestBuildLazyChatRequestMapsAllFields(t *testing.T) {
 	req := buildLazyChatRequest(map[string]any{
-		"query":      "hello",
+		"query":      "injected context\n\nhello",
+		"user_query": "hello",
 		"session_id": "conv-1",
 		"history": []any{
 			map[string]any{"role": "user", "content": "q1"},
@@ -619,7 +668,7 @@ func TestBuildLazyChatRequestMapsAllFields(t *testing.T) {
 		},
 	})
 
-	if req.Message.Query != "hello" || req.Conversation.SessionID != "conv-1" {
+	if req.Message.Query != "injected context\n\nhello" || req.Message.UserQuery != "hello" || req.Conversation.SessionID != "conv-1" {
 		t.Fatalf("unexpected base fields: %#v", req)
 	}
 	if len(req.Message.History) != 2 || req.Message.History[0].Role != "user" || req.Message.History[1].Content != "a1" {

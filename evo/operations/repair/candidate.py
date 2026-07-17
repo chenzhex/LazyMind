@@ -1,18 +1,16 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from pathlib import Path
+from statistics import fmean
 from typing import Any
 
-from evo.operations.abtest.materializers import (
-    candidate_rag_answer,
-    candidate_service,
-    compare_eval_detail_for_repair,
-)
+from evo.operations.abtest.candidate import candidate_rag_answer, candidate_service, discard_candidate
+from evo.operations.abtest.comparison import GOODCASE_MAX_OVERALL_DROP, compare_eval_detail_for_repair
 from evo.operations.analysis.summary import build_analysis_from_answers
 from evo.operations.eval.judge import judge_case
 from evo.operations.eval.materializers import build_eval_detail_summary
-from evo.operations.router_manager import RouterManager, RouterManagerError
 
 from .errors import EXTERNAL_CHAT_FAILURE_TYPES
 from .trace import safe_emit
@@ -25,6 +23,8 @@ PUBLIC_SERVICE_KEYS = {
     'router_admin_url',
     'code_path',
 }
+EPSILON = 0.0001
+BADCASE_MIN_OVERALL_GAIN = 0.10
 
 
 def validate_candidate_patch(
@@ -56,15 +56,18 @@ def validate_candidate_patch(
     if not selected:
         return {'status': 'rejected', 'accepted': False, 'reason': 'no_validation_cases'}
     patch = {'status': 'verified', 'workspace_ref': str(root), 'diff': diff}
-    safe_emit(trace, 'candidate.service_started', status='started', attempt=attempt,
-          payload={'case_count': len(selected)})
+    safe_emit(
+        trace, 'candidate.service_started', status='started', attempt=attempt,
+        payload={'case_count': len(selected)},
+    )
     service: Mapping[str, Any] | None = None
-    cleanup_service = True
     try:
-        service = candidate_service(candidate_config, patch, ctx)
+        service = candidate_service(candidate_config, patch, ctx, temporary=True)
     except Exception as exc:
-        safe_emit(trace, 'candidate.service_failed', status='failed', attempt=attempt,
-              payload={'error_type': type(exc).__name__})
+        safe_emit(
+            trace, 'candidate.service_failed', status='failed', attempt=attempt,
+            payload={'error_type': type(exc).__name__},
+        )
         raise
     try:
         public_service = {key: value for key, value in service.items()
@@ -76,8 +79,10 @@ def validate_candidate_patch(
             if key in health
         }
         if service.get('status') != 'ready':
-            safe_emit(trace, 'candidate.service_failed', status='failed', attempt=attempt,
-                  payload={'reason': 'candidate_service_failed', 'service': public_service})
+            safe_emit(
+                trace, 'candidate.service_failed', status='failed', attempt=attempt,
+                payload={'reason': 'candidate_service_failed', 'service': public_service},
+            )
             return {'status': 'candidate_service_failed', 'accepted': False, 'reason': 'candidate_service_failed',
                     'service': public_service, 'case_ids': list(selected)}
         safe_emit(trace, 'candidate.service_ready', status='completed', attempt=attempt,
@@ -90,8 +95,10 @@ def validate_candidate_patch(
                 answers[case_id] = answer
                 judges[case_id] = judge_case(case, answer, eval_policy)
             except Exception as exc:
-                safe_emit(trace, 'candidate.case_completed', status='failed', attempt=attempt,
-                      payload={'case_id': case_id, 'error_type': type(exc).__name__})
+                safe_emit(
+                    trace, 'candidate.case_completed', status='failed', attempt=attempt,
+                    payload={'case_id': case_id, 'error_type': type(exc).__name__},
+                )
                 raise
             safe_emit(trace, 'candidate.case_completed', status='completed', attempt=attempt, payload={
                 'case_id': case_id,
@@ -155,12 +162,16 @@ def validate_candidate_patch(
                 'early_stop_reason': early_stop_reason,
             }
         try:
-            safe_emit(trace, 'analysis.candidate_started', status='started', attempt=attempt,
-                  payload={'case_count': len(selected)})
+            safe_emit(
+                trace, 'analysis.candidate_started', status='started', attempt=attempt,
+                payload={'case_count': len(selected)},
+            )
             analysis = build_analysis_from_answers(selected, answers, judges) | {'id': 'repair.candidate_analysis'}
         except Exception as exc:
-            safe_emit(trace, 'analysis.candidate_completed', status='failed', attempt=attempt,
-                  payload={'error_type': type(exc).__name__})
+            safe_emit(
+                trace, 'analysis.candidate_completed', status='failed', attempt=attempt,
+                payload={'error_type': type(exc).__name__},
+            )
             return {
                 'status': 'rejected',
                 'accepted': False,
@@ -169,8 +180,10 @@ def validate_candidate_patch(
                 'candidate_analysis_error': str(exc),
             }
         delta = _analysis_delta_from(plan, comparison, analysis, candidate_summary)
-        safe_emit(trace, 'analysis.candidate_completed', status='completed', attempt=attempt,
-              payload={'row_count': len(analysis.get('rows') or [])})
+        safe_emit(
+            trace, 'analysis.candidate_completed', status='completed', attempt=attempt,
+            payload={'row_count': len(analysis.get('rows') or [])},
+        )
         safe_emit(trace, 'analysis.delta_completed', status='completed', attempt=attempt, payload={
             key: delta.get(key)
             for key in ('target_group_status', 'target_remaining_badcase_count',
@@ -178,7 +191,6 @@ def validate_candidate_patch(
                         'goodcase_guard_status', 'recommended_action')
         })
         accepted, reason = _candidate_gate(comparison, candidate_summary, delta)
-        cleanup_service = not accepted
         return {
             'status': 'accepted' if accepted else 'rejected',
             'accepted': accepted,
@@ -188,8 +200,7 @@ def validate_candidate_patch(
             'analysis_delta': delta,
         }
     finally:
-        if cleanup_service:
-            _cleanup_candidate_service(service, trace=trace, attempt=attempt)
+        _cleanup_candidate_service(service, trace=trace, attempt=attempt)
 
 
 def _cleanup_candidate_service(
@@ -198,31 +209,12 @@ def _cleanup_candidate_service(
     trace: Any | None = None,
     attempt: int | None = None,
 ) -> dict[str, Any]:
-    if not service:
-        return {'status': 'skipped', 'reason': 'missing_service'}
-    if service.get('status') != 'ready':
-        return {'status': 'skipped', 'reason': 'service_not_ready'}
-    if service.get('cleanup_allowed') is not True:
-        return {'status': 'skipped', 'reason': 'cleanup_not_owned'}
-    registered = service.get('register_response') if isinstance(service.get('register_response'), Mapping) else {}
-    if registered.get('reused') is True:
-        return {'status': 'skipped', 'reason': 'reused_service'}
-    algorithm_id = _text(service.get('algorithm_id'))
-    admin_url = _text(service.get('router_admin_url'))
-    if not algorithm_id or not admin_url:
-        return {'status': 'skipped', 'reason': 'missing_router_target'}
-    if not algorithm_id.startswith('evo_'):
-        return {'status': 'skipped', 'reason': 'non_evo_algorithm', 'algorithm_id': algorithm_id}
-
-    payload = {'algorithm_id': algorithm_id}
-    try:
-        RouterManager(admin_url, _text(service.get('router_chat_url'))).stop_algorithm(algorithm_id)
-    except RouterManagerError as exc:
-        safe_emit(trace, 'candidate.service_stopped', status='failed', attempt=attempt,
-                  payload=payload | {'error_type': exc.kind})
-        return {'status': 'failed', 'algorithm_id': algorithm_id, 'error_type': exc.kind, 'message': str(exc)}
-    safe_emit(trace, 'candidate.service_stopped', status='completed', attempt=attempt, payload=payload)
-    return {'status': 'completed', 'algorithm_id': algorithm_id}
+    result = discard_candidate(service)
+    if result['status'] in {'completed', 'failed'}:
+        safe_emit(trace, 'candidate.service_stopped', status=result['status'], attempt=attempt, payload=result)
+    if result['status'] == 'failed':
+        raise RuntimeError(str(result.get('message') or 'failed to discard repair candidate'))
+    return result
 
 
 def _analysis_delta_from(
@@ -269,14 +261,15 @@ def _analysis_delta_from(
     resolved = not remaining and not target_badcases
     improved = target_remaining_delta > 0
     status = 'resolved' if resolved else 'improved' if improved else 'unchanged'
-    goodcase_guard = comparison.get('goodcase_guard') if isinstance(comparison.get('goodcase_guard'), Mapping) else {}
-    if goodcase_guard.get('status') == 'failed':
+    score_gate = _overall_score_gate(comparison)
+    if score_gate['goodcase_status'] == 'failed':
         status = 'regressed'
-    recommended_action = (
-        'accept_patch'
-        if resolved and not new_groups else 'continue_current_patch'
-        if improved and goodcase_guard.get('status') != 'failed' else 'rollback_to_baseline'
+    score_ready = (
+        score_gate['overall_status'] == 'passed'
+        and score_gate['badcase_status'] == 'passed'
+        and score_gate['goodcase_status'] != 'failed'
     )
+    recommended_action = 'accept_patch' if score_ready else 'rollback_to_baseline'
     return {
         'status': 'completed',
         'target_group_status': status,
@@ -286,9 +279,10 @@ def _analysis_delta_from(
         'target_total': len(target),
         'new_group_count': len(new_groups),
         'new_groups': new_groups[:5],
-        'goodcase_guard_status': goodcase_guard.get('status') or '',
+        'goodcase_guard_status': score_gate['goodcase_status'],
         'metric_delta': delta,
         'target_metric_delta': target_metric_delta,
+        'overall_score_gate': score_gate,
         'primary_metrics': list(selected.get('primary_metrics') or ()),
         'execution_failures': candidate_summary.get('execution_failures') or [],
         'recommended_action': recommended_action,
@@ -304,15 +298,10 @@ def _candidate_gate(
         return False, _text(comparison.get('verdict')) or 'comparison_not_completed'
     if candidate_summary.get('execution_failures'):
         return False, 'candidate_execution_failed'
-    if comparison.get('goodcase_guard', {}).get('status') == 'failed':
-        return False, 'goodcase_guard_failed'
-    if delta.get('new_group_count'):
-        return False, 'target_followup_groups_detected'
-    if delta.get('target_group_status') not in {'resolved', 'improved'}:
-        return False, 'target_group_not_improved'
-    if _primary_metric_value(delta) < 0.0001:
-        return False, 'metric_not_improved'
-    return True, 'target_group_improved'
+    metric_status = _metric_gate(comparison)
+    if metric_status:
+        return False, metric_status
+    return True, 'overall_score_improved'
 
 
 def _target_metric_delta(selected: Mapping[str, Any], rows: list[Mapping[str, Any]]) -> dict[str, float]:
@@ -335,14 +324,65 @@ def _target_metric_delta(selected: Mapping[str, Any], rows: list[Mapping[str, An
     return {key: round(sum(values) / len(values), 4) for key, values in result.items() if values}
 
 
-def _primary_metric_value(delta: Mapping[str, Any]) -> float:
-    metrics = delta.get('target_metric_delta') if isinstance(delta.get('target_metric_delta'), Mapping) else {}
-    primary = [_text(item) for item in delta.get('primary_metrics') or () if _text(item)]
-    values = [_float(metrics.get(metric)) for metric in primary if metric in metrics]
-    if values:
-        return max(values)
-    aggregate = delta.get('metric_delta') if isinstance(delta.get('metric_delta'), Mapping) else {}
-    return max(_float(aggregate.get('answer_correctness')), _float(aggregate.get('overall_score')))
+def _metric_gate(comparison: Mapping[str, Any]) -> str:
+    score_gate = _overall_score_gate(comparison)
+    if score_gate['overall_status'] == 'failed':
+        return 'overall_score_not_improved'
+    if score_gate['badcase_status'] != 'passed':
+        return 'badcase_overall_not_improved'
+    if score_gate['goodcase_status'] == 'failed':
+        return 'goodcase_overall_regressed'
+    return ''
+
+
+def _overall_score_gate(comparison: Mapping[str, Any]) -> dict[str, Any]:
+    metrics = comparison.get('metrics') if isinstance(comparison.get('metrics'), Mapping) else {}
+    delta = metrics.get('delta') if isinstance(metrics.get('delta'), Mapping) else {}
+    overall_delta = _float(delta.get('overall_score'))
+    result = {
+        'overall_delta': round(overall_delta, 4) if math.isfinite(overall_delta) else overall_delta,
+        'overall_status': 'passed' if math.isfinite(overall_delta) and overall_delta > EPSILON else 'failed',
+        'badcase_status': 'missing',
+        'goodcase_status': 'not_applicable',
+    }
+    badcase, goodcase = [], []
+    for row in comparison.get('case_deltas') or ():
+        if not isinstance(row, Mapping):
+            continue
+        before = row.get('before') if isinstance(row.get('before'), Mapping) else {}
+        after = row.get('after') if isinstance(row.get('after'), Mapping) else {}
+        pair = (_float(before.get('overall_score')), _float(after.get('overall_score')))
+        if not all(math.isfinite(value) for value in pair):
+            return result | {'badcase_status': 'failed', 'goodcase_status': 'failed'}
+        if _text(row.get('baseline_quality')) == 'good':
+            goodcase.append(pair)
+        else:
+            badcase.append(pair)
+    if badcase:
+        before = fmean(item[0] for item in badcase)
+        after = fmean(item[1] for item in badcase)
+        gain = after - before
+        result |= {
+            'badcase_count': len(badcase),
+            'badcase_baseline_overall_avg': round(before, 4),
+            'badcase_candidate_overall_avg': round(after, 4),
+            'badcase_overall_delta': round(gain, 4),
+            'badcase_required_delta': BADCASE_MIN_OVERALL_GAIN,
+            'badcase_status': 'passed' if gain + EPSILON >= BADCASE_MIN_OVERALL_GAIN else 'failed',
+        }
+    if goodcase:
+        before = fmean(item[0] for item in goodcase)
+        after = fmean(item[1] for item in goodcase)
+        drop = before - after
+        result |= {
+            'goodcase_count': len(goodcase),
+            'goodcase_baseline_overall_avg': round(before, 4),
+            'goodcase_candidate_overall_avg': round(after, 4),
+            'goodcase_overall_delta': round(after - before, 4),
+            'goodcase_allowed_drop': GOODCASE_MAX_OVERALL_DROP,
+            'goodcase_status': 'passed' if drop <= GOODCASE_MAX_OVERALL_DROP + EPSILON else 'failed',
+        }
+    return result
 
 
 def _float(value: Any) -> float:

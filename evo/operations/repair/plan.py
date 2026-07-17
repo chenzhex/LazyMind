@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from hashlib import sha1
 from typing import Any
 
-DEFAULT_ALLOWED_ROOTS = ('lazymind/chat',)
+DEFAULT_ALLOWED_ROOTS = ('algorithm/lazymind/chat', 'algorithm/lazymind/parsing')
 DEFAULT_BLOCKED_ROOTS = ('tests', '.git', 'lazyllm', 'evo', 'data')
 BUDGET_LIMITS = {
     'target_case_budget': (8, 1, 30),
@@ -38,7 +38,9 @@ def build_repair_plan(analysis: Mapping[str, Any], policy: Mapping[str, Any]) ->
         }
 
     if not rows:
-        return empty_plan('skipped_no_analysis_rows')
+        return empty_plan('blocked_no_analysis_rows', blocked=True)
+    if not _inside_domain_roots(allowed_roots):
+        return empty_plan('blocked_invalid_allowed_roots', blocked=True)
     if 'repair_group_queue' not in analysis:
         return empty_plan('blocked_missing_repair_group_queue', blocked=True)
 
@@ -97,8 +99,6 @@ def build_repair_plan(analysis: Mapping[str, Any], policy: Mapping[str, Any]) ->
         }
         if missing:
             reason = f"malformed_repair_group_missing_{'_'.join(missing)}"
-        elif not group['candidate_files']:
-            reason = 'function block has no editable candidate files in allowed roots'
         elif confidence < 0.5:
             reason = 'selected group confidence below patch threshold'
         elif group.get('issue_category') == 'tracing' and badcase_count < 2:
@@ -109,7 +109,7 @@ def build_repair_plan(analysis: Mapping[str, Any], policy: Mapping[str, Any]) ->
         groups.append(group)
 
     if not groups:
-        return empty_plan('skipped_no_repairable_group')
+        return empty_plan('blocked_no_repairable_group', blocked=True)
 
     selected_rank, selected = next(
         ((rank, group) for rank, group in enumerate(groups, start=1) if not group.get('deeper_analysis_reason')),
@@ -210,9 +210,9 @@ def build_repair_plan(analysis: Mapping[str, Any], policy: Mapping[str, Any]) ->
         'guard_metrics': list(selected.get('guard_metrics') or ()),
         'invariants': invariants,
         'validation_focus': [
-            f"target group {selected['group_id']} must improve or resolve",
-            f"primary metrics: {', '.join(selected.get('primary_metrics') or [])}",
-            f"guard metrics: {', '.join(selected.get('guard_metrics') or [])}",
+            'overall_score average must improve across validation cases',
+            'badcase overall_score average must improve by at least 0.10',
+            'goodcase overall_score average must not drop by more than 0.05',
             f"validation cases: {', '.join(validation_cases)}",
         ],
         'rollback_triggers': [
@@ -220,9 +220,9 @@ def build_repair_plan(analysis: Mapping[str, Any], policy: Mapping[str, Any]) ->
             'blocked root touched',
             'compile or smoke validation failed',
             'candidate service cannot start or route to algorithm_id',
-            'candidate analysis shows target group unchanged or regressed',
-            'goodcase guard regression',
-            'new high-severity repair group appears',
+            'overall_score average does not improve',
+            'badcase overall_score average improves by less than 0.10',
+            'goodcase overall_score average drops by more than 0.05',
         ],
         'needs_deeper_analysis': bool(blocked_reason),
         'deeper_analysis_reason': blocked_reason,
@@ -261,6 +261,13 @@ def _path(value: Any) -> str:
     if any(part in {'', '.', '..'} for part in parts):
         return ''
     return '/'.join(parts)
+
+
+def _inside_domain_roots(roots: list[str]) -> bool:
+    return bool(roots) and all(
+        any(root == domain or root.startswith(f'{domain}/') for domain in DEFAULT_ALLOWED_ROOTS)
+        for root in roots
+    )
 
 
 def _items(value: Any) -> list[Any]:

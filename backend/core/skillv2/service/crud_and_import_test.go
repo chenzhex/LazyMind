@@ -179,6 +179,53 @@ func TestDeleteSkill_TrashOnlyKeepsSkillGraph(t *testing.T) {
 	}
 }
 
+func TestTrashListAndRestoreSkill(t *testing.T) {
+	db := newSkillV2TestDB(t)
+	seedSkillWithHeadRevision(t, db, "skill1", "rev1")
+	seedSkillWithHeadRevision(t, db, "skill2", "rev2")
+	svc := NewSkillService(SkillServiceDeps{DB: db, BlobStore: NewBlobStore(db, NewLocalObjectStore(t.TempDir())), Clock: fixedClock()})
+
+	if err := svc.DeleteSkill(context.Background(), DeleteSkillRequest{SkillID: "skill1", UserID: "user_001"}); err != nil {
+		t.Fatalf("DeleteSkill returned error: %v", err)
+	}
+	active, err := svc.ListSkills(context.Background(), ListSkillsRequest{UserID: "user_001"})
+	if err != nil {
+		t.Fatalf("ListSkills returned error: %v", err)
+	}
+	if len(active.Items) != 1 || active.Items[0].ID != "skill2" {
+		t.Fatalf("active list = %#v, want only skill2", active.Items)
+	}
+	trash, err := svc.ListTrashedSkills(context.Background(), ListSkillsRequest{UserID: "user_001"})
+	if err != nil {
+		t.Fatalf("ListTrashedSkills returned error: %v", err)
+	}
+	if len(trash.Items) != 1 || trash.Items[0].ID != "skill1" || trash.Items[0].DeletedAt == nil || trash.Items[0].DeletedBy != "user_001" {
+		t.Fatalf("trash list = %#v, want trashed skill1", trash.Items)
+	}
+	if err := svc.RestoreSkill(context.Background(), RestoreSkillRequest{SkillID: "skill1", UserID: "user_001"}); err != nil {
+		t.Fatalf("RestoreSkill returned error: %v", err)
+	}
+	active, err = svc.ListSkills(context.Background(), ListSkillsRequest{UserID: "user_001"})
+	if err != nil {
+		t.Fatalf("ListSkills after restore returned error: %v", err)
+	}
+	if len(active.Items) != 2 {
+		t.Fatalf("active list after restore count = %d, want 2", len(active.Items))
+	}
+	trash, err = svc.ListTrashedSkills(context.Background(), ListSkillsRequest{UserID: "user_001"})
+	if err != nil {
+		t.Fatalf("ListTrashedSkills after restore returned error: %v", err)
+	}
+	if len(trash.Items) != 0 {
+		t.Fatalf("trash list after restore = %#v, want empty", trash.Items)
+	}
+	if db.Migrator().HasTable("skill_search_indexes") {
+		if got := countRows(t, db, "skill_search_indexes", "skill_id = ?", "skill1"); got != 1 {
+			t.Fatalf("search index count after restore = %d, want 1", got)
+		}
+	}
+}
+
 func TestPurgeSkill_RemovesSkillGraphAndKeepsSharedBlob(t *testing.T) {
 	db := newSkillV2TestDB(t)
 	seedSkillWithHeadRevision(t, db, "skill1", "rev1")
@@ -186,6 +233,7 @@ func TestPurgeSkill_RemovesSkillGraphAndKeepsSharedBlob(t *testing.T) {
 	sharedHash := "h_shared"
 	seedSharedBlobReference(t, db, "rev1", sharedHash)
 	seedSharedBlobReference(t, db, "rev2", sharedHash)
+	seedSkillDraftReviewRows(t, db, "skill1", "review1")
 	svc := NewSkillService(SkillServiceDeps{DB: db, BlobStore: NewBlobStore(db, NewLocalObjectStore(t.TempDir())), Clock: fixedClock()})
 
 	if err := svc.DeleteSkill(context.Background(), DeleteSkillRequest{SkillID: "skill1", UserID: "user_001"}); err != nil {
@@ -204,6 +252,9 @@ func TestPurgeSkill_RemovesSkillGraphAndKeepsSharedBlob(t *testing.T) {
 		{table: "skill_draft_entries", where: "skill_id = ?", args: []any{"skill1"}},
 		{table: "skill_revisions", where: "skill_id = ?", args: []any{"skill1"}},
 		{table: "skill_revision_entries", where: "revision_id = ?", args: []any{"rev1"}},
+		{table: "skill_draft_review_sessions", where: "skill_id = ?", args: []any{"skill1"}},
+		{table: "skill_draft_review_action_batches", where: "review_session_id = ?", args: []any{"review1"}},
+		{table: "skill_draft_review_action_items", where: "review_session_id = ?", args: []any{"review1"}},
 	} {
 		if got := countRows(t, db, tc.table, tc.where, tc.args...); got != 0 {
 			t.Fatalf("%s retained skill1 rows: %d", tc.table, got)
@@ -214,6 +265,33 @@ func TestPurgeSkill_RemovesSkillGraphAndKeepsSharedBlob(t *testing.T) {
 	}
 	if _, err := svc.ReadFile(context.Background(), FileRef{SkillID: "skill2", RefType: "head", Path: "shared.md"}); err != nil {
 		t.Fatalf("skill2 shared file became unreadable: %v", err)
+	}
+}
+
+func TestEmptyTrash_PurgesOnlyTrashedSkills(t *testing.T) {
+	db := newSkillV2TestDB(t)
+	seedSkillWithHeadRevision(t, db, "skill1", "rev1")
+	seedSkillWithHeadRevision(t, db, "skill2", "rev2")
+	seedSkillWithHeadRevision(t, db, "skill3", "rev3")
+	svc := NewSkillService(SkillServiceDeps{DB: db, BlobStore: NewBlobStore(db, NewLocalObjectStore(t.TempDir())), Clock: fixedClock()})
+
+	for _, skillID := range []string{"skill1", "skill2"} {
+		if err := svc.DeleteSkill(context.Background(), DeleteSkillRequest{SkillID: skillID, UserID: "user_001"}); err != nil {
+			t.Fatalf("DeleteSkill(%s) returned error: %v", skillID, err)
+		}
+	}
+	count, err := svc.EmptyTrash(context.Background(), EmptyTrashRequest{UserID: "user_001"})
+	if err != nil {
+		t.Fatalf("EmptyTrash returned error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("EmptyTrash purged %d skills, want 2", count)
+	}
+	if got := countRows(t, db, "skills", "id IN ?", []string{"skill1", "skill2"}); got != 0 {
+		t.Fatalf("trashed skill rows retained after empty trash: %d", got)
+	}
+	if got := countRows(t, db, "skills", "id = ? AND deleted_at IS NULL", "skill3"); got != 1 {
+		t.Fatalf("active skill3 count = %d, want 1", got)
 	}
 }
 
@@ -280,6 +358,54 @@ func TestAutoEvo_WritesDraftOverlay(t *testing.T) {
 	assertHeadRevisionUnchanged(t, db, "skill1", "rev1")
 	if got := countRows(t, db, "skill_draft_entries", "skill_id = ?", "skill1"); got != 1 {
 		t.Fatalf("skill_draft_entries count = %d, want 1", got)
+	}
+}
+
+func seedSkillDraftReviewRows(t *testing.T, db *gorm.DB, skillID, reviewID string) {
+	t.Helper()
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS skill_draft_review_sessions (id varchar(36) PRIMARY KEY, skill_id varchar(36), base_revision_id varchar(36), draft_version_at_start integer, draft_snapshot_hash varchar(64), status varchar(32), version integer, undo_limit integer, created_at datetime, updated_at datetime)`,
+		`CREATE TABLE IF NOT EXISTS skill_draft_review_action_batches (id varchar(36) PRIMARY KEY, review_session_id varchar(36), sequence integer, created_at datetime)`,
+		`CREATE TABLE IF NOT EXISTS skill_draft_review_action_items (id varchar(36) PRIMARY KEY, batch_id varchar(36), review_session_id varchar(36), path text, hunk_id text, before_decision varchar(16), after_decision varchar(16), created_at datetime)`,
+	} {
+		if err := db.Exec(stmt).Error; err != nil {
+			t.Fatalf("create review test table: %v", err)
+		}
+	}
+	now := fixedClock().Now()
+	if err := db.Table("skill_draft_review_sessions").Create(map[string]any{
+		"id":                     reviewID,
+		"skill_id":               skillID,
+		"base_revision_id":       "rev1",
+		"draft_version_at_start": 1,
+		"draft_snapshot_hash":    "h_review_snapshot",
+		"status":                 "active",
+		"version":                1,
+		"undo_limit":             20,
+		"created_at":             now,
+		"updated_at":             now,
+	}).Error; err != nil {
+		t.Fatalf("seed review session: %v", err)
+	}
+	if err := db.Table("skill_draft_review_action_batches").Create(map[string]any{
+		"id":                "batch-" + reviewID,
+		"review_session_id": reviewID,
+		"sequence":          1,
+		"created_at":        now,
+	}).Error; err != nil {
+		t.Fatalf("seed review action batch: %v", err)
+	}
+	if err := db.Table("skill_draft_review_action_items").Create(map[string]any{
+		"id":                "item-" + reviewID,
+		"batch_id":          "batch-" + reviewID,
+		"review_session_id": reviewID,
+		"path":              "SKILL.md",
+		"hunk_id":           "hunk_1",
+		"before_decision":   "pending",
+		"after_decision":    "accept",
+		"created_at":        now,
+	}).Error; err != nil {
+		t.Fatalf("seed review action item: %v", err)
 	}
 }
 

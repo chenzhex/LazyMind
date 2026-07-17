@@ -5,12 +5,17 @@ import {
   Source,
 } from "@/api/generated/chatbot-client";
 import type { SendMessageParams } from "../ChatInput";
+import type { ChatMention } from "../ChatInput/MentionEditor";
 import type { ChatConfig } from "../ChatConfigs";
 
 export interface ChatImperativeProps {
   replaceMessageList: (id: string, data: any[]) => void;
   createNewChat: () => void;
   sendMessage: (params: SendMessageParams) => void;
+  disconnectConversationStream?: (
+    conversationId: string,
+    options?: { persistResumeKey?: boolean },
+  ) => void;
   uploadFiles?: (files: File[]) => void;
   openResumeSSE?: (conversationId: string) => void;
   appendAutoAdvanceTurn?: (conversationId: string, driverMessage: string) => void;
@@ -87,4 +92,6 @@ export interface ChatMessage {
   display_delta?: string;
   cite_message?: string;
   cite_messages?: string[];
+  tool_call_turns?: number;
+  mentions?: ChatMention[];
 }

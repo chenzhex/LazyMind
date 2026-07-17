@@ -10,27 +10,33 @@ from .kb import KBToolGroup, kb_tmp_search
 from .local_fs import LocalFSToolGroup
 from .memory_editor import memory_editor
 from .memory_reader import read_memory
-from .multimodal import image_editor, image_generator, vision_extractor
+from .multimodal import image_editor, image_generator, video_generator, video_to_gif, vision_extractor
+from .plugin_chat_tools import create_plugin_draft
 from .schedule import build_schedule_tool_group
-from .system_query import SystemQueryToolGroup
 from .skill_editor import SkillEditorToolGroup
+from .system_query import SystemQueryToolGroup
 from .vocab_learn import vocab_learn
 from .web_search import url_fetch
+from .writer import WriterToolGroup
 
 __all__ = [
     'build_schedule_tool_group',
     'calculator',
+    'create_plugin_draft',
     'ExternalDBToolGroup',
     'image_editor',
     'image_generator',
+    'video_generator',
+    'video_to_gif',
     'KBToolGroup',
     'kb_tmp_search',
     'LocalFSToolGroup',
     'memory_editor',
     'read_memory',
     'vision_extractor',
-    'SystemQueryToolGroup',
     'SkillEditorToolGroup',
+    'SystemQueryToolGroup',
     'vocab_learn',
     'url_fetch',
+    'WriterToolGroup',
 ]

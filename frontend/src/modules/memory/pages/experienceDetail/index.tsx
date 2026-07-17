@@ -1,8 +1,9 @@
-import { Button, Empty, Space, Tag } from "antd";
+import { Button, Empty, Tag } from "antd";
 import { HistoryOutlined, LockOutlined } from "@ant-design/icons";
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { DetailPageHeader } from "@/components/ui";
+import PersonalResourceContentEditor from "../../components/personalResource/PersonalResourceContentEditor";
 import ResourceVersionDrawer from "../../components/ResourceVersionDrawer";
 import RouteLoading from "../../components/RouteLoading";
 import { useMemoryManagementOutletContext } from "../../context";
@@ -25,9 +26,10 @@ export default function MemoryExperienceDetailPage() {
     experienceAssets,
     experienceInitialized,
     navigateToMemoryList,
-    openModal,
+    refreshExperienceSection,
   } = useMemoryManagementOutletContext();
   const [versionDrawerOpen, setVersionDrawerOpen] = useState(false);
+  const [contentReloadKey, setContentReloadKey] = useState(0);
 
   const experience = useMemo(
     () => experienceAssets.find((item: ExperienceAsset) => item.id === itemId) || null,
@@ -36,6 +38,7 @@ export default function MemoryExperienceDetailPage() {
   const resourceVersionType = resolveExperienceResourceVersionType(
     experience?.resourceType,
   );
+  const canEditExperience = Boolean(experience) && !experience?.protect;
 
   if (!experienceInitialized && !experience) {
     return <RouteLoading title={t("admin.memoryExperienceDetailTitle")} />;
@@ -82,21 +85,13 @@ export default function MemoryExperienceDetailPage() {
           </div>
 
           <div className="memory-experience-detail-body">
-            <div className="memory-skill-detail-editor-toolbar">
-              <div className="memory-skill-detail-editor-heading">
-                <label>{t("admin.memoryExperienceDetailContent")}</label>
-              </div>
-              {experience ? (
-                <Space size={8}>
-                  <Button type="primary" onClick={() => openModal("edit", experience)}>
-                    {t("admin.memoryEditItem")}
-                  </Button>
-                </Space>
-              ) : null}
-            </div>
-            <div className="memory-experience-detail-content">
-              <pre>{experience.content || "-"}</pre>
-            </div>
+            <PersonalResourceContentEditor
+              key={contentReloadKey}
+              resourceType={experience.resourceType}
+              canEdit={canEditExperience}
+              t={t}
+              onUpdated={refreshExperienceSection}
+            />
           </div>
         </div>
       )}
@@ -109,6 +104,10 @@ export default function MemoryExperienceDetailPage() {
           resourceType={resourceVersionType}
           t={t}
           onClose={() => setVersionDrawerOpen(false)}
+          onRolledBack={async () => {
+            setContentReloadKey((value) => value + 1);
+            await refreshExperienceSection({ silent: true });
+          }}
         />
       ) : null}
     </div>

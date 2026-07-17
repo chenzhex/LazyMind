@@ -1,4 +1,4 @@
-import { Button, Input, Popover, Tooltip, message } from "antd";
+import { Button, Input, Popover, Tooltip } from "antd";
 import {
   SearchOutlined,
   CheckOutlined,
@@ -238,7 +238,13 @@ const ChatSelector = forwardRef<ChatSelectorImperativeProps, ChatSelectorProps>(
         return;
       }
 
-      const newSelectedIds = selectedIds.includes(datasetId)
+      const isCurrentlySelected = selectedIds.includes(datasetId);
+      // Pinned knowledge bases stay selected until unpinned; row click only toggles non-pinned items.
+      if (isCurrentlySelected && item.default_dataset) {
+        return;
+      }
+
+      const newSelectedIds = isCurrentlySelected
         ? selectedIds.filter((id) => id !== datasetId)
         : [...selectedIds, datasetId];
 
@@ -293,10 +299,21 @@ const ChatSelector = forwardRef<ChatSelectorImperativeProps, ChatSelectorProps>(
             [],
             [],
           );
+        } else if (!nextDefault && selectedIds.includes(datasetId)) {
+          // Unpinning should only remove the default flag, not the active selection.
+          const nextSelectedIds = mergeSelectedIds(
+            chatConfig?.knowledgeBaseId ?? [],
+            [datasetId],
+          );
+          setSelectedIds(nextSelectedIds);
+          onChange?.(
+            nextSelectedIds,
+            [],
+            [],
+          );
         }
       } catch (error) {
         console.error("Set default dataset failed:", error);
-        message.error(t("chat.pinKnowledgeBaseFailed"));
       } finally {
         setDefaultUpdatingId("");
       }

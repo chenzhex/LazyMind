@@ -9,12 +9,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 
 	"lazymind/core/common"
@@ -41,15 +43,26 @@ type skillSourceRequest struct {
 	URL        string `json:"url"`
 }
 
+type legacyChildSkillInput struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags"`
+	Content     string   `json:"content"`
+	FileExt     string   `json:"file_ext"`
+	AutoEvo     bool     `json:"auto_evo"`
+}
+
 type createSkillRequest struct {
-	Name        string             `json:"name"`
-	SkillName   string             `json:"skill_name"`
-	Category    string             `json:"category"`
-	Description string             `json:"description"`
-	Tags        []string           `json:"tags"`
-	AutoEvo     bool               `json:"auto_evo"`
-	IsEnabled   *bool              `json:"is_enabled"`
-	Source      skillSourceRequest `json:"source"`
+	Name        string                  `json:"name"`
+	SkillName   string                  `json:"skill_name"`
+	Category    string                  `json:"category"`
+	Description string                  `json:"description"`
+	Tags        []string                `json:"tags"`
+	Content     string                  `json:"content"`
+	Children    []legacyChildSkillInput `json:"children"`
+	AutoEvo     bool                    `json:"auto_evo"`
+	IsEnabled   *bool                   `json:"is_enabled"`
+	Source      skillSourceRequest      `json:"source"`
 }
 
 type patchSkillRequest struct {
@@ -58,6 +71,7 @@ type patchSkillRequest struct {
 	Category    *string             `json:"category"`
 	Description *string             `json:"description"`
 	Tags        *[]string           `json:"tags"`
+	Content     *string             `json:"content"`
 	AutoEvo     *bool               `json:"auto_evo"`
 	IsEnabled   *bool               `json:"is_enabled"`
 	Source      *skillSourceRequest `json:"source"`
@@ -184,10 +198,13 @@ func Create(w http.ResponseWriter, r *http.Request) {
 		replyError(w, "name/category required", http.StatusBadRequest)
 		return
 	}
-	source, err := req.Source.toServiceSource()
+	source, cleanup, err := createSkillSourceFromRequest(name, category, strings.TrimSpace(req.Description), req.Content, req.Children, req.Source)
 	if err != nil {
 		replyError(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 	resp, err := newSkillService(db).CreateSkill(r.Context(), skillservice.CreateSkillRequest{
 		OwnerUserID:    userID,
@@ -230,6 +247,9 @@ func Patch(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !ensureUserDraftWriteAllowed(w, r, db, userID, skillID) {
+		return
+	}
 	var req patchSkillRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -248,6 +268,14 @@ func Patch(w http.ResponseWriter, r *http.Request) {
 			replyError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		source = &converted
+	} else if req.Content != nil {
+		converted, cleanup, err := patchContentSourceFromHead(r.Context(), db, skillID, name, category, description, *req.Content)
+		if err != nil {
+			replyError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer cleanup()
 		source = &converted
 	}
 	resp, err := newSkillService(db).PatchSkill(r.Context(), skillservice.PatchSkillRequest{
@@ -276,11 +304,88 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !ensureUserDraftWriteAllowed(w, r, db, userID, skillID) {
+		return
+	}
 	if err := newSkillService(db).DeleteSkill(r.Context(), skillservice.DeleteSkillRequest{SkillID: skillID, UserID: userID}); err != nil {
 		replyServiceError(w, err)
 		return
 	}
 	common.ReplyOK(w, map[string]any{"deleted": true})
+}
+
+func Trash(w http.ResponseWriter, r *http.Request) {
+	Delete(w, r)
+}
+
+func ListTrash(w http.ResponseWriter, r *http.Request) {
+	db, ok := requireDB(w)
+	if !ok {
+		return
+	}
+	userID, _, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	resp, err := newSkillService(db).ListTrashedSkills(r.Context(), skillservice.ListSkillsRequest{UserID: userID})
+	if err != nil {
+		replyServiceError(w, err)
+		return
+	}
+	items := filterTrashedSkillSummaries(resp.Items, r)
+	total := len(items)
+	items = paginateSkillSummaries(items, r)
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, skillSummaryDTO(item))
+	}
+	common.ReplyOK(w, map[string]any{
+		"items":     out,
+		"page":      positiveQueryInt(r, "page", 1),
+		"page_size": positiveQueryInt(r, "page_size", 20),
+		"total":     total,
+	})
+}
+
+func Restore(w http.ResponseWriter, r *http.Request) {
+	db, skillID, userID, ok := requireSkillInTrash(w, r)
+	if !ok {
+		return
+	}
+	if err := newSkillService(db).RestoreSkill(r.Context(), skillservice.RestoreSkillRequest{SkillID: skillID, UserID: userID}); err != nil {
+		replyServiceError(w, err)
+		return
+	}
+	common.ReplyOK(w, map[string]any{"restored": true, "skill_id": skillID})
+}
+
+func Purge(w http.ResponseWriter, r *http.Request) {
+	db, skillID, userID, ok := requireSkillInTrash(w, r)
+	if !ok {
+		return
+	}
+	if err := newSkillService(db).PurgeSkill(r.Context(), skillservice.PurgeSkillRequest{SkillID: skillID, UserID: userID}); err != nil {
+		replyServiceError(w, err)
+		return
+	}
+	common.ReplyOK(w, map[string]any{"purged": true, "skill_id": skillID})
+}
+
+func EmptyTrash(w http.ResponseWriter, r *http.Request) {
+	db, ok := requireDB(w)
+	if !ok {
+		return
+	}
+	userID, _, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	count, err := newSkillService(db).EmptyTrash(r.Context(), skillservice.EmptyTrashRequest{UserID: userID})
+	if err != nil {
+		replyServiceError(w, err)
+		return
+	}
+	common.ReplyOK(w, map[string]any{"purged": count})
 }
 
 func Tree(w http.ResponseWriter, r *http.Request) {
@@ -423,6 +528,9 @@ func DraftWriteText(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !ensureUserDraftWriteAllowed(w, r, db, userID, skillID) {
+		return
+	}
 	var req struct {
 		Path                 string `json:"path"`
 		Content              string `json:"content"`
@@ -452,6 +560,9 @@ func DraftWriteText(w http.ResponseWriter, r *http.Request) {
 func DraftUpload(w http.ResponseWriter, r *http.Request) {
 	db, skillID, userID, ok := requireOwnedSkill(w, r)
 	if !ok {
+		return
+	}
+	if !ensureUserDraftWriteAllowed(w, r, db, userID, skillID) {
 		return
 	}
 	var req struct {
@@ -503,6 +614,9 @@ func DraftMkdir(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !ensureUserDraftWriteAllowed(w, r, db, userID, skillID) {
+		return
+	}
 	var req struct {
 		Path                 string `json:"path"`
 		ExpectedDraftVersion int64  `json:"expected_draft_version"`
@@ -525,6 +639,9 @@ func DraftMkdir(w http.ResponseWriter, r *http.Request) {
 func DraftDeletePath(w http.ResponseWriter, r *http.Request) {
 	db, skillID, userID, ok := requireOwnedSkill(w, r)
 	if !ok {
+		return
+	}
+	if !ensureUserDraftWriteAllowed(w, r, db, userID, skillID) {
 		return
 	}
 	var req struct {
@@ -563,6 +680,9 @@ func DraftMove(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !ensureUserDraftWriteAllowed(w, r, db, userID, skillID) {
+		return
+	}
 	var req struct {
 		From                 string `json:"from"`
 		To                   string `json:"to"`
@@ -592,6 +712,9 @@ func DraftMove(w http.ResponseWriter, r *http.Request) {
 func Commit(w http.ResponseWriter, r *http.Request) {
 	db, skillID, userID, ok := requireOwnedSkill(w, r)
 	if !ok {
+		return
+	}
+	if !ensureUserDraftWriteAllowed(w, r, db, userID, skillID) {
 		return
 	}
 	var req struct {
@@ -1093,6 +1216,7 @@ func Share(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
+	targetUserNames := common.FetchUserNamesFromAuthService(r, targets)
 	task := orm.SkillShareTask{
 		ID:                    evolution.NewID(),
 		SourceUserID:          userID,
@@ -1112,7 +1236,7 @@ func Share(w http.ResponseWriter, r *http.Request) {
 			ShareTaskID:    task.ID,
 			SourceSkillID:  source.ID,
 			TargetUserID:   target,
-			TargetUserName: target,
+			TargetUserName: firstNonEmpty(targetUserNames[target], target),
 			Status:         shareStatusPendingAccept,
 			CreatedAt:      now,
 			UpdatedAt:      now,
@@ -1377,6 +1501,164 @@ func (s skillSourceRequest) toServiceSource() (skillservice.SourceInput, error) 
 	}
 }
 
+func createSkillSourceFromRequest(name, category, description, content string, children []legacyChildSkillInput, sourceReq skillSourceRequest) (skillservice.SourceInput, func(), error) {
+	if strings.TrimSpace(content) == "" && len(children) == 0 {
+		source, err := sourceReq.toServiceSource()
+		return source, nil, err
+	}
+	files, err := legacySkillFiles(name, category, description, content, children)
+	if err != nil {
+		return skillservice.SourceInput{}, nil, err
+	}
+	zipPath, err := writeSkillPackageZip(files)
+	if err != nil {
+		return skillservice.SourceInput{}, nil, err
+	}
+	cleanup := func() { _ = os.Remove(zipPath) }
+	return skillservice.SourceInput{Type: "local_zip", StoredPath: zipPath, Filename: "legacy-create.zip"}, cleanup, nil
+}
+
+func legacySkillFiles(name, category, description, content string, children []legacyChildSkillInput) (map[string][]byte, error) {
+	skillMD, _, err := legacySkillMD(name, category, description, content)
+	if err != nil {
+		return nil, err
+	}
+	files := map[string][]byte{"SKILL.md": []byte(skillMD)}
+	for _, child := range children {
+		childName := strings.TrimSpace(child.Name)
+		if childName == "" {
+			return nil, fmt.Errorf("child name required")
+		}
+		relPath := legacyChildPath(childName, child.FileExt)
+		if relPath == "SKILL.md" {
+			return nil, fmt.Errorf("child path conflicts with SKILL.md")
+		}
+		if _, exists := files[relPath]; exists {
+			return nil, fmt.Errorf("duplicate child path %s", relPath)
+		}
+		files[relPath] = []byte(child.Content)
+	}
+	return files, nil
+}
+
+func legacySkillMD(name, category, description, content string) (string, string, error) {
+	name = strings.TrimSpace(name)
+	category = strings.TrimSpace(category)
+	description = strings.TrimSpace(description)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", "", fmt.Errorf("content required")
+	}
+	if meta, body, ok := parseSkillMDFrontmatter(content); ok {
+		metaName := strings.TrimSpace(meta.Name)
+		if metaName != "" && metaName != name {
+			return "", "", fmt.Errorf("request name and frontmatter name must match")
+		}
+		metaCategory := strings.TrimSpace(meta.Category)
+		if metaCategory != "" && metaCategory != category {
+			return "", "", fmt.Errorf("request category and frontmatter category must match")
+		}
+		resolvedDescription := firstNonEmpty(strings.TrimSpace(meta.Description), description)
+		if description != "" && strings.TrimSpace(meta.Description) != "" && strings.TrimSpace(meta.Description) != description {
+			return "", "", fmt.Errorf("request description and frontmatter description must match")
+		}
+		if strings.TrimSpace(body) == "" {
+			return "", "", fmt.Errorf("content required")
+		}
+		if resolvedDescription == "" {
+			return "", "", fmt.Errorf("description required")
+		}
+		return content, resolvedDescription, nil
+	}
+	if description == "" {
+		return "", "", fmt.Errorf("description required")
+	}
+	frontmatter, err := yaml.Marshal(skillMDFrontmatter{Name: name, Category: category, Description: description})
+	if err != nil {
+		return "", "", err
+	}
+	return fmt.Sprintf("---\n%s---\n%s", string(frontmatter), content), description, nil
+}
+
+func legacyChildPath(name, fileExt string) string {
+	name = strings.Trim(strings.TrimSpace(name), "/")
+	if path.Ext(name) != "" {
+		return filepath.ToSlash(name)
+	}
+	ext := strings.TrimSpace(strings.TrimPrefix(fileExt, "."))
+	if ext == "" {
+		ext = "md"
+	}
+	return filepath.ToSlash(name + "." + strings.ToLower(ext))
+}
+
+func patchContentSourceFromHead(ctx context.Context, db *gorm.DB, skillID string, name, category, description *string, content string) (skillservice.SourceInput, func(), error) {
+	files, row, err := skillHeadFiles(ctx, db, skillID)
+	if err != nil {
+		return skillservice.SourceInput{}, nil, err
+	}
+	nextName := row.SkillName
+	if name != nil {
+		nextName = *name
+	}
+	nextCategory := row.Category
+	if category != nil {
+		nextCategory = *category
+	}
+	nextDescription := row.Description
+	if description != nil {
+		nextDescription = *description
+	}
+	skillMD, _, err := legacySkillMD(nextName, nextCategory, nextDescription, content)
+	if err != nil {
+		return skillservice.SourceInput{}, nil, err
+	}
+	files["SKILL.md"] = []byte(skillMD)
+	zipPath, err := writeSkillPackageZip(files)
+	if err != nil {
+		return skillservice.SourceInput{}, nil, err
+	}
+	cleanup := func() { _ = os.Remove(zipPath) }
+	return skillservice.SourceInput{Type: "local_zip", StoredPath: zipPath, Filename: "legacy-patch.zip"}, cleanup, nil
+}
+
+func skillHeadFiles(ctx context.Context, db *gorm.DB, skillID string) (map[string][]byte, orm.SkillV2Skill, error) {
+	var skill orm.SkillV2Skill
+	if err := db.WithContext(ctx).Where("id = ? AND deleted_at IS NULL", skillID).Take(&skill).Error; err != nil {
+		return nil, orm.SkillV2Skill{}, err
+	}
+	if skill.HeadRevisionID == nil || strings.TrimSpace(*skill.HeadRevisionID) == "" {
+		return nil, orm.SkillV2Skill{}, fmt.Errorf("skill has no head revision")
+	}
+	var entries []orm.SkillV2RevisionEntry
+	if err := db.WithContext(ctx).Where("revision_id = ? AND entry_type = ?", *skill.HeadRevisionID, "file").Order("path ASC").Find(&entries).Error; err != nil {
+		return nil, orm.SkillV2Skill{}, err
+	}
+	files := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.BlobHash == nil || strings.TrimSpace(*entry.BlobHash) == "" {
+			continue
+		}
+		var blob orm.SkillV2Blob
+		if err := db.WithContext(ctx).Where("hash = ?", *entry.BlobHash).Take(&blob).Error; err != nil {
+			return nil, orm.SkillV2Skill{}, err
+		}
+		data := blob.Content
+		if blob.Binary {
+			if blob.StorageKey == nil || strings.TrimSpace(*blob.StorageKey) == "" {
+				return nil, orm.SkillV2Skill{}, fmt.Errorf("binary blob storage key missing for %s", entry.Path)
+			}
+			read, err := os.ReadFile(filepath.Join(skillObjectRoot(), filepath.FromSlash(*blob.StorageKey)))
+			if err != nil {
+				return nil, orm.SkillV2Skill{}, err
+			}
+			data = read
+		}
+		files[entry.Path] = data
+	}
+	return files, skill, nil
+}
+
 func newSkillService(db *gorm.DB) *skillservice.SkillService {
 	return skillservice.NewSkillService(skillservice.SkillServiceDeps{
 		DB:          db,
@@ -1400,7 +1682,7 @@ func newReviewService(db *gorm.DB) *skillreview.Service {
 
 func newRemoteFSHandler() *skillremotefs.Handler {
 	db := store.DB()
-	return skillremotefs.NewHandler(skillremotefs.HandlerDeps{DB: db, BlobStore: skillremotefs.NewBlobStore(db, skillremotefs.NewLocalObjectStore(skillObjectRoot()))})
+	return skillremotefs.NewHandler(skillremotefs.HandlerDeps{DB: db, BlobStore: skillremotefs.NewBlobStore(db, skillremotefs.NewLocalObjectStore(skillObjectRoot())), StateStore: store.State()})
 }
 
 func remoteRequestWithHeaderUser(r *http.Request) *http.Request {
@@ -1459,6 +1741,28 @@ func requireOwnedSkill(w http.ResponseWriter, r *http.Request) (*gorm.DB, string
 		return nil, "", "", false
 	}
 	if err := ensureSkillOwner(r.Context(), db, skillID, userID); err != nil {
+		replyServiceError(w, err)
+		return nil, "", "", false
+	}
+	return db, skillID, userID, true
+}
+
+func requireSkillInTrash(w http.ResponseWriter, r *http.Request) (*gorm.DB, string, string, bool) {
+	db, ok := requireDB(w)
+	if !ok {
+		return nil, "", "", false
+	}
+	userID, _, ok := requireUser(w, r)
+	if !ok {
+		return nil, "", "", false
+	}
+	skillID := common.PathVar(r, "skill_id")
+	if skillID == "" {
+		replyError(w, "missing skill_id", http.StatusBadRequest)
+		return nil, "", "", false
+	}
+	var row orm.SkillV2Skill
+	if err := db.WithContext(r.Context()).Select("id").Where("id = ? AND owner_user_id = ? AND deleted_at IS NOT NULL", skillID, userID).Take(&row).Error; err != nil {
 		replyServiceError(w, err)
 		return nil, "", "", false
 	}
@@ -1751,7 +2055,7 @@ func writeInlineSkillZip(content string) (string, error) {
 }
 
 func skillSummaryDTO(item skillservice.SkillSummary) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"id":               item.ID,
 		"skill_id":         firstNonEmpty(item.SkillID, item.ID),
 		"name":             firstNonEmpty(item.Name, item.SkillName),
@@ -1761,8 +2065,17 @@ func skillSummaryDTO(item skillservice.SkillSummary) map[string]any {
 		"tags":             item.Tags,
 		"head_revision_id": item.HeadRevisionID,
 		"file_content":     item.FileContent,
+		"auto_evo":         item.AutoEvo,
+		"is_enabled":       item.IsEnabled,
 		"draft":            draftSummaryDTO(item.Draft),
 	}
+	if item.DeletedAt != nil {
+		out["deleted_at"] = item.DeletedAt
+	}
+	if strings.TrimSpace(item.DeletedBy) != "" {
+		out["deleted_by"] = item.DeletedBy
+	}
+	return out
 }
 
 func skillDetailDTO(item skillservice.SkillDetail) map[string]any {
@@ -1832,6 +2145,7 @@ func revisionDTO(item skillrevision.Revision) map[string]any {
 		"created_by":         item.CreatedBy,
 		"created_at":         item.CreatedAt,
 		"file_content":       item.FileContent,
+		"is_head":            item.IsHead,
 	}
 }
 
@@ -1869,7 +2183,7 @@ func diffFileDTO(file skilldiff.DiffFile) map[string]any {
 		}
 		lines = append(lines, item)
 	}
-	out := map[string]any{"path": file.Path, "type": file.Type, "status": file.Status, "binary": file.Binary, "too_large": file.TooLarge, "cache_written": file.CacheWritten, "diffEntryLines": lines, "diff_entry_lines": lines}
+	out := map[string]any{"path": file.Path, "type": file.Type, "status": file.Status, "binary": file.Binary, "too_large": file.TooLarge, "cache_written": file.CacheWritten, "diff_entry_lines": lines}
 	if file.ReviewID != "" {
 		out["review_id"] = file.ReviewID
 		out["review_version"] = file.ReviewVersion
@@ -2140,6 +2454,26 @@ func filterSkillSummaries(ctx context.Context, db *gorm.DB, items []skillservice
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+func filterTrashedSkillSummaries(items []skillservice.SkillSummary, r *http.Request) []skillservice.SkillSummary {
+	keyword := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("keyword")))
+	category := strings.TrimSpace(r.URL.Query().Get("category"))
+	tags := compactStrings(r.URL.Query()["tags"])
+	out := make([]skillservice.SkillSummary, 0, len(items))
+	for _, item := range items {
+		if category != "" && item.Category != category {
+			continue
+		}
+		if len(tags) > 0 && !hasAllTags(item.Tags, tags) {
+			continue
+		}
+		if keyword != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.SkillName+" "+item.Description), keyword) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func skillHeadTextContains(ctx context.Context, db *gorm.DB, skillID, keyword string) (bool, error) {

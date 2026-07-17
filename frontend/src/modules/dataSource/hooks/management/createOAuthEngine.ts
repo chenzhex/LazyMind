@@ -1,4 +1,8 @@
 import { message } from "antd";
+import {
+  getLocalizedErrorMessage,
+  localizeErrorCode,
+} from "@/components/request";
 import { type CloudOAuthAppCredentialBody } from "@/api/generated/auth-client";
 import { dataSourceCloudOauthApi } from "../../api/clients";
 import {
@@ -15,6 +19,7 @@ import {
   consumeCloudDataSourceOAuthResult,
   consumeFeishuDataSourceOAuthResult,
   enableCloudConnectionForChat,
+  peekFeishuDataSourceWizardDraft,
   requestCloudDataSourceAuthorizeUrl,
   openCenteredPopup,
   requestFeishuDataSourceAuthorizeUrl,
@@ -31,6 +36,7 @@ import {
   getCloudConnectionItems,
   mapCloudConnectionToDataSourceConnection,
   mapCloudConnectionToFeishuAccount,
+  mapCloudConnectionToNotionAccount,
 } from "../../mappers/dataSourceConnection";
 import type { ManagementContext, StartCloudOAuthOptions } from "./context";
 
@@ -43,9 +49,12 @@ export function createOAuthEngine(ctx: ManagementContext) {
     setConnectionVerified,
     setOauthConnection,
     setNotionOauthConnection,
+    setNotionAuthAccounts,
     setFeishuAuthAccounts,
     setWizardStep,
     setValidatedAgentId,
+    setAuthSelectModalOpen,
+    setAuthSelectProvider,
     feishuAuthAccountsLoadedRef,
     scanAgents,
   } = ctx;
@@ -78,19 +87,23 @@ export function createOAuthEngine(ctx: ManagementContext) {
     }
   };
 
-  const refreshNotionAuthConnection = async () => {
+  const refreshNotionAuthAccounts = async () => {
     try {
       const response =
         await dataSourceCloudOauthApi.listConnectionsApiAuthserviceV1CloudConnectionsGet({
           provider: "notion",
           status: null,
         });
-      const nextConnection = getCloudConnectionItems(response.data)
-        .map((item) => mapCloudConnectionToDataSourceConnection(item, "notion"))
-        .find(
-          (connection) =>
-            connection.status === "connected" && Boolean(connection.connectionId),
-        ) || null;
+      const cachedAccounts = ctx.notionAuthAccounts;
+      const nextAccounts = getCloudConnectionItems(response.data).map((item) =>
+        mapCloudConnectionToNotionAccount(item, cachedAccounts),
+      );
+      setNotionAuthAccounts(nextAccounts);
+      const connectedAccount = nextAccounts.find(
+        (account) =>
+          account.status === "connected" && Boolean(account.connection?.connectionId),
+      );
+      const nextConnection = connectedAccount?.connection || null;
       setNotionOauthConnection(nextConnection);
       if (nextConnection && ctx.selectedType === "notion") {
         setOauthConnection(nextConnection);
@@ -98,9 +111,11 @@ export function createOAuthEngine(ctx: ManagementContext) {
         setConnectionVerified(true);
       }
     } catch (error) {
-      console.error("Failed to refresh Notion auth connection", error);
+      console.error("Failed to refresh Notion auth accounts", error);
     }
   };
+
+  const refreshNotionAuthConnection = refreshNotionAuthAccounts;
 
   const clearOauthAttempt = () => {
     if (oauthAttemptRef.current?.timerId) {
@@ -112,9 +127,6 @@ export function createOAuthEngine(ctx: ManagementContext) {
   const restorePreviousOauthState = (messageText?: string, level: "warning" | "error" = "warning") => {
     const attempt = oauthAttemptRef.current;
     if (!attempt) {
-      if (messageText) {
-        message[level](messageText);
-      }
       return;
     }
 
@@ -140,15 +152,32 @@ export function createOAuthEngine(ctx: ManagementContext) {
         return nextAccounts;
       });
     }
+    const shouldReopenSetup = attempt.reopenSetupOnFailure && attempt.provider;
     oauthAttemptRef.current = null;
+    clearFeishuDataSourceWizardDraft();
+
+    if (shouldReopenSetup) {
+      ctx.openCloudSetupModal(attempt.provider!, "create");
+    }
 
     if (messageText) {
       message[level](messageText);
     }
   };
 
-  const applyOauthResult = (payload: FeishuDataSourceOAuthMessage) => {
+  const applyOauthResult = (
+    payload: FeishuDataSourceOAuthMessage,
+    options?: { openWizardOnSuccess?: boolean },
+  ) => {
     const attempt = oauthAttemptRef.current;
+    const shouldOpenWizard =
+      attempt?.openWizardOnSuccess || options?.openWizardOnSuccess;
+    const shouldReopenSetupOnFailure =
+      attempt?.reopenSetupOnFailure || options?.openWizardOnSuccess;
+    const cloudProvider =
+      attempt?.provider ||
+      (payload.status === "error" ? payload.provider : undefined) ||
+      (payload.status === "success" ? payload.connection.provider : undefined);
 
     if (payload.channel !== FEISHU_DATA_SOURCE_OAUTH_CHANNEL) {
       return;
@@ -169,6 +198,40 @@ export function createOAuthEngine(ctx: ManagementContext) {
       setConnectionVerified(nextOauthState === "connected");
       if (payload.connection.provider === "notion") {
         setNotionOauthConnection(payload.connection);
+        setNotionAuthAccounts((current) => {
+          const matchedAccount = current.find(
+            (item) => item.connection?.connectionId === payload.connection.connectionId,
+          );
+          if (!matchedAccount) {
+            return [
+              {
+                id: payload.connection.connectionId,
+                name: payload.connection.accountName || payload.connection.connectionId,
+                appId: attempt?.appId || ctx.notionAppSetup?.appId || "",
+                appSecret: ctx.notionAppSetup?.appSecret || "",
+                chatEnabled: false,
+                status: nextOauthState,
+                connection: payload.connection,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                lastAuthorizedAt: new Date().toISOString(),
+              },
+              ...current,
+            ];
+          }
+          return current.map((item) =>
+            item.id === matchedAccount.id
+              ? {
+                  ...item,
+                  name: payload.connection.accountName || item.name,
+                  status: nextOauthState,
+                  connection: payload.connection,
+                  updatedAt: new Date().toISOString(),
+                  lastAuthorizedAt: new Date().toISOString(),
+                }
+              : item,
+          );
+        });
         if (nextOauthState === "connected") {
           void enableCloudConnectionForChat(payload.connection.connectionId).catch((error) => {
             console.error("Failed to enable Notion connection for chat", error);
@@ -210,15 +273,37 @@ export function createOAuthEngine(ctx: ManagementContext) {
         });
       }
       setWizardStep(1);
+      const pendingDraft = peekFeishuDataSourceWizardDraft();
+      clearFeishuDataSourceWizardDraft();
+      if (pendingDraft?.authSelectModalOpen) {
+        const provider = pendingDraft.authSelectProvider || "feishu";
+        const refreshAccounts =
+          provider === "notion" ? refreshNotionAuthAccounts : refreshFeishuAuthAccounts;
+        void refreshAccounts().then(() => {
+          setAuthSelectProvider(provider);
+          setAuthSelectModalOpen(true);
+        });
+      } else if (shouldOpenWizard) {
+        ctx.setWizardOpen(true);
+      }
       message.success(t("admin.dataSourceOauthSuccess"));
+      return;
+    }
+
+    if (shouldReopenSetupOnFailure && cloudProvider) {
+      oauthAttemptRef.current = null;
+      clearFeishuDataSourceWizardDraft();
+      setOauthConnection(null);
+      setOauthState("error");
+      setConnectionVerified(false);
+      ctx.openCloudSetupModal(cloudProvider, "create");
+      message.error(localizeErrorCode("2000509"));
       return;
     }
 
     if (attempt?.previousConnection) {
       restorePreviousOauthState(
-        t("admin.dataSourceOauthReconnectFailed", {
-          message: payload.message ? ` ${payload.message}` : "",
-        }),
+        localizeErrorCode("2000509"),
         "error",
       );
       return;
@@ -244,7 +329,7 @@ export function createOAuthEngine(ctx: ManagementContext) {
         return nextAccounts;
       });
     }
-    message.error(payload.message || t("admin.dataSourceOauthFailedRetry"));
+    message.error(localizeErrorCode("2000509"));
   };
 
   const upsertFeishuAuthAccount = (
@@ -336,8 +421,12 @@ export function createOAuthEngine(ctx: ManagementContext) {
         returnUrl: window.location.href,
       });
 
+      const existingDraft = peekFeishuDataSourceWizardDraft();
       const draft: FeishuDataSourceWizardDraft = {
-        wizardOpen: options?.draftWizardOpen ?? true,
+        wizardOpen: false,
+        openWizardAfterOAuth: options?.openWizardOnSuccess,
+        authSelectModalOpen: existingDraft?.authSelectModalOpen,
+        authSelectProvider: existingDraft?.authSelectProvider,
         wizardStep: options?.draftWizardStep ?? ctx.wizardStep,
         wizardMode: options?.draftWizardMode ?? ctx.wizardMode,
         selectedType: options?.draftSelectedType ?? ctx.selectedType,
@@ -356,10 +445,6 @@ export function createOAuthEngine(ctx: ManagementContext) {
         provider === "feishu" ? t("admin.dataSourceFeishuAuthWindowTitle") : t("admin.dataSourceNotionAuthWindowTitle"),
       );
 
-      if (options?.draftWizardOpen === false) {
-        clearFeishuDataSourceWizardDraft();
-      }
-
       oauthAttemptRef.current = {
         timerId: null,
         previousState,
@@ -368,6 +453,9 @@ export function createOAuthEngine(ctx: ManagementContext) {
         resolved: false,
         accountId: options?.accountId,
         appId: options?.appId || activeSetup.appId,
+        provider,
+        openWizardOnSuccess: options?.openWizardOnSuccess,
+        reopenSetupOnFailure: options?.reopenSetupOnFailure,
       };
 
       if (popup) {
@@ -375,6 +463,8 @@ export function createOAuthEngine(ctx: ManagementContext) {
           if (!popup.closed) {
             return;
           }
+
+          window.clearInterval(timerId);
 
           if (oauthAttemptRef.current?.resolved) {
             clearOauthAttempt();
@@ -406,11 +496,16 @@ export function createOAuthEngine(ctx: ManagementContext) {
 
       window.location.assign(authorizeUrl);
       return true;
-    } catch (error: any) {
+    } catch (error) {
       setOauthState(previousState);
       setConnectionVerified(previousVerified);
       setOauthConnection(previousConnection);
-      message.error(error?.message || t("admin.dataSourceAuthorizeUrlFailed"));
+      const requestError = error as { response?: unknown; request?: unknown };
+      if (!requestError?.response && !requestError?.request) {
+        message.error(
+          getLocalizedErrorMessage(error),
+        );
+      }
       return false;
     }
   };
@@ -421,6 +516,7 @@ export function createOAuthEngine(ctx: ManagementContext) {
     applyOauthResult,
     refreshFeishuAuthAccounts,
     refreshNotionAuthConnection,
+    refreshNotionAuthAccounts,
     upsertFeishuAuthAccount,
     saveCloudAppCredentials,
     startCloudOAuth,

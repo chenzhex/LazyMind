@@ -16,6 +16,7 @@ func scopedRuntimeEnv(paths RuntimePaths, home string) []string {
 		"XDG_CACHE_HOME=" + paths.XDGCacheDir,
 		"XDG_STATE_HOME=" + paths.XDGStateDir,
 		localHostHomeEnvVar + "=" + hostHomeDir(),
+		"PYTHONDONTWRITEBYTECODE=1",
 	}
 }
 
@@ -64,7 +65,7 @@ func cleanHostCacheEnv(key string, paths RuntimePaths, fallback string) string {
 		return filepath.Clean(fallback)
 	}
 	value = filepath.Clean(value)
-	if pathIsUnderRoot(value, paths.RuntimeRoot) {
+	if pathIsUnderRoot(value, paths.RuntimeRoot) || pathIsUnderRoot(value, paths.BuildRoot) {
 		return filepath.Clean(fallback)
 	}
 	return value
@@ -79,7 +80,7 @@ func defaultHostCacheDir(home string) string {
 	case "darwin":
 		return filepath.Join(home, "Library", "Caches")
 	case "windows":
-		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" && !pathIsUnderRoot(localAppData, home) {
+		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
 			return filepath.Clean(localAppData)
 		}
 		return filepath.Join(home, "AppData", "Local")

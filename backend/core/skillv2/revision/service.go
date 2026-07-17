@@ -2,8 +2,6 @@ package revision
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,11 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 
-	skillreview "lazymind/core/skillv2/review"
-	skillsearch "lazymind/core/skillv2/search"
+	"lazymind/core/versionfs"
 )
 
 type ServiceDeps struct {
@@ -128,6 +124,7 @@ type Revision struct {
 	CreatedBy        string
 	CreatedAt        time.Time
 	FileContent      string
+	IsHead           bool
 }
 
 type TreeNode struct {
@@ -197,173 +194,33 @@ func relaxSQLiteFixtureIndexes(db *gorm.DB) {
 }
 
 func (s *Service) CommitDraft(ctx context.Context, req CommitDraftRequest) (CommitDraftResponse, error) {
-	var out CommitDraftResponse
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var overlayCount int64
-		if err := tx.Model(&skillDraftEntryRow{}).Where("skill_id = ?", req.SkillID).Count(&overlayCount).Error; err != nil {
-			return err
-		}
-		if overlayCount == 0 {
-			return fmt.Errorf("draft overlay is empty")
-		}
-		if err := advanceDraftVersion(ctx, tx, req.SkillID, req.DraftVersion, req.UserID, s.clock.Now()); err != nil {
-			return err
-		}
-
-		var skill skillRow
-		if err := tx.Where("id = ?", req.SkillID).Take(&skill).Error; err != nil {
-			return err
-		}
-		var draft skillDraftRow
-		if err := tx.Where("skill_id = ?", req.SkillID).Take(&draft).Error; err != nil {
-			return err
-		}
-		baseRevisionID := draft.BaseRevisionID
-		if baseRevisionID == nil {
-			baseRevisionID = skill.HeadRevisionID
-		}
-		if baseRevisionID == nil {
-			return fmt.Errorf("skill has no base revision")
-		}
-
-		entries, err := mergedEntriesForDraft(ctx, tx, req.SkillID, *baseRevisionID)
-		if err != nil {
-			return err
-		}
-		if err := s.ensureEntryBlobs(ctx, tx, entries); err != nil {
-			return err
-		}
-		nextNo, err := nextRevisionNo(tx, req.SkillID)
-		if err != nil {
-			return err
-		}
-		revisionID := uuid.NewString()
-		createdBy := nullableString(req.UserID)
-		if err := tx.Create(&skillRevisionRow{
-			ID:               revisionID,
-			SkillID:          req.SkillID,
-			ParentRevisionID: baseRevisionID,
-			RevisionNo:       nextNo,
-			TreeHash:         hashTree(entries),
-			ChangeSource:     "draft_commit",
-			CreatedBy:        createdBy,
-			CreatedAt:        s.clock.Now(),
-		}).Error; err != nil {
-			return err
-		}
-		if err := createRevisionEntries(tx, revisionID, entries); err != nil {
-			return err
-		}
-		if err := tx.Model(&skillRow{}).Where("id = ?", req.SkillID).Updates(map[string]any{
-			"head_revision_id": revisionID,
-			"version":          gorm.Expr("version + 1"),
-			"updated_at":       s.clock.Now(),
-		}).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("skill_id = ?", req.SkillID).Delete(&skillDraftEntryRow{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&skillDraftRow{}).Where("skill_id = ?", req.SkillID).Updates(map[string]any{
-			"base_revision_id": revisionID,
-			"version":          req.DraftVersion + 1,
-			"updated_at":       s.clock.Now(),
-			"draft_updated_at": nil,
-		}).Error; err != nil {
-			return err
-		}
-		if err := skillreview.MarkSkillReviews(ctx, tx, req.SkillID, "committed", req.UserID, s.clock.Now()); err != nil {
-			return err
-		}
-		if err := s.enforceRevisionLimit(ctx, tx, req.SkillID, protectedIDs(revisionID, valueOrEmpty(baseRevisionID))); err != nil {
-			return err
-		}
-		if err := s.cleanupUnreferencedBlobs(ctx, tx); err != nil {
-			return err
-		}
-		if err := skillsearch.RebuildSkillTx(ctx, tx, req.SkillID, s.clock.Now()); err != nil {
-			return err
-		}
-		out = CommitDraftResponse{RevisionID: revisionID, RevisionNo: nextNo}
-		return nil
+	resp, err := versionfs.NewEngine(versionfs.EngineDeps{DB: s.db, Store: versionStore{service: s}, Clock: s.clock}).CommitDraft(ctx, versionfs.CommitDraftRequest{
+		ResourceID:           req.SkillID,
+		UserID:               req.UserID,
+		ExpectedDraftVersion: req.DraftVersion,
+		ChangeSource:         "draft_commit",
 	})
-	return out, err
+	if err != nil {
+		return CommitDraftResponse{}, err
+	}
+	return CommitDraftResponse{RevisionID: resp.RevisionID, RevisionNo: resp.RevisionNo}, nil
 }
 
 func (s *Service) Rollback(ctx context.Context, req RollbackRequest) (RollbackResponse, error) {
-	var out RollbackResponse
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var overlayCount int64
-		if err := tx.Model(&skillDraftEntryRow{}).Where("skill_id = ?", req.SkillID).Count(&overlayCount).Error; err != nil {
-			return err
-		}
-		if overlayCount > 0 {
-			return fmt.Errorf("cannot rollback while draft overlay exists")
-		}
-		var skill skillRow
-		if err := tx.Where("id = ?", req.SkillID).Take(&skill).Error; err != nil {
-			return err
-		}
-		if skill.HeadRevisionID == nil {
-			return fmt.Errorf("skill has no head revision")
-		}
-		entries, err := entriesForRevision(ctx, tx, req.SkillID, req.TargetRevisionID)
-		if err != nil {
-			return err
-		}
-		if err := s.ensureEntryBlobs(ctx, tx, entries); err != nil {
-			return err
-		}
-		nextNo, err := nextRevisionNo(tx, req.SkillID)
-		if err != nil {
-			return err
-		}
-		revisionID := uuid.NewString()
-		createdBy := nullableString(req.UserID)
-		if err := tx.Create(&skillRevisionRow{
-			ID:               revisionID,
-			SkillID:          req.SkillID,
-			ParentRevisionID: skill.HeadRevisionID,
-			RevisionNo:       nextNo,
-			TreeHash:         hashTree(entries),
-			ChangeSource:     "rollback",
-			SourceRefType:    "revision",
-			SourceRefID:      req.TargetRevisionID,
-			CreatedBy:        createdBy,
-			CreatedAt:        s.clock.Now(),
-		}).Error; err != nil {
-			return err
-		}
-		if err := createRevisionEntries(tx, revisionID, entries); err != nil {
-			return err
-		}
-		if err := tx.Model(&skillRow{}).Where("id = ?", req.SkillID).Updates(map[string]any{
-			"head_revision_id": revisionID,
-			"version":          gorm.Expr("version + 1"),
-			"updated_at":       s.clock.Now(),
-		}).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&skillDraftRow{}).Where("skill_id = ?", req.SkillID).Updates(map[string]any{
-			"base_revision_id": revisionID,
-			"version":          gorm.Expr("version + 1"),
-			"updated_at":       s.clock.Now(),
-		}).Error; err != nil {
-			return err
-		}
-		if err := s.enforceRevisionLimit(ctx, tx, req.SkillID, protectedIDs(revisionID)); err != nil {
-			return err
-		}
-		if err := s.cleanupUnreferencedBlobs(ctx, tx); err != nil {
-			return err
-		}
-		if err := skillsearch.RebuildSkillTx(ctx, tx, req.SkillID, s.clock.Now()); err != nil {
-			return err
-		}
-		out = RollbackResponse{NewHeadRevisionID: revisionID, RevisionNo: nextNo}
-		return nil
+	resp, err := versionfs.NewEngine(versionfs.EngineDeps{DB: s.db, Store: versionStore{service: s}, Clock: s.clock}).Rollback(ctx, versionfs.RollbackRequest{
+		ResourceID:       req.SkillID,
+		UserID:           req.UserID,
+		TargetRevisionID: req.TargetRevisionID,
+		RequireNoDraft:   true,
 	})
-	return out, err
+	if err != nil {
+		return RollbackResponse{}, err
+	}
+	revision, err := getRevision(ctx, s.db, req.SkillID, resp.RevisionID)
+	if err != nil {
+		return RollbackResponse{}, err
+	}
+	return RollbackResponse{NewHeadRevisionID: resp.RevisionID, RevisionNo: revision.RevisionNo}, nil
 }
 
 func (s *Service) RollbackPreview(ctx context.Context, req RollbackPreviewRequest) (RollbackPreviewResponse, error) {
@@ -420,13 +277,19 @@ func (s *Service) DeleteRevision(ctx context.Context, req DeleteRevisionRequest)
 }
 
 func (s *Service) ListRevisions(ctx context.Context, req ListRevisionsRequest) (ListRevisionsResponse, error) {
+	headID, err := headRevisionID(ctx, s.db, req.SkillID)
+	if err != nil {
+		return ListRevisionsResponse{}, err
+	}
 	var rows []skillRevisionRow
 	if err := s.db.WithContext(ctx).Where("skill_id = ?", req.SkillID).Order("revision_no DESC, created_at DESC").Find(&rows).Error; err != nil {
 		return ListRevisionsResponse{}, err
 	}
 	items := make([]Revision, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, revisionDTO(row))
+		item := revisionDTO(row)
+		item.IsHead = row.ID == headID
+		items = append(items, item)
 	}
 	return ListRevisionsResponse{Items: items}, nil
 }
@@ -436,7 +299,13 @@ func (s *Service) GetRevision(ctx context.Context, req GetRevisionRequest) (Revi
 	if err != nil {
 		return Revision{}, err
 	}
-	return revisionDTO(row), nil
+	headID, err := headRevisionID(ctx, s.db, req.SkillID)
+	if err != nil {
+		return Revision{}, err
+	}
+	out := revisionDTO(row)
+	out.IsHead = row.ID == headID
+	return out, nil
 }
 
 func (s *Service) GetRevisionTree(ctx context.Context, req GetRevisionTreeRequest) (TreeNode, error) {
@@ -513,23 +382,7 @@ func (s *Service) ensureEntryBlobs(ctx context.Context, tx *gorm.DB, entries map
 }
 
 func (s *Service) cleanupUnreferencedBlobs(ctx context.Context, tx *gorm.DB) error {
-	var blobs []skillBlobRow
-	if err := tx.Find(&blobs).Error; err != nil {
-		return err
-	}
-	for _, blob := range blobs {
-		referenced, err := blobReferenced(tx, blob.Hash)
-		if err != nil {
-			return err
-		}
-		if referenced {
-			continue
-		}
-		if err := s.blobStore.DeleteBlob(ctx, tx, blob.Hash); err != nil {
-			return err
-		}
-	}
-	return nil
+	return versionfs.NewEngine(versionfs.EngineDeps{DB: s.db, Store: versionStore{service: s}, Clock: s.clock}).CleanupUnreferencedBlobsTx(ctx, tx)
 }
 
 func (s *Service) enforceRevisionLimit(ctx context.Context, tx *gorm.DB, skillID string, protected map[string]bool) error {
@@ -737,7 +590,7 @@ type skillDraftRow struct {
 	SkillID        string     `gorm:"column:skill_id;type:varchar(36);primaryKey"`
 	BaseRevisionID *string    `gorm:"column:base_revision_id;type:varchar(36)"`
 	TaskID         string     `gorm:"column:task_id;type:text;not null;default:''"`
-	ConversationID *string    `gorm:"column:conversation_id;type:varchar(36)"`
+	ConversationID *string    `gorm:"column:conversation_id;type:varchar(128)"`
 	UpdatedBy      *string    `gorm:"column:updated_by;type:varchar(36)"`
 	Version        int64      `gorm:"column:version;not null;default:1"`
 	CreatedAt      time.Time  `gorm:"column:created_at;not null"`
@@ -774,25 +627,6 @@ type mergedEntry struct {
 	Mode      int
 }
 
-func advanceDraftVersion(ctx context.Context, tx *gorm.DB, skillID string, expectedVersion int64, userID string, now time.Time) error {
-	updates := map[string]any{
-		"version":          gorm.Expr("version + 1"),
-		"updated_at":       now,
-		"draft_updated_at": now,
-	}
-	if userID != "" {
-		updates["updated_by"] = userID
-	}
-	result := tx.WithContext(ctx).Model(&skillDraftRow{}).Where("skill_id = ? AND version = ?", skillID, expectedVersion).Updates(updates)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return fmt.Errorf("stale draft version")
-	}
-	return nil
-}
-
 func mergedEntriesForDraft(ctx context.Context, tx *gorm.DB, skillID, baseRevisionID string) (map[string]mergedEntry, error) {
 	entries, err := entriesForRevision(ctx, tx, skillID, baseRevisionID)
 	if err != nil {
@@ -802,28 +636,7 @@ func mergedEntriesForDraft(ctx context.Context, tx *gorm.DB, skillID, baseRevisi
 	if err := tx.WithContext(ctx).Where("skill_id = ?", skillID).Order("path ASC").Find(&overlays).Error; err != nil {
 		return nil, err
 	}
-	for _, overlay := range overlays {
-		if overlay.Op == "delete" {
-			for p := range entries {
-				if p == overlay.Path || isDescendantPath(overlay.Path, p) {
-					delete(entries, p)
-				}
-			}
-			continue
-		}
-		hash := overlay.BlobHash
-		entries[overlay.Path] = mergedEntry{
-			Path:      overlay.Path,
-			EntryType: overlay.EntryType,
-			BlobHash:  hash,
-			Size:      overlay.Size,
-			Mime:      overlay.Mime,
-			FileType:  overlay.FileType,
-			Binary:    overlay.Binary,
-			Mode:      overlay.Mode,
-		}
-	}
-	return entries, nil
+	return fromVersionEntries(versionfs.MergeEntries(toVersionEntries(entries), toVersionOverlays(overlays))), nil
 }
 
 func entriesForRevision(ctx context.Context, db *gorm.DB, skillID, revisionID string) (map[string]mergedEntry, error) {
@@ -952,19 +765,6 @@ func sortTree(nodes []TreeNode) {
 	}
 }
 
-func hashTree(entries map[string]mergedEntry) string {
-	lines := make([]string, 0, len(entries))
-	for _, entry := range sortedEntries(entries) {
-		hash := ""
-		if entry.BlobHash != nil {
-			hash = *entry.BlobHash
-		}
-		lines = append(lines, entry.Path+"\x00"+entry.EntryType+"\x00"+hash)
-	}
-	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
-	return hex.EncodeToString(sum[:])
-}
-
 func diffEntries(oldEntries, newEntries map[string]mergedEntry) TreeDiff {
 	paths := map[string]bool{}
 	for path := range oldEntries {
@@ -1059,8 +859,4 @@ func nullableString(v string) *string {
 		return nil
 	}
 	return &v
-}
-
-func isDescendantPath(parent, candidate string) bool {
-	return strings.HasPrefix(candidate, parent+"/")
 }

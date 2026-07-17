@@ -2,6 +2,7 @@ import { type CheckpointWaitPrompt, type NormalizedThreadEvent, type ThreadEvent
 import { getCheckpointCommandText, t } from "./i18n";
 import { getEventPayloadData, getLastItem, getNestedRecordField, getStringField } from "./fields";
 import { compareNormalizedThreadEvents, getNextStageFromOperation, getStageLabel, isInactiveTerminalThreadEvent, isThreadEventAfter, toThreadEventStage } from "./threadEvents";
+import { localizeErrorCode } from "@/components/request";
 
 export function formatCheckpointOperation(value: string | undefined) {
   if (!value) {
@@ -118,19 +119,34 @@ export function isTerminalAbtestCheckpoint(prompt: CheckpointWaitPrompt | undefi
   return prompt?.completedStage === "abtest" && !prompt.nextStage;
 }
 
+export function requiresManualCheckpointAction(
+  prompt: CheckpointWaitPrompt | undefined,
+): boolean {
+  if (!prompt) {
+    return false;
+  }
+  if (prompt.kind === "failure") {
+    return true;
+  }
+  if (prompt.checkpointKind === "manual_cutover") {
+    return true;
+  }
+  if (prompt.checkpointKind === "intent_confirmation") {
+    return true;
+  }
+  return false;
+}
+
 export function buildFailureRetryPrompt(
   stage: ThreadEventStage | undefined,
   payload: Record<string, unknown> | undefined,
 ): CheckpointWaitPrompt {
   const eventData = getEventPayloadData(payload);
   const stageLabel = getStageLabel(stage) || t("selfEvolutionRun.currentStep");
-  const rawMessage =
-    getStringField(eventData, ["message", "error_message", "error", "detail"]) ||
-    getStringField(payload, ["message", "error_message", "error", "detail"]);
   const errorCode =
     getStringField(eventData, ["error_code", "code"]) ||
     getStringField(payload, ["error_code", "code"]);
-  const reason = getFriendlyFailureReason(errorCode, rawMessage);
+  const reason = getFriendlyFailureReason(errorCode);
   const taskId =
     getStringField(eventData, ["task_id", "apply_id", "run_id", "eval_id", "dataset_id"]) ||
     getStringField(payload, ["task_id"]);
@@ -145,20 +161,8 @@ export function buildFailureRetryPrompt(
   };
 }
 
-export function getFriendlyFailureReason(errorCode: string | undefined, rawMessage: string | undefined) {
-  if (errorCode === "REPORT_ACTIONS_NOT_READY" || rawMessage?.includes("below apply confidence/validity thresholds")) {
-    return t("selfEvolutionRun.failureReasonReportNotReady");
-  }
-  if (errorCode === "RAG_CALL_FAILED" || rawMessage?.includes("chat service failed")) {
-    return t("selfEvolutionRun.failureReasonRagCallFailed");
-  }
-  if (rawMessage) {
-    return rawMessage;
-  }
-  if (errorCode) {
-    return t("selfEvolutionRun.failureReasonErrorCode", { errorCode });
-  }
-  return t("selfEvolutionRun.failureReasonGeneric");
+export function getFriendlyFailureReason(errorCode: string | undefined) {
+  return localizeErrorCode(errorCode, localizeErrorCode("2000509"));
 }
 
 function isLikelyAfterCheckpoint(

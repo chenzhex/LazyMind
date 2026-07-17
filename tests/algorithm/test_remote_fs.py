@@ -67,15 +67,6 @@ def test_remote_fs_uses_core_readonly_api(monkeypatch):
     ]
 
 
-def test_remote_fs_reads_core_api_url_from_model_config(monkeypatch):
-    del monkeypatch
-
-    with algo_config.temp('core_api_url', 'http://inner-core:9000'):
-        fs = RemoteFS()
-
-        assert fs.base_url == 'http://inner-core:9000'
-
-
 def test_remote_fs_omits_session_id_when_not_available(monkeypatch):
     calls = []
 

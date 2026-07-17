@@ -12,6 +12,7 @@ import (
 	"lazymind/core/evalset"
 	"lazymind/core/mcp"
 	"lazymind/core/modelprovider"
+	"lazymind/core/resourcefs"
 	"lazymind/core/wordgroup"
 )
 
@@ -290,8 +291,14 @@ func (b *schemaBuilder) inlineSchemaForType(t reflect.Type) map[string]any {
 			if description := strings.TrimSpace(field.Tag.Get("desc")); description != "" {
 				propertySchema["description"] = description
 			}
-			if field.Tag.Get("openapi_nullable") == "true" {
+			if values := openAPIEnumValues(field.Tag.Get("enum")); len(values) > 0 {
+				propertySchema["enum"] = values
+			}
+			if field.Tag.Get("nullable") == "true" {
 				propertySchema["nullable"] = true
+			}
+			if field.Tag.Get("freeform") == "true" {
+				propertySchema["additionalProperties"] = true
 			}
 			properties[name] = propertySchema
 			if field.Tag.Get("required") == "true" || (!omitEmpty && !isOptionalField(field.Type)) {
@@ -448,6 +455,10 @@ type toolListQueryParams struct {
 	PageSize int32  `query:"page_size"`
 }
 
+type localizedCatalogHeaders struct {
+	AcceptLanguage string `header:"Accept-Language" desc:"Optional UI locale. zh and zh-* use zh-CN; en and en-* use en-US. Missing or unsupported values default to zh-CN."`
+}
+
 type mcpServerListQueryParams struct {
 	Keyword  string `query:"keyword"`
 	Page     int32  `query:"page"`
@@ -489,6 +500,92 @@ type toolStateOpenAPIResponse struct {
 	Disabled bool   `json:"disabled"`
 }
 
+type promptPathParams struct {
+	Name string `path:"name"`
+}
+
+type promptListQueryParams struct {
+	PageSize  int32  `query:"page_size"`
+	PageToken string `query:"page_token"`
+	Keyword   string `query:"keyword"`
+	Category  string `query:"category"`
+	Scope     string `query:"scope"`
+	Sort      string `query:"sort"`
+	Locale    string `query:"locale"`
+}
+
+type promptGetQueryParams struct {
+	Locale string `query:"locale"`
+}
+
+type promptCategoryOpenAPIResponse struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type promptCategoryListOpenAPIResponse struct {
+	Categories []promptCategoryOpenAPIResponse `json:"categories"`
+}
+
+type promptCategoryCreateOpenAPIRequest struct {
+	Name string `json:"name"`
+}
+
+type promptCreateOpenAPIRequest struct {
+	DisplayName string `json:"display_name"`
+	Content     string `json:"content"`
+	Category    string `json:"category"`
+}
+
+type promptPatchOpenAPIRequest struct {
+	DisplayName string `json:"display_name"`
+	Content     string `json:"content"`
+	Category    string `json:"category"`
+}
+
+type promptPolishOpenAPIRequest struct {
+	Content      string `json:"content"`
+	UserInstruct string `json:"user_instruct"`
+}
+
+type promptPolishOpenAPIResponse struct {
+	Content string `json:"content"`
+}
+
+type promptItemOpenAPIResponse struct {
+	Name        string `json:"name"`
+	ID          string `json:"id"`
+	Content     string `json:"content"`
+	DisplayName string `json:"display_name"`
+	Category    string `json:"category"`
+	Source      string `json:"source"`
+	IsFavorite  bool   `json:"is_favorite"`
+	UsageCount  int64  `json:"usage_count"`
+	LastUsedAt  string `json:"last_used_at,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+}
+
+type promptFacetOpenAPIResponse struct {
+	Scopes     map[string]int64 `json:"scopes"`
+	Categories map[string]int64 `json:"categories"`
+}
+
+type promptListOpenAPIResponse struct {
+	Prompts          []promptItemOpenAPIResponse     `json:"prompts"`
+	CustomCategories []promptCategoryOpenAPIResponse `json:"custom_categories"`
+	NextPageToken    string                          `json:"next_page_token"`
+	Total            int64                           `json:"total"`
+	Facets           promptFacetOpenAPIResponse      `json:"facets"`
+}
+
+type promptStateOpenAPIResponse struct {
+	ID         string `json:"id"`
+	IsFavorite bool   `json:"is_favorite"`
+	UsageCount int64  `json:"usage_count"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
+}
+
 type agentThreadPathParams struct {
 	ThreadID string `path:"thread_id"`
 }
@@ -507,6 +604,11 @@ type agentThreadGateVersionPathParams struct {
 type agentThreadTracePathParams struct {
 	ThreadID string `path:"thread_id"`
 	TraceID  string `path:"trace_id"`
+}
+
+type agentThreadTraceCompareQueryParams struct {
+	A string `query:"a" required:"true"`
+	B string `query:"b" required:"true"`
 }
 
 type agentThreadEvalBadCasesQueryParams struct {
@@ -549,6 +651,134 @@ type agentCandidatePathParams struct {
 
 type agentRouterAlgorithmPathParams struct {
 	AlgorithmID string `path:"algorithm_id"`
+}
+
+type agentRouterQueryParams struct {
+	RouterAdminURL string `query:"router_admin_url" desc:"Optional Router admin origin override."`
+	RouterChatURL  string `query:"router_chat_url" desc:"Optional Router chat stream URL override."`
+}
+
+type agentRouterAlgorithmQueryParams struct {
+	ThreadID       string `query:"thread_id" desc:"Filter by owning Evo thread."`
+	AlgorithmID    string `query:"algorithm_id" desc:"Filter by exact algorithm id."`
+	Status         string `query:"status" enum:"all,starting,active,disabled,missing" desc:"Filter by live Router status; defaults to all."`
+	RouterAdminURL string `query:"router_admin_url" desc:"Optional Router admin origin override."`
+	RouterChatURL  string `query:"router_chat_url" desc:"Optional Router chat stream URL override."`
+}
+
+type agentRouterOwnerInput struct {
+	ThreadID     string `json:"thread_id" required:"true" desc:"Owning Evo thread id."`
+	CandidateRef string `json:"candidate_ref,omitempty" desc:"Candidate artifact reference used for audit."`
+}
+
+type agentRouterActionRequest struct {
+	Action           string  `json:"action" required:"true" enum:"healthcheck,start,restart,stop"`
+	WaitReadySeconds float64 `json:"wait_ready_seconds,omitempty" desc:"Start or restart readiness timeout in seconds; default 180, maximum 900."`
+}
+
+type agentRouterABStrategyRequest struct {
+	Weights        map[string]int         `json:"weights,omitempty" nullable:"true" desc:"Algorithm weights. Omit or set null to clear the strategy and return to default routing."`
+	Reason         string                 `json:"reason,omitempty" desc:"Audit reason for the strategy change."`
+	Owner          *agentRouterOwnerInput `json:"owner,omitempty" desc:"Optional Evo owner recorded in the AB audit."`
+	RouterAdminURL string                 `json:"router_admin_url,omitempty" desc:"Optional Router admin origin override."`
+	RouterChatURL  string                 `json:"router_chat_url,omitempty" desc:"Optional Router chat stream URL override."`
+}
+
+type agentRouterInstance struct {
+	Host       string `json:"host"`
+	Port       int32  `json:"port"`
+	Status     string `json:"status"`
+	Failures   int32  `json:"failures"`
+	InstanceID string `json:"instance_id"`
+}
+
+type agentRouterHealth struct {
+	Status           string                `json:"status" enum:"passed,failed,stopped"`
+	AlgorithmStatus  string                `json:"algorithm_status,omitempty" enum:"starting,active,disabled,missing"`
+	HealthyInstances int32                 `json:"healthy_instances"`
+	Instances        []agentRouterInstance `json:"instances" required:"true"`
+}
+
+type agentRouterStrategyView struct {
+	Active  bool           `json:"active"`
+	ID      *int64         `json:"id" required:"true" nullable:"true" desc:"Router strategy id; null when inactive."`
+	Weights map[string]int `json:"weights" required:"true" desc:"Effective routing weights; {default: 100} when AB routing is inactive."`
+}
+
+type agentRouterStatusCounts struct {
+	EvoOwned int32 `json:"evo_owned"`
+	Active   int32 `json:"active"`
+	Healthy  int32 `json:"healthy"`
+}
+
+type agentRouterStatusResponse struct {
+	Status         string                  `json:"status" enum:"ok"`
+	RouterAdminURL string                  `json:"router_admin_url"`
+	Algorithms     agentRouterStatusCounts `json:"algorithms"`
+	ABStrategy     agentRouterStrategyView `json:"ab_strategy"`
+}
+
+type agentRouterAlgorithm struct {
+	AlgorithmID      string  `json:"algorithm_id"`
+	Name             string  `json:"name"`
+	Status           string  `json:"status" enum:"starting,active,disabled,missing"`
+	HealthyInstances int32   `json:"healthy_instances"`
+	InstanceCount    int32   `json:"instance_count"`
+	ThreadID         *string `json:"thread_id" required:"true" nullable:"true"`
+	CreatedAt        *string `json:"created_at" required:"true" nullable:"true"`
+}
+
+type agentRouterAlgorithmListResponse struct {
+	Items []agentRouterAlgorithm `json:"items" required:"true"`
+}
+
+type agentRouterActionResponse struct {
+	Status      string            `json:"status" enum:"passed,failed,stopped"`
+	AlgorithmID string            `json:"algorithm_id"`
+	Action      string            `json:"action" enum:"healthcheck,start,restart,stop"`
+	Healthcheck agentRouterHealth `json:"healthcheck"`
+}
+
+type agentRouterDeleteResponse struct {
+	Status               string   `json:"status" enum:"deleted"`
+	AlgorithmID          string   `json:"algorithm_id"`
+	RouterStatus         string   `json:"router_status" enum:"missing,disabled"`
+	RouterRecordRetained bool     `json:"router_record_retained"`
+	LedgerDeleted        bool     `json:"ledger_deleted"`
+	ArtifactsDeleted     int32    `json:"artifacts_deleted"`
+	Workspace            string   `json:"workspace" enum:"deleted,missing,retained_external,retained_shared"`
+	RetainedHistory      []string `json:"retained_history" required:"true"`
+}
+
+type agentRouterABAudit struct {
+	ThreadID     string `json:"thread_id,omitempty"`
+	CandidateRef string `json:"candidate_ref,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+type agentRouterMutationResponse struct {
+	ID         *int64         `json:"id,omitempty"`
+	Status     string         `json:"status,omitempty" enum:"cleared"`
+	Weights    map[string]int `json:"weights,omitempty"`
+	IsActive   *bool          `json:"is_active,omitempty"`
+	Normalized *bool          `json:"normalized,omitempty"`
+}
+
+type agentRouterABStrategyResponse struct {
+	Active         bool                         `json:"active"`
+	ID             *int64                       `json:"id" required:"true" nullable:"true" desc:"Router strategy id; null when inactive."`
+	Weights        map[string]int               `json:"weights" required:"true"`
+	UpdatedBy      agentRouterABAudit           `json:"updated_by"`
+	RouterResponse *agentRouterMutationResponse `json:"router_response,omitempty" desc:"Present after PUT; contains the Router mutation result."`
+}
+
+type agentRouterErrorDetail struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+type agentRouterErrorResponse struct {
+	Detail agentRouterErrorDetail `json:"detail"`
 }
 
 type agentThreadOpenAPIResponse struct {
@@ -658,16 +888,16 @@ type addModelProviderGroupModelOpenAPIResponse struct {
 }
 
 type listModelProviderGroupModelsOpenAPIItem struct {
-	ID                       string `json:"id"`
-	UserModelProviderID      string `json:"user_model_provider_id"`
-	UserModelProviderGroupID string `json:"user_model_provider_group_id"`
-	Name                     string `json:"name"`
-	ModelType                string `json:"model_type"`
-	ProviderName             string `json:"provider_name"`
-	GroupName                string `json:"group_name"`
-	BaseURL                  string `json:"base_url"`
-	IsDefault                bool   `json:"is_default"`
-	MaxInputTokens           *int64 `json:"max_input_tokens" desc:"Maximum model input length in tokens; null when unknown" openapi_nullable:"true"`
+	ID                       string  `json:"id"`
+	UserModelProviderID      string  `json:"user_model_provider_id"`
+	UserModelProviderGroupID string  `json:"user_model_provider_group_id"`
+	Name                     string  `json:"name"`
+	ModelType                string  `json:"model_type"`
+	ProviderName             string  `json:"provider_name"`
+	GroupName                string  `json:"group_name"`
+	BaseURL                  string  `json:"base_url"`
+	IsDefault                bool    `json:"is_default"`
+	MaxInputTokens           *string `json:"max_input_tokens" desc:"Maximum catalog LLM or VLM input context window, for example 128K or 1M; null for other, custom, or unknown models" nullable:"true"`
 }
 
 type listModelProviderGroupModelsOpenAPIResponse struct {
@@ -679,14 +909,15 @@ type listUserModelsByModelTypeQueryParams struct {
 }
 
 type selectedModelOpenAPIItem struct {
-	ModelKey                 string `json:"model_key"`
-	ModelID                  string `json:"model_id"`
-	UserModelProviderID      string `json:"user_model_provider_id"`
-	UserModelProviderGroupID string `json:"user_model_provider_group_id"`
-	Name                     string `json:"name"`
-	ProviderName             string `json:"provider_name"`
-	GroupName                string `json:"group_name"`
-	BaseURL                  string `json:"base_url"`
+	ModelKey                 string  `json:"model_key"`
+	ModelID                  string  `json:"model_id"`
+	UserModelProviderID      string  `json:"user_model_provider_id"`
+	UserModelProviderGroupID string  `json:"user_model_provider_group_id"`
+	Name                     string  `json:"name"`
+	ProviderName             string  `json:"provider_name"`
+	GroupName                string  `json:"group_name"`
+	BaseURL                  string  `json:"base_url"`
+	MaxInputTokens           *string `json:"max_input_tokens" desc:"Maximum selected catalog LLM or VLM input context window, for example 128K or 1M; null for other, custom, or unknown models" nullable:"true"`
 }
 
 type listSelectedModelsOpenAPIResponse struct {
@@ -822,11 +1053,20 @@ type resourceUpdateTaskListQueryParams struct {
 	TaskType     string `query:"task_type"`
 }
 
+type skillReviewTaskListQueryParams struct {
+	Page      int32  `query:"page"`
+	PageSize  int32  `query:"page_size"`
+	Status    string `query:"status"`
+	RequestID string `query:"requestid"`
+}
+
 type skillReviewResultListQueryParams struct {
 	Page         int32  `query:"page"`
 	PageSize     int32  `query:"page_size"`
 	ReviewStatus string `query:"review_status"`
 	Type         string `query:"type"`
+	SkillName    string `query:"skill_name"`
+	RequestID    string `query:"requestid"`
 }
 
 type memoryReviewResultListQueryParams struct {
@@ -881,7 +1121,7 @@ type skillReviewResultOpenAPIResponse struct {
 	SkillContent   string                         `json:"skill_content,omitempty"`
 	CurrentContent string                         `json:"current_content,omitempty"`
 	Diff           string                         `json:"diff,omitempty"`
-	DiffEntryLines []diffEntryLineOpenAPIResponse `json:"diffEntryLines,omitempty"`
+	DiffEntryLines []diffEntryLineOpenAPIResponse `json:"diff_entry_lines,omitempty"`
 	Summary        string                         `json:"summary"`
 	Time           string                         `json:"time"`
 }
@@ -891,6 +1131,66 @@ type skillReviewResultListOpenAPIResponse struct {
 	Page     int32                              `json:"page"`
 	PageSize int32                              `json:"page_size"`
 	Total    int64                              `json:"total"`
+}
+
+type skillReviewSummaryOpenAPIResponse struct {
+	QualifiedSessionCount int32                              `json:"qualified_session_count"`
+	UserTurnCount         int32                              `json:"user_turn_count"`
+	ToolCallCount         int32                              `json:"tool_call_count"`
+	MinUserTurns          int32                              `json:"min_user_turns"`
+	MinToolTurns          int32                              `json:"min_tool_turns"`
+	QuantityThreshold     int32                              `json:"quantity_threshold"`
+	WindowStart           string                             `json:"window_start"`
+	WindowEnd             string                             `json:"window_end"`
+	RunningTask           *resourceUpdateTaskOpenAPIResponse `json:"running_task,omitempty"`
+	RunningRequestID      string                             `json:"running_requestid,omitempty"`
+}
+
+type skillReviewRunOpenAPIResponse struct {
+	Task      resourceUpdateTaskOpenAPIResponse `json:"task"`
+	Summary   skillReviewSummaryOpenAPIResponse `json:"summary"`
+	RequestID string                            `json:"requestid"`
+}
+
+type skillReviewTaskStatusOpenAPIResponse struct {
+	Task        resourceUpdateTaskOpenAPIResponse `json:"task"`
+	RequestID   string                            `json:"requestid"`
+	Status      string                            `json:"status"`
+	RunStatus   string                            `json:"run_status,omitempty"`
+	ResultCount int64                             `json:"result_count"`
+}
+
+type skillReviewTaskListOpenAPIResponse struct {
+	Items    []skillReviewTaskStatusOpenAPIResponse `json:"items"`
+	Page     int32                                  `json:"page"`
+	PageSize int32                                  `json:"page_size"`
+	Total    int64                                  `json:"total"`
+}
+
+type skillOrganizeOpenAPIRequest struct {
+	RequestID   string   `json:"requestid"`
+	Skills      []string `json:"skills"`
+	ArtifactDir string   `json:"artifact_dir,omitempty"`
+}
+
+type skillOrganizeOpenAPIResponse struct {
+	Status    string `json:"status"`
+	RequestID string `json:"requestid"`
+	TaskID    string `json:"taskid"`
+}
+
+type skillMaintenanceTaskOpenAPIResponse struct {
+	ID        string `json:"id"`
+	RequestID string `json:"request_id"`
+	Type      string `json:"type"`
+	Status    string `json:"status"`
+	StartedAt string `json:"started_at"`
+}
+
+type skillMaintenanceStatusOpenAPIResponse struct {
+	HasActiveTask bool                                 `json:"has_active_task"`
+	Task          *skillMaintenanceTaskOpenAPIResponse `json:"task,omitempty"`
+	Message       string                               `json:"message,omitempty"`
 }
 
 type memoryReviewResultOpenAPIResponse struct {
@@ -936,6 +1236,73 @@ type resourceVersionListOpenAPIResponse struct {
 	Page     int32                            `json:"page"`
 	PageSize int32                            `json:"page_size"`
 	Total    int64                            `json:"total"`
+}
+
+type personalResourcePathParams struct {
+	ResourceType string `path:"resource_type"`
+}
+
+type personalResourceRevisionPathParams struct {
+	ResourceType string `path:"resource_type"`
+	RevisionID   string `path:"revision_id"`
+}
+
+type personalResourceReviewPathParams struct {
+	ResourceType string `path:"resource_type"`
+	ReviewID     string `path:"review_id"`
+}
+
+type personalResourceFileQueryParams struct {
+	Ref        string `query:"ref"`
+	RevisionID string `query:"revision_id"`
+}
+
+type personalResourceWriteDraftOpenAPIRequest struct {
+	Content              *string `json:"content,omitempty"`
+	ExpectedDraftVersion int64   `json:"expected_draft_version,omitempty"`
+	ConversationID       string  `json:"conversation_id,omitempty"`
+	TaskID               string  `json:"task_id,omitempty"`
+}
+
+type personalResourcePatchOpenAPIRequest struct {
+	AutoEvo       *bool   `json:"auto_evo,omitempty"`
+	AgentPersona  *string `json:"agent_persona,omitempty"`
+	PreferredName *string `json:"preferred_name,omitempty"`
+	ResponseStyle *string `json:"response_style,omitempty"`
+}
+
+type personalResourceGenerateOpenAPIRequest struct {
+	UserInstruct string `json:"user_instruct"`
+}
+
+type personalResourceGenerateOpenAPIResponse struct {
+	DraftStatus        string `json:"draft_status"`
+	DraftSourceVersion int64  `json:"draft_source_version"`
+	DraftContent       string `json:"draft_content"`
+	DraftVersion       int64  `json:"draft_version"`
+}
+
+type personalResourceReviewActionOpenAPIRequest struct {
+	ExpectedReviewVersion int64                         `json:"expected_review_version,omitempty"`
+	Items                 []resourcefs.ReviewActionItem `json:"items"`
+}
+
+type personalResourceReviewUndoOpenAPIRequest struct {
+	ExpectedReviewVersion int64 `json:"expected_review_version,omitempty"`
+}
+
+type personalResourceCommitOpenAPIRequest struct {
+	Message                string `json:"message,omitempty"`
+	SourceRefType          string `json:"source_ref_type,omitempty"`
+	SourceRefID            string `json:"source_ref_id,omitempty"`
+	ExpectedHeadRevisionID string `json:"expected_head_revision_id,omitempty"`
+	ExpectedDraftVersion   int64  `json:"expected_draft_version,omitempty"`
+}
+
+type personalResourceRollbackOpenAPIRequest struct {
+	RevisionID             string `json:"revision_id"`
+	Message                string `json:"message,omitempty"`
+	ExpectedHeadRevisionID string `json:"expected_head_revision_id,omitempty"`
 }
 
 type latestVersionChangeOpenAPIResponse struct {
@@ -1028,6 +1395,8 @@ type skillListItemOpenAPIResponse struct {
 	FileContent         string                              `json:"file_content,omitempty"`
 	Draft               skillDraftSummaryOpenAPIResponse    `json:"draft"`
 	LatestVersionChange *latestVersionChangeOpenAPIResponse `json:"latest_version_change,omitempty"`
+	DeletedAt           *string                             `json:"deleted_at,omitempty"`
+	DeletedBy           string                              `json:"deleted_by,omitempty"`
 }
 
 type skillListOpenAPIResponse struct {
@@ -1079,6 +1448,21 @@ type skillRevisionPathParams struct {
 
 type builtinSkillPathParams struct {
 	BuiltinSkillUID string `path:"builtin_skill_uid"`
+}
+
+type builtinSkillOpenAPIResponse struct {
+	BuiltinSkillUID  string `json:"builtin_skill_uid"`
+	Name             string `json:"name"`
+	Description      string `json:"description"`
+	Category         string `json:"category"`
+	Content          string `json:"content"`
+	Installed        bool   `json:"installed"`
+	InstalledSkillID string `json:"installed_skill_id,omitempty"`
+}
+
+type builtinSkillListOpenAPIResponse struct {
+	Items []builtinSkillOpenAPIResponse `json:"items"`
+	Total int                           `json:"total"`
 }
 
 type skillTreeNodeOpenAPIResponse struct {
@@ -1183,6 +1567,7 @@ type skillRevisionOpenAPIResponse struct {
 	CreatedBy        string `json:"created_by,omitempty"`
 	CreatedAt        string `json:"created_at"`
 	FileContent      string `json:"file_content,omitempty"`
+	IsHead           bool   `json:"is_head"`
 }
 
 type skillRevisionListOpenAPIResponse struct {
@@ -1252,7 +1637,7 @@ type diffFileOpenAPIResponse struct {
 	Binary         bool                           `json:"binary"`
 	TooLarge       bool                           `json:"too_large"`
 	CacheWritten   bool                           `json:"cache_written"`
-	DiffEntryLines []diffEntryLineOpenAPIResponse `json:"diffEntryLines"`
+	DiffEntryLines []diffEntryLineOpenAPIResponse `json:"diff_entry_lines"`
 }
 
 type diffTreeOpenAPIResponse struct {
@@ -1379,17 +1764,19 @@ type marketEditOpenAPIRequest struct {
 }
 
 type marketItemOpenAPIResponse struct {
-	ID            string                      `json:"id,omitempty"`
-	MarketItemID  string                      `json:"market_item_id"`
-	SourceSkillID string                      `json:"source_skill_id,omitempty"`
-	Status        string                      `json:"status,omitempty"`
-	Icon          string                      `json:"icon,omitempty"`
-	SortOrder     int                         `json:"sort_order,omitempty"`
-	VersionNote   string                      `json:"version_note,omitempty"`
-	PublishedAt   string                      `json:"published_at,omitempty"`
-	CreatedAt     string                      `json:"created_at,omitempty"`
-	UpdatedAt     string                      `json:"updated_at,omitempty"`
-	Source        *skillDetailOpenAPIResponse `json:"source,omitempty"`
+	ID               string                      `json:"id,omitempty"`
+	MarketItemID     string                      `json:"market_item_id"`
+	SourceSkillID    string                      `json:"source_skill_id,omitempty"`
+	Status           string                      `json:"status,omitempty"`
+	Installed        bool                        `json:"installed,omitempty"`
+	InstalledSkillID string                      `json:"installed_skill_id,omitempty"`
+	Icon             string                      `json:"icon,omitempty"`
+	SortOrder        int                         `json:"sort_order,omitempty"`
+	VersionNote      string                      `json:"version_note,omitempty"`
+	PublishedAt      string                      `json:"published_at,omitempty"`
+	CreatedAt        string                      `json:"created_at,omitempty"`
+	UpdatedAt        string                      `json:"updated_at,omitempty"`
+	Source           *skillDetailOpenAPIResponse `json:"source,omitempty"`
 }
 
 type marketListOpenAPIResponse struct {
@@ -1401,6 +1788,20 @@ type marketListOpenAPIResponse struct {
 
 type skillDeleteOpenAPIResponse struct {
 	Deleted bool `json:"deleted"`
+}
+
+type skillRestoreOpenAPIResponse struct {
+	Restored bool   `json:"restored"`
+	SkillID  string `json:"skill_id"`
+}
+
+type skillPurgeOpenAPIResponse struct {
+	Purged  bool   `json:"purged"`
+	SkillID string `json:"skill_id"`
+}
+
+type skillEmptyTrashOpenAPIResponse struct {
+	Purged int `json:"purged"`
 }
 
 type skillDiscardOpenAPIResponse struct {
@@ -1607,6 +2008,24 @@ type evalSetImportPreviewOpenAPIRequest struct {
 	FileType string `json:"file_type,omitempty"`
 }
 
+type pluginDraftPathParams struct {
+	DraftID string `path:"draft_id"`
+}
+type pluginRepairRunPathParams struct {
+	DraftID  string `path:"draft_id"`
+	RepairID string `path:"repair_id"`
+}
+type pluginWorkflowConfirmOpenAPIRequest struct {
+	AnalysisID            string `json:"analysis_id"`
+	CandidateID           string `json:"candidate_id"`
+	SourceSkillRevisionID string `json:"source_skill_revision_id"`
+	DraftVersion          int    `json:"draft_version"`
+}
+type pluginRepairPreviewOpenAPIRequest struct {
+	Target string `json:"target"`
+	Mode   string `json:"mode"`
+}
+
 func registeredCoreOperations() []openAPIOperation {
 	jsonBodyOf := func(v any, required bool) *openAPIBody {
 		return &openAPIBody{Required: required, ContentType: "application/json", Schema: schemaSource{Type: v}}
@@ -1617,6 +2036,7 @@ func registeredCoreOperations() []openAPIOperation {
 	resp := func(description string, v any) openAPIResponse {
 		return openAPIResponse{Description: description, ContentType: "application/json", Schema: schemaSource{Type: v}}
 	}
+	routerErrorResp := resp("Router management error", agentRouterErrorResponse{})
 	rawResp := func(description string) openAPIResponse {
 		return openAPIResponse{Description: description, ContentType: "application/octet-stream", Schema: schemaSource{Inline: map[string]any{"type": "string", "format": "binary"}}}
 	}
@@ -1657,6 +2077,10 @@ func registeredCoreOperations() []openAPIOperation {
 		}},
 	}
 	return []openAPIOperation{
+		{Method: "GET", Path: "/plugin-drafts/{draft_id}/generation-analysis", Summary: "Get Plugin generation analysis", Tags: []string{"plugin"}, PathParams: pluginDraftPathParams{}, Responses: map[int]openAPIResponse{200: evoJSONResp("Generation analysis")}},
+		{Method: "POST", Path: "/plugin-drafts/{draft_id}:confirm-workflow", Summary: "Confirm Skill workflow candidate", Tags: []string{"plugin"}, PathParams: pluginDraftPathParams{}, RequestBody: jsonBodyOf(pluginWorkflowConfirmOpenAPIRequest{}, true), Responses: map[int]openAPIResponse{200: evoJSONResp("Confirmation result")}},
+		{Method: "POST", Path: "/plugin-drafts/{draft_id}:repair-preview", Summary: "Preview Plugin repair", Tags: []string{"plugin"}, PathParams: pluginDraftPathParams{}, RequestBody: jsonBodyOf(pluginRepairPreviewOpenAPIRequest{}, true), Responses: map[int]openAPIResponse{200: evoJSONResp("Repair preview")}},
+		{Method: "GET", Path: "/plugin-drafts/{draft_id}/repair-runs/{repair_id}", Summary: "Get Plugin repair run", Tags: []string{"plugin"}, PathParams: pluginRepairRunPathParams{}, Responses: map[int]openAPIResponse{200: evoJSONResp("Repair run")}},
 		{
 			Method:      "GET",
 			Path:        "/datasets",
@@ -1773,6 +2197,14 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:  map[int]openAPIResponse{200: resp("Deleted database connection", deleteDatabaseConnectionOpenAPIResponse{})},
 		},
 		{
+			Method:      "GET",
+			Path:        "/builtin-skills",
+			Summary:     "List builtin directory skills",
+			Description: "Lists immutable built-in templates and their installation state for the current user.",
+			Tags:        []string{"skills"},
+			Responses:   map[int]openAPIResponse{200: resp("Builtin skill list", builtinSkillListOpenAPIResponse{})},
+		},
+		{
 			Method:     "POST",
 			Path:       "/data-sources/database-connections/{connection}:check",
 			Summary:    "Check database connection",
@@ -1858,12 +2290,13 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:  map[int]openAPIResponse{200: resp("Eval set import task", evalset.EvalSetImportTaskResponse{})},
 		},
 		{
-			Method:     "GET",
-			Path:       "/eval-sets/{eval_set_id}/question-types",
-			Summary:    "List eval set question types",
-			Tags:       []string{"eval-set-items"},
-			PathParams: evalset.EvalSetPathParams{},
-			Responses:  map[int]openAPIResponse{200: resp("Question type options", evalset.QuestionTypeOptionsResponse{})},
+			Method:      "GET",
+			Path:        "/eval-sets/{eval_set_id}/question-types",
+			Summary:     "List eval set question types",
+			Tags:        []string{"eval-set-items"},
+			PathParams:  evalset.EvalSetPathParams{},
+			QueryParams: evalset.ListEvalSetQuestionTypesQuery{},
+			Responses:   map[int]openAPIResponse{200: resp("Question type options", evalset.QuestionTypeOptionsResponse{})},
 		},
 		{
 			Method:      "GET",
@@ -2109,6 +2542,15 @@ func registeredCoreOperations() []openAPIOperation {
 		},
 		{
 			Method:      "POST",
+			Path:        "/datasets/{dataset}/uploads:checkHashes",
+			Summary:     "Check reusable file hashes",
+			Tags:        []string{"tasks"},
+			PathParams:  datasetPathParams{},
+			RequestBody: jsonBodyOf(doc.CheckFileHashesRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Missing file hashes", doc.CheckFileHashesResponse{})},
+		},
+		{
+			Method:      "POST",
 			Path:        "/datasets/{dataset}/uploads:initUpload",
 			Summary:     "Initialize dataset upload",
 			Tags:        []string{"tasks"},
@@ -2180,114 +2622,6 @@ func registeredCoreOperations() []openAPIOperation {
 		},
 		{
 			Method:      "GET",
-			Path:        "/evolution/tasks",
-			Summary:     "List resource update tasks",
-			Description: "Lists background resource update tasks for the current user.",
-			Tags:        []string{"evolution"},
-			QueryParams: resourceUpdateTaskListQueryParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Resource update task list", resourceUpdateTaskListOpenAPIResponse{})},
-		},
-		{
-			Method:      "GET",
-			Path:        "/evolution/tasks/{task_id}",
-			Summary:     "Get resource update task",
-			Description: "Gets one background resource update task for the current user.",
-			Tags:        []string{"evolution"},
-			PathParams:  resourceUpdateTaskPathParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Resource update task", resourceUpdateTaskOpenAPIResponse{})},
-		},
-		{
-			Method:      "GET",
-			Path:        "/skill-review-results",
-			Summary:     "List skill review results",
-			Description: "Lists skill draft review results for the current user.",
-			Tags:        []string{"skill-review-results"},
-			QueryParams: skillReviewResultListQueryParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Skill review result list", skillReviewResultListOpenAPIResponse{})},
-		},
-		{
-			Method:      "GET",
-			Path:        "/skill-review-results/{review_result_id}",
-			Summary:     "Get skill review result",
-			Description: "Gets one skill draft review result for the current user.",
-			Tags:        []string{"skill-review-results"},
-			PathParams:  reviewResultPathParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Skill review result", skillReviewResultOpenAPIResponse{})},
-		},
-		{
-			Method:      "POST",
-			Path:        "/skill-review-results/{review_result_id}:accept",
-			Summary:     "Accept skill review result",
-			Description: "Synchronously accepts a pending skill draft review result.",
-			Tags:        []string{"skill-review-results"},
-			PathParams:  reviewResultPathParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Accepted skill review result", skillReviewResultOpenAPIResponse{})},
-		},
-		{
-			Method:      "POST",
-			Path:        "/skill-review-results/{review_result_id}:reject",
-			Summary:     "Reject skill review result",
-			Description: "Synchronously rejects a pending skill draft review result.",
-			Tags:        []string{"skill-review-results"},
-			PathParams:  reviewResultPathParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Rejected skill review result", skillReviewResultOpenAPIResponse{})},
-		},
-		{
-			Method:      "GET",
-			Path:        "/memory-review-results",
-			Summary:     "List memory review results",
-			Description: "Lists memory and user preference draft review results for the current user.",
-			Tags:        []string{"memory-review-results"},
-			QueryParams: memoryReviewResultListQueryParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Memory review result list", memoryReviewResultListOpenAPIResponse{})},
-		},
-		{
-			Method:      "GET",
-			Path:        "/memory-review-results/{review_result_id}",
-			Summary:     "Get memory review result",
-			Description: "Gets one memory or user preference draft review result for the current user.",
-			Tags:        []string{"memory-review-results"},
-			PathParams:  reviewResultPathParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Memory review result", memoryReviewResultOpenAPIResponse{})},
-		},
-		{
-			Method:      "POST",
-			Path:        "/memory-review-results/{review_result_id}:accept",
-			Summary:     "Accept memory review result",
-			Description: "Synchronously accepts a pending memory or user preference draft review result.",
-			Tags:        []string{"memory-review-results"},
-			PathParams:  reviewResultPathParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Accepted memory review result", memoryReviewResultOpenAPIResponse{})},
-		},
-		{
-			Method:      "POST",
-			Path:        "/memory-review-results/{review_result_id}:reject",
-			Summary:     "Reject memory review result",
-			Description: "Synchronously rejects a pending memory or user preference draft review result.",
-			Tags:        []string{"memory-review-results"},
-			PathParams:  reviewResultPathParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Rejected memory review result", memoryReviewResultOpenAPIResponse{})},
-		},
-		{
-			Method:      "GET",
-			Path:        "/resource-versions",
-			Summary:     "List resource versions",
-			Description: "Lists content version history for skills, memory, and user preferences for the current user.",
-			Tags:        []string{"resource-versions"},
-			QueryParams: resourceVersionListQueryParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Resource version list", resourceVersionListOpenAPIResponse{})},
-		},
-		{
-			Method:      "GET",
-			Path:        "/resource-versions/{version_id}",
-			Summary:     "Get resource version",
-			Description: "Gets one content version history entry for the current user.",
-			Tags:        []string{"resource-versions"},
-			PathParams:  resourceVersionPathParams{},
-			Responses:   map[int]openAPIResponse{200: resp("Resource version", resourceVersionOpenAPIResponse{})},
-		},
-		{
-			Method:      "GET",
 			Path:        "/skills",
 			Summary:     "List skills",
 			Tags:        []string{"skills"},
@@ -2303,10 +2637,26 @@ func registeredCoreOperations() []openAPIOperation {
 		},
 		{
 			Method:    "GET",
+			Path:      "/skills/maintenance-task",
+			Summary:   "Get current user's active Skill maintenance task",
+			Tags:      []string{"skills"},
+			Responses: map[int]openAPIResponse{200: resp("Skill maintenance task status", skillMaintenanceStatusOpenAPIResponse{})},
+		},
+		{
+			Method:    "GET",
 			Path:      "/skills/categories",
 			Summary:   "List skill categories",
 			Tags:      []string{"skills"},
 			Responses: map[int]openAPIResponse{200: resp("Skill category list", skillCategoriesOpenAPIResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/skill_organize",
+			Summary:     "Submit skill organize task",
+			Description: "Submits a skill organize task for current user's SkillV2 files. The task runs asynchronously in the algorithm service.",
+			Tags:        []string{"skills"},
+			RequestBody: jsonBodyOf(skillOrganizeOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Skill organize task accepted", skillOrganizeOpenAPIResponse{})},
 		},
 		{
 			Method:      "POST",
@@ -2344,12 +2694,54 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:   map[int]openAPIResponse{200: resp("Updated skill", skillWriteOpenAPIResponse{})},
 		},
 		{
-			Method:     "DELETE",
-			Path:       "/skills/{skill_id}",
-			Summary:    "Delete directory skill",
+			Method:      "DELETE",
+			Path:        "/skills/{skill_id}",
+			Summary:     "Move skill to trash",
+			Description: "Logically deletes a skill by moving it to the recycle bin.",
+			Tags:        []string{"skills"},
+			PathParams:  skillPathParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Moved skill to trash", skillDeleteOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/skills:trash",
+			Summary:     "List trashed skills",
+			Description: "Lists skills in the current user's recycle bin.",
+			Tags:        []string{"skills"},
+			QueryParams: skillListQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Trashed skill list", skillListOpenAPIResponse{})},
+		},
+		{
+			Method:      "DELETE",
+			Path:        "/skills:trash",
+			Summary:     "Empty skill trash",
+			Description: "Permanently deletes every skill in the current user's recycle bin.",
+			Tags:        []string{"skills"},
+			Responses:   map[int]openAPIResponse{200: resp("Emptied skill trash", skillEmptyTrashOpenAPIResponse{})},
+		},
+		{
+			Method:     "POST",
+			Path:       "/skills/{skill_id}:trash",
+			Summary:    "Move skill to trash",
 			Tags:       []string{"skills"},
 			PathParams: skillPathParams{},
-			Responses:  map[int]openAPIResponse{200: resp("Deleted skill", skillDeleteOpenAPIResponse{})},
+			Responses:  map[int]openAPIResponse{200: resp("Moved skill to trash", skillDeleteOpenAPIResponse{})},
+		},
+		{
+			Method:     "POST",
+			Path:       "/skills/{skill_id}:restore",
+			Summary:    "Restore skill from trash",
+			Tags:       []string{"skills"},
+			PathParams: skillPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Restored skill", skillRestoreOpenAPIResponse{})},
+		},
+		{
+			Method:     "DELETE",
+			Path:       "/skills/{skill_id}:purge",
+			Summary:    "Permanently delete trashed skill",
+			Tags:       []string{"skills"},
+			PathParams: skillPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Purged skill", skillPurgeOpenAPIResponse{})},
 		},
 		{
 			Method:     "GET",
@@ -2837,6 +3229,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Description: "Per-user model provider list. Missing catalog rows are synced from default_model_providers on each request. Query parameter category filters by provider category (default model when category and exclude_category are both omitted). Query parameter exclude_category excludes a category (e.g. exclude_category=model returns ocr and search providers). Query parameter keyword filters by provider name case-insensitively.",
 			Tags:        []string{"model_providers"},
 			QueryParams: listUserModelProvidersQueryParams{},
+			Headers:     localizedCatalogHeaders{},
 			Responses:   map[int]openAPIResponse{200: resp("User model provider list", listUserModelProvidersOpenAPIResponse{})},
 		},
 		{
@@ -2845,6 +3238,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Summary:     "List user model providers that have groups",
 			Description: "Returns user_model_providers for the current user that have at least one non-deleted row in user_model_provider_groups. The current user identity is injected by the auth gateway from the token. Same response shape as GET /model_providers.",
 			Tags:        []string{"model_providers"},
+			Headers:     localizedCatalogHeaders{},
 			Responses:   map[int]openAPIResponse{200: resp("User model providers with groups", listUserModelProvidersOpenAPIResponse{})},
 		},
 		{
@@ -2868,7 +3262,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/model_providers/models",
 			Summary:     "List current user's models by model_type",
-			Description: "Requires query model_type (e.g. llm, embedding). Returns all non-deleted user_model_provider_group_models for the current user with that model_type across all providers and groups. Each item includes nullable max_input_tokens, the catalog model's maximum input length in tokens; custom or unknown models return null. Ordered by user_model_provider_id, group id, then name. Same items as GET .../groups/{group_id}/models.",
+			Description: "Requires query model_type (e.g. llm or vlm). Returns all non-deleted user_model_provider_group_models for the current user with that model_type across all providers and groups. Each item includes nullable max_input_tokens, the catalog LLM or VLM model's maximum input context window expressed as a string such as 128K or 1M; other, custom, or unknown models return null. Ordered by user_model_provider_id, group id, then name. Same items as GET .../groups/{group_id}/models.",
 			Tags:        []string{"model_providers"},
 			QueryParams: listUserModelsByModelTypeQueryParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Models list", listModelProviderGroupModelsOpenAPIResponse{})},
@@ -2877,7 +3271,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/model_providers/selected_models",
 			Summary:     "Get selected models by model_type",
-			Description: "Returns the current user's selected model for each model_type.",
+			Description: "Returns the current user's selected model for each model_type. Each selection includes nullable max_input_tokens, the selected catalog LLM or VLM model's maximum input context window expressed as a string such as 128K or 1M; other, custom, or unknown models return null.",
 			Tags:        []string{"model_providers"},
 			Responses:   map[int]openAPIResponse{200: resp("Selected models", listSelectedModelsOpenAPIResponse{})},
 		},
@@ -2932,7 +3326,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/model_providers/{model_provider_id}/groups/{group_id}/models",
 			Summary:     "List models under a connection group",
-			Description: "Lists non-deleted user_model_provider_group_models for the group. Each item includes is_default (true when copied from default_models seeding; false for user-added models) and nullable max_input_tokens, the catalog model's maximum input length in tokens. Custom or unknown models return null.",
+			Description: "Lists non-deleted user_model_provider_group_models for the group. Each item includes is_default (true when copied from default_models seeding; false for user-added models) and nullable max_input_tokens, the catalog LLM or VLM model's maximum input context window expressed as a string such as 128K or 1M. Other, custom, or unknown models return null.",
 			Tags:        []string{"model_providers"},
 			PathParams:  modelProviderGroupByIDPathParams{},
 			Responses:   map[int]openAPIResponse{200: resp("Group models list", listModelProviderGroupModelsOpenAPIResponse{})},
@@ -2995,78 +3389,214 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:   map[int]openAPIResponse{200: resp("Updated current user's UI preferences", userUIPreferencesOpenAPIResponse{})},
 		},
 		{
-			Method:      "PUT",
-			Path:        "/memory",
-			Summary:     "Upsert managed memory",
-			Tags:        []string{"memory"},
-			RequestBody: jsonBodyOf(memoryUpsertOpenAPIRequest{}, true),
-			Responses:   map[int]openAPIResponse{200: resp("Managed memory item", managedStateOpenAPIResponse{})},
+			Method:      "PATCH",
+			Path:        "/personal-resource/{resource_type}",
+			Summary:     "Update personal resource metadata",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourcePathParams{},
+			RequestBody: jsonBodyOf(personalResourcePatchOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Personal resource metadata", resourcefs.MetadataResponse{})},
 		},
 		{
-			Method:    "GET",
-			Path:      "/memory:draft-preview",
-			Summary:   "Preview memory draft diff",
-			Tags:      []string{"memory"},
-			Responses: map[int]openAPIResponse{200: resp("Memory draft preview", systemDraftPreviewOpenAPIResponse{})},
-		},
-		{
-			Method:      "POST",
-			Path:        "/memory:generate",
-			Summary:     "Generate memory draft",
-			Tags:        []string{"memory"},
-			RequestBody: jsonBodyOf(skillGenerateOpenAPIRequest{}, true),
-			Responses:   map[int]openAPIResponse{200: resp("Generated memory draft", systemGenerateOpenAPIResponse{})},
-		},
-		{
-			Method:    "POST",
-			Path:      "/memory:confirm",
-			Summary:   "Confirm memory draft",
-			Tags:      []string{"memory"},
-			Responses: map[int]openAPIResponse{200: resp("Confirmed memory draft", systemConfirmOpenAPIResponse{})},
-		},
-		{
-			Method:    "POST",
-			Path:      "/memory:discard",
-			Summary:   "Discard memory draft",
-			Tags:      []string{"memory"},
-			Responses: map[int]openAPIResponse{200: resp("Discarded memory draft", systemDiscardOpenAPIResponse{})},
+			Method:      "GET",
+			Path:        "/personal-resource/{resource_type}:file",
+			Summary:     "Read personal resource file",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourcePathParams{},
+			QueryParams: personalResourceFileQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Personal resource file", resourcefs.FileResponse{})},
 		},
 		{
 			Method:      "PUT",
-			Path:        "/user-preference",
-			Summary:     "Upsert managed user preference",
-			Tags:        []string{"preferences"},
-			RequestBody: jsonBodyOf(managedStateUpsertOpenAPIRequest{}, true),
-			Responses:   map[int]openAPIResponse{200: resp("Managed user preference item", managedStateOpenAPIResponse{})},
+			Path:        "/personal-resource/{resource_type}:file",
+			Summary:     "Write personal resource draft file",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourcePathParams{},
+			RequestBody: jsonBodyOf(personalResourceWriteDraftOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Personal resource draft", resourcefs.DraftResponse{})},
 		},
 		{
-			Method:    "GET",
-			Path:      "/user-preference:draft-preview",
-			Summary:   "Preview user preference draft diff",
-			Tags:      []string{"preferences"},
-			Responses: map[int]openAPIResponse{200: resp("User preference draft preview", systemDraftPreviewOpenAPIResponse{})},
+			Method:      "PUT",
+			Path:        "/personal-resource/{resource_type}:draft",
+			Summary:     "Write personal resource draft",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourcePathParams{},
+			RequestBody: jsonBodyOf(personalResourceWriteDraftOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Personal resource draft", resourcefs.DraftResponse{})},
+		},
+		{
+			Method:     "GET",
+			Path:       "/personal-resource/{resource_type}:draft-preview",
+			Summary:    "Preview personal resource draft diff",
+			Tags:       []string{"personal-resource"},
+			PathParams: personalResourcePathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Personal resource draft preview", resourcefs.DraftPreviewResponse{})},
 		},
 		{
 			Method:      "POST",
-			Path:        "/user-preference:generate",
-			Summary:     "Generate user preference draft",
-			Tags:        []string{"preferences"},
-			RequestBody: jsonBodyOf(skillGenerateOpenAPIRequest{}, true),
-			Responses:   map[int]openAPIResponse{200: resp("Generated user preference draft", systemGenerateOpenAPIResponse{})},
+			Path:        "/personal-resource/{resource_type}:generate",
+			Summary:     "Generate personal resource draft",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourcePathParams{},
+			RequestBody: jsonBodyOf(personalResourceGenerateOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Generated personal resource draft", personalResourceGenerateOpenAPIResponse{})},
 		},
 		{
-			Method:    "POST",
-			Path:      "/user-preference:confirm",
-			Summary:   "Confirm user preference draft",
-			Tags:      []string{"preferences"},
-			Responses: map[int]openAPIResponse{200: resp("Confirmed user preference draft", systemConfirmOpenAPIResponse{})},
+			Method:      "POST",
+			Path:        "/personal-resource/{resource_type}/draft-review/{review_id}/actions",
+			Summary:     "Apply personal resource review actions",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourceReviewPathParams{},
+			RequestBody: jsonBodyOf(personalResourceReviewActionOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Personal resource review action", resourcefs.ReviewActionResponse{})},
 		},
 		{
-			Method:    "POST",
-			Path:      "/user-preference:discard",
-			Summary:   "Discard user preference draft",
-			Tags:      []string{"preferences"},
-			Responses: map[int]openAPIResponse{200: resp("Discarded user preference draft", systemDiscardOpenAPIResponse{})},
+			Method:      "POST",
+			Path:        "/personal-resource/{resource_type}/draft-review/{review_id}:undo",
+			Summary:     "Undo personal resource review action batch",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourceReviewPathParams{},
+			RequestBody: jsonBodyOf(personalResourceReviewUndoOpenAPIRequest{}, false),
+			Responses:   map[int]openAPIResponse{200: resp("Personal resource review undo", resourcefs.ReviewUndoResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/personal-resource/{resource_type}:commit",
+			Summary:     "Commit personal resource draft",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourcePathParams{},
+			RequestBody: jsonBodyOf(personalResourceCommitOpenAPIRequest{}, false),
+			Responses:   map[int]openAPIResponse{200: resp("Personal resource commit", resourcefs.CommitResponse{})},
+		},
+		{
+			Method:     "POST",
+			Path:       "/personal-resource/{resource_type}:discard",
+			Summary:    "Discard personal resource draft",
+			Tags:       []string{"personal-resource"},
+			PathParams: personalResourcePathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Personal resource draft", resourcefs.DraftResponse{})},
+		},
+		{
+			Method:     "GET",
+			Path:       "/personal-resource/{resource_type}/revisions",
+			Summary:    "List personal resource revisions",
+			Tags:       []string{"personal-resource"},
+			PathParams: personalResourcePathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Personal resource revisions", resourcefs.RevisionListResponse{})},
+		},
+		{
+			Method:     "GET",
+			Path:       "/personal-resource/{resource_type}/revisions/{revision_id}",
+			Summary:    "Get personal resource revision",
+			Tags:       []string{"personal-resource"},
+			PathParams: personalResourceRevisionPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Personal resource revision", resourcefs.RevisionDetailResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/personal-resource/{resource_type}:rollback",
+			Summary:     "Rollback personal resource",
+			Tags:        []string{"personal-resource"},
+			PathParams:  personalResourcePathParams{},
+			RequestBody: jsonBodyOf(personalResourceRollbackOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Personal resource rollback", resourcefs.RollbackResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/prompts",
+			Summary:     "Prompt list",
+			Tags:        []string{"prompts"},
+			QueryParams: promptListQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Prompt list", promptListOpenAPIResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/prompts",
+			Summary:     "Create prompt",
+			Tags:        []string{"prompts"},
+			RequestBody: jsonBodyOf(promptCreateOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Created prompt", promptItemOpenAPIResponse{})},
+		},
+		{
+			Method:    "GET",
+			Path:      "/prompt_categories",
+			Summary:   "Prompt category list",
+			Tags:      []string{"prompts"},
+			Responses: map[int]openAPIResponse{200: resp("Prompt category list", promptCategoryListOpenAPIResponse{})},
+		},
+		{
+			Method:      "POST",
+			Path:        "/prompt_categories",
+			Summary:     "Create prompt category",
+			Tags:        []string{"prompts"},
+			RequestBody: jsonBodyOf(promptCategoryCreateOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Created prompt category", promptCategoryOpenAPIResponse{})},
+		},
+		{
+			Method:     "DELETE",
+			Path:       "/prompt_categories/{name}",
+			Summary:    "Delete prompt category",
+			Tags:       []string{"prompts"},
+			PathParams: promptPathParams{},
+			Responses:  map[int]openAPIResponse{200: refResp("Deleted successfully", "EmptyObject")},
+		},
+		{
+			Method:      "POST",
+			Path:        "/prompts:polish",
+			Summary:     "Polish prompt",
+			Tags:        []string{"prompts"},
+			RequestBody: jsonBodyOf(promptPolishOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Polished prompt", promptPolishOpenAPIResponse{})},
+		},
+		{
+			Method:      "GET",
+			Path:        "/prompts/{name}",
+			Summary:     "Get prompt",
+			Tags:        []string{"prompts"},
+			PathParams:  promptPathParams{},
+			QueryParams: promptGetQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Prompt details", promptItemOpenAPIResponse{})},
+		},
+		{
+			Method:      "PATCH",
+			Path:        "/prompts/{name}",
+			Summary:     "Update prompt",
+			Tags:        []string{"prompts"},
+			PathParams:  promptPathParams{},
+			RequestBody: jsonBodyOf(promptPatchOpenAPIRequest{}, true),
+			Responses:   map[int]openAPIResponse{200: resp("Updated prompt", promptItemOpenAPIResponse{})},
+		},
+		{
+			Method:     "DELETE",
+			Path:       "/prompts/{name}",
+			Summary:    "Delete prompt",
+			Tags:       []string{"prompts"},
+			PathParams: promptPathParams{},
+			Responses:  map[int]openAPIResponse{200: refResp("Deleted successfully", "EmptyObject")},
+		},
+		{
+			Method:     "POST",
+			Path:       "/prompts/{name}:favorite",
+			Summary:    "Favorite prompt",
+			Tags:       []string{"prompts"},
+			PathParams: promptPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Favorited successfully", promptStateOpenAPIResponse{})},
+		},
+		{
+			Method:     "POST",
+			Path:       "/prompts/{name}:unfavorite",
+			Summary:    "Unfavorite prompt",
+			Tags:       []string{"prompts"},
+			PathParams: promptPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Unfavorited successfully", promptStateOpenAPIResponse{})},
+		},
+		{
+			Method:     "POST",
+			Path:       "/prompts/{name}:use",
+			Summary:    "Record prompt usage",
+			Tags:       []string{"prompts"},
+			PathParams: promptPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Usage recorded", promptStateOpenAPIResponse{})},
 		},
 		{
 			Method:      "GET",
@@ -3074,6 +3604,7 @@ func registeredCoreOperations() []openAPIOperation {
 			Summary:     "Tool list",
 			Tags:        []string{"tools"},
 			QueryParams: toolListQueryParams{},
+			Headers:     localizedCatalogHeaders{},
 			Responses:   map[int]openAPIResponse{200: resp("Tool list", toolListOpenAPIResponse{})},
 		},
 		{
@@ -3273,6 +3804,16 @@ func registeredCoreOperations() []openAPIOperation {
 		},
 		{
 			Method:      "GET",
+			Path:        "/agent/threads/{thread_id}/results/traces:compare",
+			Summary:     "Compare agent traces",
+			Description: "Proxies Evo GET /threads/{thread_id}/results/traces:compare.",
+			Tags:        []string{"agent"},
+			PathParams:  agentThreadPathParams{},
+			QueryParams: agentThreadTraceCompareQueryParams{},
+			Responses:   map[int]openAPIResponse{200: evoJSONResp("Evo trace comparison")},
+		},
+		{
+			Method:      "GET",
 			Path:        "/agent/threads/{thread_id}/results/traces/{trace_id}",
 			Summary:     "Get agent trace detail",
 			Description: "Proxies Evo GET /threads/{thread_id}/results/traces/{trace_id}.",
@@ -3393,64 +3934,72 @@ func registeredCoreOperations() []openAPIOperation {
 			Method:      "GET",
 			Path:        "/agent/router/status",
 			Summary:     "Get Evo router status",
-			Description: "Proxies Evo GET /router/status.",
+			Description: "Returns Router availability, Evo-owned algorithm counts, and the current AB strategy. Evo error status and body are passed through unchanged.",
 			Tags:        []string{"agent"},
-			Responses:   map[int]openAPIResponse{200: evoJSONResp("Evo router status")},
+			QueryParams: agentRouterQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Router status", agentRouterStatusResponse{})},
 		},
 		{
 			Method:      "GET",
 			Path:        "/agent/router/algorithms",
 			Summary:     "List Evo router algorithms",
-			Description: "Proxies Evo GET /router/algorithms.",
+			Description: "Lists the Router default plus one ABTest-approved Evo algorithm per thread, enriched with live Router state.",
 			Tags:        []string{"agent"},
-			QueryParams: struct {
-				ThreadID       string `query:"thread_id"`
-				AlgorithmID    string `query:"algorithm_id"`
-				Status         string `query:"status"`
-				RouterAdminURL string `query:"router_admin_url"`
-				RouterChatURL  string `query:"router_chat_url"`
-			}{},
-			Responses: map[int]openAPIResponse{200: evoJSONResp("Evo router algorithms")},
+			QueryParams: agentRouterAlgorithmQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Evo-owned Router algorithms", agentRouterAlgorithmListResponse{})},
 		},
 		{
 			Method:      "POST",
-			Path:        "/agent/router/algorithms",
-			Summary:     "Register Evo router algorithm",
-			Description: "Proxies Evo POST /router/algorithms.",
-			Tags:        []string{"agent"},
-			RequestBody: evoJSONBody(true),
-			Responses:   map[int]openAPIResponse{200: evoJSONResp("Evo router algorithm")},
-		},
-		{
-			Method:      "POST",
-			Path:        "/agent/router/algorithms/{algorithm_id}:action",
+			Path:        "/agent/router/algorithms/{algorithm_id}/action",
 			Summary:     "Run Evo router algorithm action",
-			Description: "Proxies Evo POST /router/algorithms/{algorithm_id}:action.",
+			Description: "Runs healthcheck, start, restart, or stop for an Evo-owned algorithm. Start reactivates a stopped algorithm; restart may restart or reactivate it; stop keeps its Evo ledger record.",
 			Tags:        []string{"agent"},
 			PathParams:  agentRouterAlgorithmPathParams{},
-			RequestBody: evoJSONBody(true),
-			Responses:   map[int]openAPIResponse{200: evoJSONResp("Evo router algorithm action")},
+			QueryParams: agentRouterQueryParams{},
+			RequestBody: jsonBodyOf(agentRouterActionRequest{}, true),
+			Responses: map[int]openAPIResponse{
+				200: resp("Router algorithm action result", agentRouterActionResponse{}),
+				404: routerErrorResp,
+				409: routerErrorResp,
+				422: evoJSONResp("Invalid Router algorithm action"),
+			},
+		},
+		{
+			Method:      "DELETE",
+			Path:        "/agent/router/algorithms/{algorithm_id}",
+			Summary:     "Delete Evo router algorithm",
+			Description: "Stops the algorithm and deletes its Evo ledger entry, candidate artifacts, and managed workspace. Returns 409 while the algorithm is referenced by the active AB strategy. Router metadata is retained as disabled when Router already knew the algorithm.",
+			Tags:        []string{"agent"},
+			PathParams:  agentRouterAlgorithmPathParams{},
+			QueryParams: agentRouterQueryParams{},
+			Responses: map[int]openAPIResponse{
+				200: resp("Deleted Evo router algorithm", agentRouterDeleteResponse{}),
+				404: routerErrorResp,
+				409: routerErrorResp,
+			},
 		},
 		{
 			Method:      "GET",
 			Path:        "/agent/router/ab-strategy",
 			Summary:     "Get Evo router AB strategy",
-			Description: "Proxies Evo GET /router/ab-strategy.",
+			Description: "Returns the effective Router weights and the latest Evo AB audit metadata. When AB routing is inactive, weights is {default: 100}.",
 			Tags:        []string{"agent"},
-			QueryParams: struct {
-				RouterAdminURL string `query:"router_admin_url"`
-				RouterChatURL  string `query:"router_chat_url"`
-			}{},
-			Responses: map[int]openAPIResponse{200: evoJSONResp("Evo router AB strategy")},
+			QueryParams: agentRouterQueryParams{},
+			Responses:   map[int]openAPIResponse{200: resp("Router AB strategy", agentRouterABStrategyResponse{})},
 		},
 		{
 			Method:      "PUT",
 			Path:        "/agent/router/ab-strategy",
 			Summary:     "Update Evo router AB strategy",
-			Description: "Proxies Evo PUT /router/ab-strategy.",
+			Description: "Activates the supplied positive integer weights after ownership and health validation. Omit weights or set it to null to clear AB routing and return to the default algorithm.",
 			Tags:        []string{"agent"},
-			RequestBody: evoJSONBody(true),
-			Responses:   map[int]openAPIResponse{200: evoJSONResp("Evo router AB strategy")},
+			RequestBody: jsonBodyOf(agentRouterABStrategyRequest{}, true),
+			Responses: map[int]openAPIResponse{
+				200: resp("Updated Router AB strategy", agentRouterABStrategyResponse{}),
+				404: routerErrorResp,
+				409: routerErrorResp,
+				422: evoJSONResp("Invalid Router AB strategy"),
+			},
 		},
 		{
 			Method:  "POST",

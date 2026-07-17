@@ -4,20 +4,36 @@ import {
   Button,
   Drawer,
   Empty,
-  Pagination,
+  Modal,
   Skeleton,
   Tabs,
   Tag,
+  message,
 } from "antd";
-import { FileSearchOutlined } from "@ant-design/icons";
+import { FileSearchOutlined, RollbackOutlined } from "@ant-design/icons";
 import { getLocalizedErrorMessage } from "@/components/request";
+import type { ResourceVersionType } from "../resourceVersionApi";
 import {
-  getResourceVersion,
-  listResourceVersions,
-  type ResourceVersionRecord,
-  type ResourceVersionType,
-} from "../resourceVersionApi";
-import { buildDiffLinesWithInline, buildUnifiedDiffLines, formatDateTime } from "../shared";
+  getPersonalResourceRevision,
+  listPersonalResourceRevisions,
+  rollbackPersonalResource,
+  RollbackConflictError as PersonalRollbackConflictError,
+  type PersonalResourceApiType,
+  type PersonalResourceRevisionRecord,
+} from '../preferenceApi';
+import {
+  getSkillRevisionFile,
+  listSkillRevisions,
+  rollbackSkill,
+  RollbackConflictError as SkillRollbackConflictError,
+  type SkillRevisionRecord,
+} from '../skillApi';
+import {
+  buildDiffLinesWithInline,
+  buildUnifiedDiffLines,
+  formatDateTime,
+  parseMarkdownFrontMatter,
+} from "../shared";
 import { DiffLineContent } from "./DiffLineContent";
 
 interface ResourceVersionDrawerProps {
@@ -27,16 +43,27 @@ interface ResourceVersionDrawerProps {
   resourceType: ResourceVersionType;
   t: (key: string, options?: Record<string, unknown>) => string;
   onClose: () => void;
+  onRolledBack?: () => void | Promise<void>;
 }
 
-const defaultPageSize = 20;
+type RevisionListItem = {
+  revisionId: string;
+  revisionNo: number;
+  changeSource: string;
+  createdAt: string;
+  isHead: boolean;
+};
 
 const changeSourceColorMap: Record<string, string> = {
   auto_apply: "blue",
   direct_save: "green",
+  draft_commit: "purple",
   draft_confirm: "purple",
+  create: "cyan",
   internal_direct: "default",
   review_accept: "gold",
+  metadata_update: "geekblue",
+  rollback: "orange",
 };
 
 const getChangeSourceLabel = (
@@ -47,9 +74,13 @@ const getChangeSourceLabel = (
   const labelMap: Record<string, string> = {
     auto_apply: t("admin.memoryVersionChangeSourceAutoApply"),
     direct_save: t("admin.memoryVersionChangeSourceDirectSave"),
+    draft_commit: t("admin.memoryVersionChangeSourceDraftConfirm"),
     draft_confirm: t("admin.memoryVersionChangeSourceDraftConfirm"),
+    create: t("admin.memoryVersionChangeSourceCreate", { defaultValue: "Create" }),
     internal_direct: t("admin.memoryVersionChangeSourceInternalDirect"),
     review_accept: t("admin.memoryVersionChangeSourceReviewAccept"),
+    metadata_update: t("admin.memoryVersionChangeSourceMetadataUpdate"),
+    rollback: t("admin.memoryVersionChangeSourceRollback"),
   };
 
   return labelMap[normalized] || normalized || "-";
@@ -67,6 +98,11 @@ const getResourceTypeLabel = (
   }
   return t("admin.memoryVersionResourcePreference");
 };
+
+const toPersonalResourceApiType = (
+  resourceType: ResourceVersionType,
+): PersonalResourceApiType =>
+  resourceType === "memory" ? "memory" : "user_preference";
 
 const getContentLines = (content: string) =>
   (content || "-").split("\n").map((text, index) => ({
@@ -98,27 +134,43 @@ function VersionContentPanel({
   );
 }
 
-function ResourceVersionDetail({
-  detail,
+function RevisionDetail({
+  revision,
+  content,
+  previousContent,
   loading,
   error,
+  canRollback,
+  rollingBack,
   t,
   onRetry,
+  onRollback,
 }: {
-  detail: ResourceVersionRecord | null;
+  revision: RevisionListItem | null;
+  content: string;
+  previousContent: string;
   loading: boolean;
   error: string;
+  canRollback: boolean;
+  rollingBack: boolean;
   t: ResourceVersionDrawerProps["t"];
   onRetry: () => void;
+  onRollback: () => void;
 }) {
-  const diffLines = useMemo(() => {
-    if (!detail) {
-      return [];
-    }
-    return detail.diff
-      ? buildUnifiedDiffLines(detail.diff)
-      : buildDiffLinesWithInline(detail.beforeContent, detail.afterContent);
-  }, [detail]);
+  const currentSkill = useMemo(
+    () => parseMarkdownFrontMatter(content),
+    [content],
+  );
+  const previousSkill = useMemo(
+    () => parseMarkdownFrontMatter(previousContent),
+    [previousContent],
+  );
+  const bodyContent = currentSkill?.content ?? content;
+  const previousBodyContent = previousSkill?.content ?? previousContent;
+  const diffLines = useMemo(
+    () => buildDiffLinesWithInline(previousBodyContent, bodyContent),
+    [bodyContent, previousBodyContent],
+  );
 
   if (loading) {
     return (
@@ -143,7 +195,7 @@ function ResourceVersionDetail({
     );
   }
 
-  if (!detail) {
+  if (!revision) {
     return (
       <div className="memory-version-detail-empty">
         <Empty
@@ -159,28 +211,54 @@ function ResourceVersionDetail({
       <div className="memory-version-detail-summary">
         <div>
           <span>{t("admin.memoryVersionChangeSource")}</span>
-          <strong>{getChangeSourceLabel(detail.changeSource, t)}</strong>
+          <strong>{getChangeSourceLabel(revision.changeSource, t)}</strong>
         </div>
         <div>
           <span>{t("admin.memoryVersionRange")}</span>
-          <strong>
-            v{detail.fromVersion} - v{detail.toVersion}
-          </strong>
+          <strong>r{revision.revisionNo}</strong>
         </div>
         <div>
           <span>{t("admin.memoryVersionChangedAt")}</span>
-          <strong>{formatDateTime(detail.createdAt)}</strong>
+          <strong>{formatDateTime(revision.createdAt)}</strong>
         </div>
       </div>
 
+      <div className="memory-version-detail-actions">
+        <Button
+          icon={<RollbackOutlined />}
+          disabled={!canRollback}
+          loading={rollingBack}
+          onClick={onRollback}
+        >
+          {t("admin.memoryVersionRollbackButton")}
+        </Button>
+        {revision.isHead ? (
+          <span className="memory-version-head-hint">
+            {t("admin.memoryVersionRollbackCurrentHint")}
+          </span>
+        ) : null}
+      </div>
+
       <Tabs
+        key={revision.revisionId}
+        defaultActiveKey={revision.changeSource === "metadata_update" ? "metadata" : "content"}
         className="memory-version-detail-tabs"
         items={[
+          {
+            key: "content",
+            label: t("admin.memoryVersionTabAfter"),
+            children: (
+              <VersionContentPanel label={t("admin.memoryVersionTabAfter")} content={bodyContent} />
+            ),
+          },
           {
             key: "diff",
             label: t("admin.memoryVersionTabDiff"),
             children: (
-              <div className="memory-version-diff" aria-label={t("admin.memoryVersionTabDiff")}>
+              <div
+                className="memory-version-diff"
+                aria-label={t("admin.memoryVersionTabDiff")}
+              >
                 {diffLines.length ? (
                   diffLines.map((line, index) => (
                     <div
@@ -203,23 +281,32 @@ function ResourceVersionDetail({
             ),
           },
           {
-            key: "before",
-            label: t("admin.memoryVersionTabBefore"),
+            key: "metadata",
+            label: t("admin.memoryVersionTabMetadata"),
             children: (
-              <VersionContentPanel
-                label={t("admin.memoryVersionTabBefore")}
-                content={detail.beforeContent}
-              />
-            ),
-          },
-          {
-            key: "after",
-            label: t("admin.memoryVersionTabAfter"),
-            children: (
-              <VersionContentPanel
-                label={t("admin.memoryVersionTabAfter")}
-                content={detail.afterContent}
-              />
+              <div className="memory-version-detail-summary">
+                <div>
+                  <span>{t("admin.memoryName")}</span>
+                  <strong>{currentSkill?.name || "-"}</strong>
+                  {previousSkill?.name && previousSkill.name !== currentSkill?.name ? (
+                    <small>{previousSkill.name} → {currentSkill?.name || "-"}</small>
+                  ) : null}
+                </div>
+                <div>
+                  <span>{t("admin.memoryDescription")}</span>
+                  <strong>{currentSkill?.description || "-"}</strong>
+                  {previousSkill?.description && previousSkill.description !== currentSkill?.description ? (
+                    <small>{previousSkill.description} → {currentSkill?.description || "-"}</small>
+                  ) : null}
+                </div>
+                <div>
+                  <span>{t("admin.memoryCategory")}</span>
+                  <strong>{currentSkill?.category || "-"}</strong>
+                  {previousSkill?.category && previousSkill.category !== currentSkill?.category ? (
+                    <small>{previousSkill.category} → {currentSkill?.category || "-"}</small>
+                  ) : null}
+                </div>
+              </div>
             ),
           },
         ]}
@@ -235,32 +322,51 @@ export default function ResourceVersionDrawer({
   resourceType,
   t,
   onClose,
+  onRolledBack,
 }: ResourceVersionDrawerProps) {
-  const [items, setItems] = useState<ResourceVersionRecord[]>([]);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(defaultPageSize);
-  const [total, setTotal] = useState(0);
+  const isSkillResource = resourceType === "skill";
+  const personalResourceType = toPersonalResourceApiType(resourceType);
+
+  const [revisions, setRevisions] = useState<RevisionListItem[]>([]);
+  const [selectedRevisionId, setSelectedRevisionId] = useState("");
+  const [content, setContent] = useState("");
+  const [previousContent, setPreviousContent] = useState("");
   const [loading, setLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState("");
-  const [selectedId, setSelectedId] = useState("");
-  const [detail, setDetail] = useState<ResourceVersionRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
   const [detailError, setDetailError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [detailReloadKey, setDetailReloadKey] = useState(0);
+  const [rollingBack, setRollingBack] = useState(false);
+  const [skillRevisionCache, setSkillRevisionCache] = useState<SkillRevisionRecord[]>(
+    [],
+  );
+  const [personalRevisionCache, setPersonalRevisionCache] = useState<
+    PersonalResourceRevisionRecord[]
+  >([]);
+
+  const selectedRevision =
+    revisions.find((item) => item.revisionId === selectedRevisionId) || null;
+  const canRollback = Boolean(selectedRevision && !selectedRevision.isHead);
 
   useEffect(() => {
     if (!open) {
       return;
     }
-    setPage(1);
-    setSelectedId("");
-    setDetail(null);
+    setSelectedRevisionId("");
+    setContent("");
+    setPreviousContent("");
     setDetailError("");
+    setRevisions([]);
+    setSkillRevisionCache([]);
+    setPersonalRevisionCache([]);
   }, [open, resourceId, resourceType]);
 
   useEffect(() => {
-    if (!open || !resourceId) {
+    if (!open) {
+      return undefined;
+    }
+    if (isSkillResource && !resourceId) {
       return undefined;
     }
 
@@ -269,29 +375,63 @@ export default function ResourceVersionDrawer({
     setErrorMessage("");
     void (async () => {
       try {
-        const result = await listResourceVersions({
-          resourceType,
-          resourceId,
-          page,
-          pageSize,
-        });
+        if (isSkillResource) {
+          const items = await listSkillRevisions(resourceId);
+          if (ignore) {
+            return;
+          }
+          const nextRevisions = items.map((item) => ({
+            revisionId: item.revisionId,
+            revisionNo: item.revisionNo,
+            changeSource: item.changeSource,
+            createdAt: item.createdAt,
+            isHead: item.isHead,
+          }));
+          setSkillRevisionCache(items);
+          setPersonalRevisionCache([]);
+          setRevisions(nextRevisions);
+          setSelectedRevisionId((current) => {
+            if (current) {
+              const stillExists = nextRevisions.some((r) => r.revisionId === current);
+              if (stillExists) return current;
+            }
+            const headRevision = nextRevisions.find((r) => r.isHead);
+            return headRevision?.revisionId || nextRevisions[0]?.revisionId || '';
+          });
+          return;
+        }
+
+        const items = await listPersonalResourceRevisions(personalResourceType);
         if (ignore) {
           return;
         }
-        setItems(result.items);
-        setTotal(result.total);
-        setSelectedId((current) => current || result.items[0]?.id || "");
+        const nextRevisions = items.map((item) => ({
+          revisionId: item.revisionId,
+          revisionNo: item.revisionNo,
+          changeSource: item.changeSource,
+          createdAt: item.createdAt,
+          isHead: item.isHead,
+        }));
+        setPersonalRevisionCache(items);
+        setSkillRevisionCache([]);
+        setRevisions(nextRevisions);
+        setSelectedRevisionId((current) => {
+          if (current) {
+            const stillExists = nextRevisions.some((r) => r.revisionId === current);
+            if (stillExists) return current;
+          }
+          const headRevision = nextRevisions.find((r) => r.isHead);
+          return headRevision?.revisionId || nextRevisions[0]?.revisionId || '';
+        });
       } catch (error) {
         if (ignore) {
           return;
         }
         console.error("Load resource versions failed:", error);
-        setErrorMessage(
-          getLocalizedErrorMessage(error, t("admin.memoryVersionLoadFailed")) ||
-            t("admin.memoryVersionLoadFailed"),
-        );
-        setItems([]);
-        setTotal(0);
+        setErrorMessage(getLocalizedErrorMessage(error));
+        setRevisions([]);
+        setSkillRevisionCache([]);
+        setPersonalRevisionCache([]);
       } finally {
         if (!ignore) {
           setLoading(false);
@@ -302,36 +442,66 @@ export default function ResourceVersionDrawer({
     return () => {
       ignore = true;
     };
-  }, [open, page, pageSize, reloadKey, resourceId, resourceType, t]);
+  }, [isSkillResource, open, personalResourceType, reloadKey, resourceId, t]);
 
   useEffect(() => {
-    if (!open || !selectedId) {
-      setDetail(null);
+    if (!open || !selectedRevisionId) {
+      setContent("");
+      setPreviousContent("");
       setDetailError("");
       return undefined;
     }
 
     let ignore = false;
-    const listRecord = items.find((item) => item.id === selectedId) || null;
-    setDetail(listRecord);
     setDetailLoading(true);
     setDetailError("");
     void (async () => {
       try {
-        const nextDetail = await getResourceVersion(selectedId);
+        if (isSkillResource) {
+          const currentIndex = skillRevisionCache.findIndex(
+            (item) => item.revisionId === selectedRevisionId,
+          );
+          const previousRevision =
+            currentIndex >= 0 ? skillRevisionCache[currentIndex + 1] : undefined;
+          const [currentContent, prevContent] = await Promise.all([
+            getSkillRevisionFile(resourceId, selectedRevisionId),
+            previousRevision
+              ? getSkillRevisionFile(resourceId, previousRevision.revisionId)
+              : Promise.resolve(""),
+          ]);
+          if (ignore) {
+            return;
+          }
+          setContent(currentContent);
+          setPreviousContent(prevContent);
+          return;
+        }
+
+        const currentIndex = personalRevisionCache.findIndex(
+          (item) => item.revisionId === selectedRevisionId,
+        );
+        const previousRevision =
+          currentIndex >= 0 ? personalRevisionCache[currentIndex + 1] : undefined;
+        const [currentDetail, previousDetail] = await Promise.all([
+          getPersonalResourceRevision(personalResourceType, selectedRevisionId),
+          previousRevision
+            ? getPersonalResourceRevision(
+                personalResourceType,
+                previousRevision.revisionId,
+              )
+            : Promise.resolve(null),
+        ]);
         if (ignore) {
           return;
         }
-        setDetail(nextDetail);
+        setContent(currentDetail.content);
+        setPreviousContent(previousDetail?.content || "");
       } catch (error) {
         if (ignore) {
           return;
         }
-        console.error("Load resource version detail failed:", error);
-        setDetailError(
-          getLocalizedErrorMessage(error, t("admin.memoryVersionDetailLoadFailed")) ||
-            t("admin.memoryVersionDetailLoadFailed"),
-        );
+        console.error("Load revision detail failed:", error);
+        setDetailError(getLocalizedErrorMessage(error));
       } finally {
         if (!ignore) {
           setDetailLoading(false);
@@ -342,7 +512,62 @@ export default function ResourceVersionDrawer({
     return () => {
       ignore = true;
     };
-  }, [detailReloadKey, items, open, selectedId, t]);
+  }, [
+    detailReloadKey,
+    isSkillResource,
+    open,
+    personalResourceType,
+    personalRevisionCache,
+    resourceId,
+    selectedRevisionId,
+    skillRevisionCache,
+    t,
+  ]);
+
+  const handleRollback = () => {
+    if (!selectedRevision || selectedRevision.isHead) {
+      return;
+    }
+
+    Modal.confirm({
+      title: t('admin.memoryVersionRollbackConfirmTitle'),
+      content: t('admin.memoryVersionRollbackConfirmContent', {
+        version: `r${selectedRevision.revisionNo}`,
+        name: resourceName || resourceId,
+      }),
+      okText: t('admin.memoryVersionRollbackButton'),
+      cancelText: t('common.cancel'),
+      onOk: async () => {
+        setRollingBack(true);
+        try {
+          if (isSkillResource) {
+            await rollbackSkill(resourceId, selectedRevision.revisionId);
+          } else {
+            const headRevision = revisions.find((item) => item.isHead);
+            await rollbackPersonalResource(personalResourceType, {
+              revisionId: selectedRevision.revisionId,
+              expectedHeadRevisionId: headRevision?.revisionId || undefined,
+              message: `rollback to r${selectedRevision.revisionNo}`,
+            });
+          }
+          message.success(t('admin.memoryVersionRollbackSuccess'));
+          setReloadKey((value) => value + 1);
+          await onRolledBack?.();
+        } catch (error) {
+          const isConflict =
+            error instanceof SkillRollbackConflictError ||
+            error instanceof PersonalRollbackConflictError;
+          if (isConflict) {
+            return;
+          }
+          console.error('Rollback resource version failed:', error);
+          throw error;
+        } finally {
+          setRollingBack(false);
+        }
+      },
+    });
+  };
 
   const title = (
     <div className="memory-version-drawer-title">
@@ -369,7 +594,7 @@ export default function ResourceVersionDrawer({
         <aside className="memory-version-list-panel" aria-label={t("admin.memoryVersionList")}>
           <div className="memory-version-list-head">
             <span>{t("admin.memoryVersionList")}</span>
-            <strong>{t("common.totalItems", { total })}</strong>
+            <strong>{t("common.totalItems", { total: revisions.length })}</strong>
           </div>
 
           {errorMessage ? (
@@ -387,22 +612,27 @@ export default function ResourceVersionDrawer({
             <div className="memory-version-list-skeleton">
               <Skeleton active paragraph={{ rows: 10 }} />
             </div>
-          ) : items.length ? (
+          ) : revisions.length ? (
             <div className="memory-version-list">
-              {items.map((item) => {
-                const active = selectedId === item.id;
+              {revisions.map((item) => {
+                const active = selectedRevisionId === item.revisionId;
                 const label = getChangeSourceLabel(item.changeSource, t);
 
                 return (
                   <button
-                    key={item.id}
+                    key={item.revisionId}
                     type="button"
                     className={`memory-version-list-item${active ? " is-active" : ""}`}
-                    onClick={() => setSelectedId(item.id)}
+                    onClick={() => setSelectedRevisionId(item.revisionId)}
                   >
                     <span className="memory-version-list-item-main">
                       <strong>
-                        v{item.fromVersion} - v{item.toVersion}
+                        r{item.revisionNo}
+                        {item.isHead ? (
+                          <em className="memory-version-current-badge">
+                            {t("admin.memoryVersionCurrentBadge")}
+                          </em>
+                        ) : null}
                       </strong>
                       <span>{formatDateTime(item.createdAt)}</span>
                     </span>
@@ -421,32 +651,20 @@ export default function ResourceVersionDrawer({
               />
             </div>
           )}
-
-          {total > pageSize ? (
-            <Pagination
-              size="small"
-              current={page}
-              pageSize={pageSize}
-              total={total}
-              showSizeChanger
-              pageSizeOptions={[10, 20, 30]}
-              onChange={(nextPage, nextPageSize) => {
-                setPage(nextPage);
-                setPageSize(nextPageSize);
-                setSelectedId("");
-                setDetail(null);
-              }}
-            />
-          ) : null}
         </aside>
 
         <section className="memory-version-detail-panel">
-          <ResourceVersionDetail
-            detail={detail}
+          <RevisionDetail
+            revision={selectedRevision}
+            content={content}
+            previousContent={previousContent}
             loading={detailLoading}
             error={detailError}
+            canRollback={canRollback}
+            rollingBack={rollingBack}
             t={t}
             onRetry={() => setDetailReloadKey((value) => value + 1)}
+            onRollback={handleRollback}
           />
         </section>
       </div>

@@ -67,6 +67,7 @@ class MessageBody(StrictModel):
 CommandBody = Annotated[CommandRequest, Body()]
 EmptyCommandBody = Annotated[EmptyCommandRequest, Body()]
 MessageRequestBody = Annotated[MessageBody, Body()]
+STEP_STREAM_TERMINAL_EVENTS = {'step.finish', 'step.pause', 'step.failed', 'step.cancel'}
 
 
 class EvoService:
@@ -166,7 +167,14 @@ def create_app() -> FastAPI:
         unsupported = set(request.query_params) - {'step_id'}
         if unsupported:
             raise HTTPException(422, f'unsupported query param: {sorted(unsupported)[0]}')
-        return _event_stream(service, thread_id, step_id, request, service.projections.events)
+        return _event_stream(
+            service,
+            thread_id,
+            step_id,
+            request,
+            service.projections.events,
+            step_terminal_done=True,
+        )
 
     @app.get('/threads/{thread_id}/event-trace:stream')
     def event_trace_stream(thread_id: str, request: Request, step_id: str = '') -> EventSourceResponse:
@@ -206,6 +214,22 @@ def create_app() -> FastAPI:
         from evo.traces import build_trace_detail_view
 
         return build_trace_detail_view(trace_id)
+
+    @app.get('/threads/{thread_id}/results/traces:compare')
+    def trace_compare(
+        thread_id: str,
+        a: Annotated[str, Query(min_length=1)],
+        b: Annotated[str, Query(min_length=1)],
+    ) -> dict[str, Any]:
+        if service.threads.runtime.run_config(thread_id) is None:
+            raise HTTPException(404, f'thread not found: {thread_id}')
+        left = a.strip()
+        right = b.strip()
+        if not left or not right:
+            raise HTTPException(422, 'a and b trace ids are required')
+        from evo.traces import build_trace_compare_view
+
+        return build_trace_compare_view(left, right)
 
     @app.get('/threads/{thread_id}/messages')
     def message_history_api(
@@ -322,9 +346,12 @@ def _event_stream(
     step_id: str,
     request: Request,
     snapshot_fn,
+    *,
+    step_terminal_done: bool = False,
 ) -> EventSourceResponse:
     async def events():
         last_event_id = request.headers.get('last-event-id', '').strip()
+        pending_step_done = False
         while True:
             snapshot = await asyncio.to_thread(snapshot_fn, thread_id, step_id, last_event_id)
             for item in snapshot['items']:
@@ -335,21 +362,31 @@ def _event_stream(
                     'event': event_type,
                     'data': json.dumps(_sse_payload(event_type, item), ensure_ascii=False),
                 }
-            if not snapshot['items'] and await asyncio.to_thread(_thread_events_done, service, thread_id):
+                if step_terminal_done and _step_stream_terminal_event(snapshot, item):
+                    pending_step_done = True
+            if pending_step_done and await asyncio.to_thread(_thread_events_done, service, thread_id):
+                payload = _done_payload(thread_id, last_event_id, snapshot)
+                yield {
+                    'id': last_event_id,
+                    'event': 'done',
+                    'data': json.dumps(_sse_payload('done', payload), ensure_ascii=False),
+                }
+                break
+            if (
+                (not snapshot.get('step_id') or not step_terminal_done)
+                and not snapshot['items']
+                and await asyncio.to_thread(_thread_events_done, service, thread_id)
+            ):
                 public = await asyncio.to_thread(service.threads.public_thread, thread_id, include_inputs=False)
-                payload = {
-                    'thread_id': thread_id,
-                    'last_event_id': last_event_id,
-                    'status': public['status'],
+                payload = _done_payload(thread_id, last_event_id, snapshot)
+                payload.update({
                     'current_step': public['current_step'],
                     'checkpoint_state': public['checkpoint_state'],
                     'first_missing_step': public['first_missing_step'],
                     'last_released_step': public['last_released_step'],
                     'retry_from_step': public['retry_from_step'],
                     'last_error': public['last_error'],
-                }
-                if snapshot.get('step_id'):
-                    payload['step_id'] = snapshot['step_id']
+                })
                 yield {
                     'id': last_event_id,
                     'event': 'done',
@@ -363,8 +400,27 @@ def _event_stream(
     return EventSourceResponse(events())
 
 
+def _done_payload(thread_id: str, last_event_id: str, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    payload = {'thread_id': thread_id, 'last_event_id': last_event_id}
+    if snapshot.get('step_id'):
+        payload['step_id'] = snapshot['step_id']
+    return payload
+
+
+def _step_stream_terminal_event(snapshot: Mapping[str, Any], item: Mapping[str, Any]) -> bool:
+    step_id = str(snapshot.get('step_id') or '')
+    return bool(
+        step_id
+        and str(item.get('step_id') or '') == step_id
+        and str(item.get('event_type') or '') in STEP_STREAM_TERMINAL_EVENTS
+    )
+
+
 def _sse_payload(event_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     data = dict(payload)
+    if event_type == 'done':
+        data.pop('status', None)
+        data.pop('thread_status', None)
     data.setdefault('event_type', event_type)
     data.setdefault('type', data['event_type'])
     return data

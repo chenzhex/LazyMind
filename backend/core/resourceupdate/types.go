@@ -9,8 +9,10 @@ import (
 )
 
 type HistoryStats struct {
-	UserTurnCount int `gorm:"column:user_turn_count"`
-	ToolCallCount int `gorm:"column:tool_call_count"`
+	UserTurnCount         int `gorm:"column:user_turn_count"`
+	ToolCallCount         int `gorm:"column:tool_call_count"`
+	QualifiedSessionCount int `gorm:"column:qualified_session_count"`
+	QuantityThreshold     int `gorm:"-"`
 }
 
 type SchedulerTickResult struct {
@@ -30,19 +32,22 @@ type WorkerRunResult struct {
 }
 
 type skillGenerateRequestJSON struct {
-	RequestID              string `json:"requestid"`
-	UserID                 string `json:"user_id"`
-	TriggerReason          string `json:"trigger_reason,omitempty"`
-	CandidateUserTurnCount int    `json:"candidate_user_turn_count,omitempty"`
-	CandidateToolCallCount int    `json:"candidate_tool_call_count,omitempty"`
-	SchedulerPreflightAt   string `json:"scheduler_preflight_at,omitempty"`
-	StartTime              string `json:"start_time,omitempty"`
-	EndTime                string `json:"end_time,omitempty"`
-	UserTurnCount          int    `json:"user_turn_count,omitempty"`
-	ToolCallCount          int    `json:"tool_call_count,omitempty"`
-	StartPreflightAt       string `json:"start_preflight_at,omitempty"`
-	StartTriggerReason     string `json:"start_trigger_reason,omitempty"`
-	WindowFrozen           bool   `json:"window_frozen"`
+	RequestID                      string `json:"requestid"`
+	UserID                         string `json:"user_id"`
+	TriggerReason                  string `json:"trigger_reason,omitempty"`
+	CandidateUserTurnCount         int    `json:"candidate_user_turn_count,omitempty"`
+	CandidateToolCallCount         int    `json:"candidate_tool_call_count,omitempty"`
+	CandidateQualifiedSessionCount int    `json:"candidate_qualified_session_count,omitempty"`
+	QuantityThreshold              int    `json:"quantity_threshold,omitempty"`
+	SchedulerPreflightAt           string `json:"scheduler_preflight_at,omitempty"`
+	StartTime                      string `json:"start_time,omitempty"`
+	EndTime                        string `json:"end_time,omitempty"`
+	UserTurnCount                  int    `json:"user_turn_count,omitempty"`
+	ToolCallCount                  int    `json:"tool_call_count,omitempty"`
+	QualifiedSessionCount          int    `json:"qualified_session_count,omitempty"`
+	StartPreflightAt               string `json:"start_preflight_at,omitempty"`
+	StartTriggerReason             string `json:"start_trigger_reason,omitempty"`
+	WindowFrozen                   bool   `json:"window_frozen"`
 }
 
 type memoryGenerateRequestJSON struct {
@@ -54,12 +59,19 @@ type memoryGenerateRequestJSON struct {
 	CurrentContent string          `json:"current_content,omitempty"`
 }
 
+type skillDraftAutoCommitRequestJSON struct {
+	TaskID       string `json:"task_id"`
+	DraftVersion int64  `json:"draft_version"`
+}
+
 type taskOutcome struct {
 	Status       string
 	ResultID     string
 	ErrorCode    string
 	ErrorMessage string
 	Permanent    bool
+	Deferred     bool
+	RetryAfter   time.Duration
 }
 
 type reviewCallers struct {

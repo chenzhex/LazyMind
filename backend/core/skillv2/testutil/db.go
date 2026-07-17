@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+
+	"lazymind/core/common/orm"
 )
 
 type TestDB struct {
@@ -21,6 +23,7 @@ func NewTestDB(t *testing.T) *TestDB {
 		t.Fatalf("connect sqlite test db: %v", err)
 	}
 	if err := db.AutoMigrate(
+		&orm.ResourceUpdateTask{},
 		&SkillRow{},
 		&SkillBlobRow{},
 		&SkillRevisionRow{},
@@ -31,9 +34,29 @@ func NewTestDB(t *testing.T) *TestDB {
 		&SkillDraftReviewActionBatchRow{},
 		&SkillDraftReviewActionItemRow{},
 		&SkillMarketItemRow{},
+		&SkillMarketInstallRow{},
+		&SkillSearchIndexRow{},
 		&SkillShareItemRow{},
 	); err != nil {
 		t.Fatalf("auto migrate skill v2 test tables: %v", err)
+	}
+	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_skill_maintenance_admission
+		ON resource_update_tasks(user_id)
+		WHERE resource_type = 'skill'
+		  AND task_type IN ('generate_review', 'organize_skill')
+		  AND status IN ('pending', 'running')`).Error; err != nil {
+		t.Fatalf("create active skill maintenance admission index: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS skill_review_stats (
+		id TEXT NOT NULL PRIMARY KEY,
+		requestid TEXT NOT NULL,
+		userid TEXT NOT NULL,
+		status TEXT NOT NULL,
+		started_at TEXT NOT NULL,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		summary TEXT NOT NULL DEFAULT '{}'
+	)`).Error; err != nil {
+		t.Fatalf("create skill review stats table: %v", err)
 	}
 	return &TestDB{DB: db}
 }
@@ -49,7 +72,9 @@ func ResetSkillTables(t *testing.T, db *TestDB) {
 		"skill_drafts",
 		"skill_revision_entries",
 		"skill_revisions",
+		"skill_market_installs",
 		"skill_market_items",
+		"skill_search_indexes",
 		"skill_share_items",
 		"skills",
 		"skill_blobs",
@@ -87,7 +112,7 @@ func TimeFixture() time.Time {
 
 type SkillRow struct {
 	ID                    string     `gorm:"column:id;type:varchar(36);primaryKey"`
-	OwnerUserID           string     `gorm:"column:owner_user_id;type:text;not null;uniqueIndex:uk_skills_owner_identity,priority:1"`
+	OwnerUserID           string     `gorm:"column:owner_user_id;type:text;not null;uniqueIndex:uk_skills_owner_identity,priority:1;uniqueIndex:uk_skills_owner_relative_root,priority:1"`
 	OwnerUserName         string     `gorm:"column:owner_user_name;type:text;not null;default:''"`
 	CreateUserID          string     `gorm:"column:create_user_id;type:text;not null"`
 	CreateUserName        string     `gorm:"column:create_user_name;type:text;not null;default:''"`
@@ -116,6 +141,16 @@ type SkillRow struct {
 }
 
 func (SkillRow) TableName() string { return "skills" }
+
+type SkillSearchIndexRow struct {
+	SkillID        string    `gorm:"column:skill_id;type:varchar(36);primaryKey"`
+	OwnerUserID    string    `gorm:"column:owner_user_id;type:text;not null;index:idx_skill_search_owner"`
+	HeadRevisionID string    `gorm:"column:head_revision_id;type:varchar(36);not null"`
+	Content        string    `gorm:"column:content;type:text;not null"`
+	UpdatedAt      time.Time `gorm:"column:updated_at;not null"`
+}
+
+func (SkillSearchIndexRow) TableName() string { return "skill_search_indexes" }
 
 type SkillBlobRow struct {
 	Hash           string    `gorm:"column:hash;type:text;primaryKey"`
@@ -256,6 +291,16 @@ type SkillMarketItemRow struct {
 }
 
 func (SkillMarketItemRow) TableName() string { return "skill_market_items" }
+
+type SkillMarketInstallRow struct {
+	MarketItemID string    `gorm:"column:market_item_id;type:varchar(36);primaryKey"`
+	UserID       string    `gorm:"column:user_id;type:text;primaryKey"`
+	SkillID      string    `gorm:"column:skill_id;type:varchar(36);not null"`
+	CreatedAt    time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt    time.Time `gorm:"column:updated_at;not null"`
+}
+
+func (SkillMarketInstallRow) TableName() string { return "skill_market_installs" }
 
 type SkillShareItemRow struct {
 	ID            string    `gorm:"column:id;type:varchar(36);primaryKey"`

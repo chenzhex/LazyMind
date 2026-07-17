@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"path"
 	"path/filepath"
@@ -17,10 +16,11 @@ import (
 	"unicode/utf8"
 
 	"gorm.io/gorm"
+
+	"lazymind/core/filediff"
 )
 
 const defaultMaxTextBytes = 512 * 1024
-const maxInlineDiffCells = 20000
 
 type ServiceDeps struct {
 	MaxTextBytes int
@@ -183,21 +183,58 @@ func (s *Service) CompareFile(ctx context.Context, oldFS, newFS ReadOnlySkillFS,
 		result.Binary = true
 		return result, nil
 	}
-
-	if strings.EqualFold(opts.Mode, "context") {
-		text := injectedContextText(string(newBytes), opts)
-		result.DiffEntryLines = []DiffEntryLine{{
-			Type:    "INJECTED_CONTEXT",
-			Text:    text,
-			HTML:    html.EscapeString(text),
-			NewLine: opts.NewStart,
-			OldLine: opts.OldStart,
-		}}
-		return result, nil
+	fileDiff, err := filediff.CompareContent(
+		filediff.Content{
+			Path:         opts.Path,
+			Data:         oldBytes,
+			Binary:       result.Binary,
+			EditableText: true,
+			Size:         int64(len(oldBytes)),
+		},
+		filediff.Content{
+			Path:         opts.Path,
+			Data:         newBytes,
+			Binary:       result.Binary,
+			EditableText: true,
+			Size:         int64(len(newBytes)),
+		},
+		filediff.Options{
+			ContextLines: opts.ContextLines,
+			Mode:         opts.Mode,
+			OldStart:     opts.OldStart,
+			NewStart:     opts.NewStart,
+			Lines:        opts.Lines,
+		},
+	)
+	if err != nil {
+		return DiffFile{}, err
 	}
-
-	result.DiffEntryLines = buildTextDiff(string(oldBytes), string(newBytes))
+	result.Binary = fileDiff.Binary
+	result.TooLarge = fileDiff.TooLarge
+	result.HunkCount = fileDiff.HunkCount
+	result.DiffEntryLines = mapDiffEntryLines(fileDiff.DiffEntryLines)
 	return result, nil
+}
+
+func mapDiffEntryLines(lines []filediff.DiffEntryLine) []DiffEntryLine {
+	out := make([]DiffEntryLine, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, DiffEntryLine{
+			Type:                    line.Type,
+			Text:                    line.Text,
+			HTML:                    line.HTML,
+			OldLine:                 line.OldLine,
+			NewLine:                 line.NewLine,
+			DisplayNoNewLineWarning: line.DisplayNoNewLineWarning,
+			HunkID:                  line.HunkID,
+			Decision:                line.Decision,
+			OldStart:                line.OldStart,
+			OldLines:                line.OldLines,
+			NewStart:                line.NewStart,
+			NewLines:                line.NewLines,
+		})
+	}
+	return out
 }
 
 func entriesByPath(entries []EntryInfo) map[string]EntryInfo {
@@ -222,184 +259,6 @@ func unionPaths(oldByPath, newByPath map[string]EntryInfo) []string {
 	}
 	sort.Strings(paths)
 	return paths
-}
-
-func buildTextDiff(oldText, newText string) []DiffEntryLine {
-	oldLines, oldHasFinalNewline := splitLines(oldText)
-	newLines, newHasFinalNewline := splitLines(newText)
-	lines := []DiffEntryLine{{Type: "HUNK", Text: "@@ -1 +1 @@", HTML: "@@ -1 +1 @@"}}
-	oldLine, newLine := 1, 1
-	for len(oldLines) > 0 || len(newLines) > 0 {
-		switch {
-		case len(oldLines) > 0 && len(newLines) > 0 && oldLines[0] == newLines[0]:
-			lines = append(lines, diffLine("CONTEXT", oldLines[0], oldLine, newLine))
-			oldLines = oldLines[1:]
-			newLines = newLines[1:]
-			oldLine++
-			newLine++
-		case len(oldLines) > 0 && len(newLines) > 0:
-			deletion, addition := changedLinePair(oldLines[0], newLines[0], oldLine, newLine)
-			lines = append(lines, deletion, addition)
-			oldLines = oldLines[1:]
-			newLines = newLines[1:]
-			oldLine++
-			newLine++
-		case len(oldLines) > 0:
-			lines = append(lines, highlightedDiffLine("DELETION", oldLines[0], oldLine, 0, "diff-deletion"))
-			oldLines = oldLines[1:]
-			oldLine++
-		default:
-			lines = append(lines, highlightedDiffLine("ADDITION", newLines[0], 0, newLine, "diff-addition"))
-			newLines = newLines[1:]
-			newLine++
-		}
-	}
-	if oldHasFinalNewline != newHasFinalNewline && len(lines) > 0 {
-		lines[len(lines)-1].DisplayNoNewLineWarning = true
-	}
-	return lines
-}
-
-func splitLines(text string) ([]string, bool) {
-	if text == "" {
-		return nil, true
-	}
-	hasFinalNewline := strings.HasSuffix(text, "\n")
-	parts := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
-	return parts, hasFinalNewline
-}
-
-func diffLine(typ, text string, oldLine, newLine int) DiffEntryLine {
-	return DiffEntryLine{
-		Type:    typ,
-		Text:    text,
-		HTML:    html.EscapeString(text),
-		OldLine: oldLine,
-		NewLine: newLine,
-	}
-}
-
-func highlightedDiffLine(typ, text string, oldLine, newLine int, class string) DiffEntryLine {
-	line := diffLine(typ, text, oldLine, newLine)
-	line.HTML = wrapDiffSpan(class, html.EscapeString(text))
-	return line
-}
-
-func changedLinePair(oldText, newText string, oldLine, newLine int) (DiffEntryLine, DiffEntryLine) {
-	oldHTML, newHTML := inlineDiffHTML(oldText, newText)
-	deletion := diffLine("DELETION", oldText, oldLine, 0)
-	addition := diffLine("ADDITION", newText, 0, newLine)
-	deletion.HTML = oldHTML
-	addition.HTML = newHTML
-	return deletion, addition
-}
-
-func inlineDiffHTML(oldText, newText string) (string, string) {
-	oldRunes := []rune(oldText)
-	newRunes := []rune(newText)
-	if len(oldRunes) == 0 {
-		return "", wrapDiffSpan("diff-addition", html.EscapeString(newText))
-	}
-	if len(newRunes) == 0 {
-		return wrapDiffSpan("diff-deletion", html.EscapeString(oldText)), ""
-	}
-	if len(oldRunes)*len(newRunes) > maxInlineDiffCells {
-		return wrapDiffSpan("diff-deletion", html.EscapeString(oldText)), wrapDiffSpan("diff-addition", html.EscapeString(newText))
-	}
-
-	oldChanged, newChanged := changedRuneMasks(oldRunes, newRunes)
-	return renderInlineDiffHTML(oldRunes, oldChanged, "diff-deletion"), renderInlineDiffHTML(newRunes, newChanged, "diff-addition")
-}
-
-func changedRuneMasks(oldRunes, newRunes []rune) ([]bool, []bool) {
-	m, n := len(oldRunes), len(newRunes)
-	lcs := make([][]int, m+1)
-	for i := range lcs {
-		lcs[i] = make([]int, n+1)
-	}
-	for i := m - 1; i >= 0; i-- {
-		for j := n - 1; j >= 0; j-- {
-			if oldRunes[i] == newRunes[j] {
-				lcs[i][j] = lcs[i+1][j+1] + 1
-				continue
-			}
-			if lcs[i+1][j] >= lcs[i][j+1] {
-				lcs[i][j] = lcs[i+1][j]
-			} else {
-				lcs[i][j] = lcs[i][j+1]
-			}
-		}
-	}
-
-	oldChanged := make([]bool, m)
-	newChanged := make([]bool, n)
-	for i := range oldChanged {
-		oldChanged[i] = true
-	}
-	for i := range newChanged {
-		newChanged[i] = true
-	}
-	for i, j := 0, 0; i < m && j < n; {
-		if oldRunes[i] == newRunes[j] {
-			oldChanged[i] = false
-			newChanged[j] = false
-			i++
-			j++
-			continue
-		}
-		if lcs[i+1][j] >= lcs[i][j+1] {
-			i++
-		} else {
-			j++
-		}
-	}
-	return oldChanged, newChanged
-}
-
-func renderInlineDiffHTML(runes []rune, changed []bool, class string) string {
-	var builder strings.Builder
-	for i := 0; i < len(runes); {
-		j := i + 1
-		for j < len(runes) && changed[j] == changed[i] {
-			j++
-		}
-		escaped := html.EscapeString(string(runes[i:j]))
-		if changed[i] {
-			builder.WriteString(wrapDiffSpan(class, escaped))
-		} else {
-			builder.WriteString(escaped)
-		}
-		i = j
-	}
-	return builder.String()
-}
-
-func wrapDiffSpan(class, escapedText string) string {
-	return `<span class="` + class + `">` + escapedText + `</span>`
-}
-
-func injectedContextText(text string, opts DiffOptions) string {
-	lines, _ := splitLines(text)
-	if len(lines) == 0 {
-		return ""
-	}
-	start := opts.NewStart
-	if start <= 0 {
-		start = 1
-	}
-	count := opts.Lines
-	if count <= 0 {
-		count = 1
-	}
-	start--
-	if start >= len(lines) {
-		return ""
-	}
-	end := start + count
-	if end > len(lines) {
-		end = len(lines)
-	}
-	return strings.Join(lines[start:end], "\n")
 }
 
 type RefResolverDeps struct {
@@ -698,6 +557,8 @@ func newZipFS(zipPath string) (*zipFS, error) {
 		}
 	}
 
+	files, dirs = normalizeZipSkillRoot(files, dirs)
+
 	entries := make([]EntryInfo, 0, len(dirs)+len(files))
 	for dir := range dirs {
 		entries = append(entries, EntryInfo{Path: dir, Type: "dir", FileType: "directory"})
@@ -714,6 +575,66 @@ func newZipFS(zipPath string) (*zipFS, error) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	return &zipFS{entries: entries, files: files}, nil
+}
+
+func normalizeZipSkillRoot(files map[string][]byte, dirs map[string]bool) (map[string][]byte, map[string]bool) {
+	if _, ok := files["SKILL.md"]; ok {
+		return files, dirs
+	}
+	root := ""
+	for filePath := range files {
+		parts := strings.SplitN(filePath, "/", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			return files, dirs
+		}
+		if root == "" {
+			root = parts[0]
+			continue
+		}
+		if root != parts[0] {
+			return files, dirs
+		}
+	}
+	if root == "" {
+		return files, dirs
+	}
+	normalized := make(map[string][]byte, len(files))
+	prefix := root + "/"
+	for filePath, data := range files {
+		relPath := strings.TrimPrefix(filePath, prefix)
+		normalized[relPath] = data
+	}
+	if _, ok := normalized["SKILL.md"]; !ok {
+		return files, dirs
+	}
+	normalizedDirs := map[string]bool{}
+	for dir := range dirs {
+		switch {
+		case dir == root:
+			continue
+		case strings.HasPrefix(dir, prefix):
+			relPath := strings.TrimPrefix(dir, prefix)
+			if relPath != "" {
+				normalizedDirs[relPath] = true
+			}
+		default:
+			normalizedDirs[dir] = true
+		}
+	}
+	for dir := range dirsForFiles(normalized) {
+		normalizedDirs[dir] = true
+	}
+	return normalized, normalizedDirs
+}
+
+func dirsForFiles(files map[string][]byte) map[string]bool {
+	dirs := map[string]bool{}
+	for filePath := range files {
+		for dir := path.Dir(filePath); dir != "."; dir = path.Dir(dir) {
+			dirs[dir] = true
+		}
+	}
+	return dirs
 }
 
 func (fs *zipFS) ListAll(ctx context.Context) ([]EntryInfo, error) {

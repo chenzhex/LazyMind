@@ -114,7 +114,13 @@ export LAZYLLM_MINERU_API_KEY=your_mineru_key
 ### Step 2 — Start the stack
 
 ```bash
-make up-build-local
+make local-up
+```
+
+On native Windows PowerShell, use the isolated Windows lifecycle target:
+
+```powershell
+make local-win-up
 ```
 
 After startup:
@@ -131,8 +137,10 @@ For environment setup and detailed examples, see [`docs/quick_start.md`](docs/qu
 To stop the local runtime:
 
 ```bash
-make down-local
+make local-down
 ```
+
+Use `make local-win-down` on Windows.
 
 ---
 
@@ -158,15 +166,38 @@ make test-hermetic
 
 | Scenario | Command |
 |----------|---------|
-| Local runtime on host (SQLite state backend, no containers) | `make up-build-local` |
-| Stop local runtime | `make down-local` |
+| Local runtime on host (SQLite state backend, no containers) | `make local-up` |
+| Stop local runtime | `make local-down` |
+| Windows local runtime (PowerShell/native process management) | `make local-win-up` |
+| Stop Windows local runtime | `make local-win-down` |
+| Remove local application artifacts | `make local-clean` |
+| Stop local runtime, remove runtime data, and remove local application artifacts | `make local-reset` |
 | Container stack | `make up` |
 | Deploy MinerU OCR (on-prem) | `make up LAZYMIND_DEPLOY_MINERU=1` |
 | Deploy PaddleOCR (on-prem) | `make up LAZYMIND_DEPLOY_PADDLEOCR=1` |
 | External Milvus/OpenSearch | `make up LAZYMIND_MILVUS_URI=http://your-milvus:19530 LAZYMIND_OPENSEARCH_URI=https://your-opensearch:9200` |
 | Enable store dashboards | `make up LAZYMIND_ENABLE_STORE_DASHBOARDS=1` |
 
-`make up-build-local` runs LazyMind directly on the host through `.lazymind-local/bin/local-runtime-manager`. Generated binaries, runtime state, dependencies, logs, and startup configuration are stored under `.lazymind-local/`. The local Python runtime is installed under `.lazymind-local/runtimes/python`, with service dependencies under `.lazymind-local/deps/`; runtime data is kept under `.lazymind-local/data/`. Build-time tool caches such as pnpm, uv, pip, corepack, and Go caches use their user-level defaults instead of `.lazymind-local/`. The whole `.lazymind-local/` directory can be deleted and rebuilt.
+`make local-up` runs LazyMind directly on the host through `local/build/bin/local-runtime-manager`. If `local/config.env` does not exist, Make copies it from `local/config.env.example` and uses it for local build/run configuration. Application artifacts are repo-local under `local/build`: Go binaries in `local/build/bin`, managed runtimes in `local/build/runtimes`, Python dependencies in `local/build/deps/python`, Node dependencies in `local/build/deps/node`, and desktop staging app files in `local/build/app`. Runtime data, SQLite databases, state, generated startup files, logs, caches, and local document imports use platform paths. Override the `LAZYMIND_*` path variables in `local/config.env` only when a non-standard location is required.
+
+`local-win-*` delegates to `local/scripts/local-win.ps1`, builds with `CGO_ENABLED=0`, uses `.exe`/`Scripts`/`.cmd` paths, and creates a Windows directory junction for frontend dependencies. Core SQLite uses a Pure Go driver, so MinGW is not required. Host-local runtimes on all three platforms install `algorithm/requirements-local.txt` and use pymilvus/Milvus Lite 3.0 under `LAZYMIND_LOCAL_MILVUS_DATA_DIR`; its storage format is intentionally incompatible with the old 2.x local database. Container builds instead install `algorithm/requirements-cloud.txt`, which explicitly pins the Cloud pymilvus client to 2.4.14.
+
+### Desktop Builds
+
+| Platform | Local source runtime | Desktop package |
+|----------|----------------------|-----------------|
+| macOS arm64 | `make local-up` / `make local-down` | `make desktop-darwin-arm64` |
+| Windows x64 | `make local-win-up` / `make local-win-down` | `make desktop-windows-x64` (ZIP) / `make desktop-windows-x64-installer` (installer) |
+
+Windows Desktop produces `desktop/dist/win-unpacked/` and a portable `desktop/dist/LazyMind-windows-x64-yyyyMMdd-HHmmss-<commit>.zip`, where the timestamp is the build host's local time and `<commit>` is the short Git commit. The package includes the compiled frontend and full Local/RAG runtime; it does not include raw frontend `node_modules` or model weights. See [`desktop/README.md`](desktop/README.md) for runtime ownership and platform details.
+
+### Platform Path Examples
+
+| Platform | Application artifacts | Runtime data and DB | Logs | Cache | Local documents |
+|----------|-----------------------|---------------------|------|-------|-----------------|
+| macOS | `<repo>/local/build` | `/Users/<User>/Library/Application Support/LazyMind` | `/Users/<User>/Library/Logs/LazyMind` | `/Users/<User>/Library/Caches/LazyMind` | `/Users/<User>/Documents/LazyMind` |
+| Windows | `<repo>\local\build` | `%LOCALAPPDATA%\LazyMind` | `%LOCALAPPDATA%\LazyMind\Logs` | `%LOCALAPPDATA%\LazyMind\Cache` | `%USERPROFILE%\Documents\LazyMind` |
+| Linux | `<repo>/local/build` | `${XDG_DATA_HOME:-/home/<user>/.local/share}/LazyMind` | `${XDG_STATE_HOME:-/home/<user>/.local/state}/LazyMind/logs` | `${XDG_CACHE_HOME:-/home/<user>/.cache}/LazyMind` | `/home/<user>/Documents/LazyMind` |
 
 ---
 

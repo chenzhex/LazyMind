@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Empty, Form, Input, Modal, Popconfirm, Select, Tag, Tooltip, message } from "antd";
 import { useTranslation } from "react-i18next";
+import { localizeErrorCode } from "@/components/request";
 import {
   CheckCircleFilled,
   DeleteOutlined,
@@ -12,7 +13,6 @@ import {
   SearchOutlined,
   UpOutlined,
 } from "@ant-design/icons";
-import { getLocalizedErrorMessage } from "@/components/request";
 import { modelProvidersApi, unwrapModelProviderData } from "../api";
 import "../index.scss";
 
@@ -173,6 +173,22 @@ const builtInProviders: ProviderOption[] = [
   },
 ];
 
+// SenseNova base URL values and new-platform defaults.
+const SENSENOVA_CLASSIC_BASE_URL = "https://api.sensenova.cn/compatible-mode/v1/";
+const SENSENOVA_NEW_BASE_URL = "https://token.sensenova.cn/v1/chat/completions/";
+
+const SENSENOVA_DEFAULT_VERIFY_MODEL = "sensenova-6.7-flash-lite";
+
+function isSensenovaProvider(provider?: Pick<ProviderOption, "source" | "name"> | null): boolean {
+  if (!provider) return false;
+  return provider.source === "sensenova" || provider.name?.toLowerCase() === "sensenova";
+}
+
+function isSensenovaNewBaseUrl(url?: string): boolean {
+  const normalized = normalizeFormText(url).replace(/\/+$/, "");
+  return normalized === normalizeFormText(SENSENOVA_NEW_BASE_URL).replace(/\/+$/, "");
+}
+
 function createConnectionGroup(provider: ProviderOption, overrides: Partial<ProviderConnectionGroup> = {}): ProviderConnectionGroup {
   return {
     id: overrides.id || `${provider.id}-default`,
@@ -284,7 +300,7 @@ function getLocalizedProviderDescription(
 ) {
   const providerKey = normalizeProviderKey(name).replace(/-/g, "");
   const translatedDescription = fallbacks.providerDescriptions[providerKey];
-  return translatedDescription || fallbackDescription || fallbacks.providerDescription;
+  return fallbackDescription || translatedDescription || fallbacks.providerDescription;
 }
 
 interface ApiProvider {
@@ -372,18 +388,6 @@ function mapApiGroup(
   });
 }
 
-function getCheckFailureMessage(checkResult?: CheckModelProviderResult): string | undefined {
-  if (!checkResult || typeof checkResult !== "object") {
-    return undefined;
-  }
-
-  if (typeof checkResult.message === "string" && checkResult.message.trim()) {
-    return checkResult.message.trim();
-  }
-
-  return undefined;
-}
-
 function ProviderLogo({ provider, compact = false }: { provider: ProviderOption; compact?: boolean }) {
   return (
     <span
@@ -464,6 +468,7 @@ function isDefaultProviderBaseUrl(provider: Pick<ProviderOption, "baseUrl">, bas
 
 export default function ModelProviderPage() {
   const { t, i18n } = useTranslation();
+  const currentLanguage = i18n.resolvedLanguage || i18n.language || "zh-CN";
   const [providerConfigForm] = Form.useForm<ProviderConfigFormValues>();
   const [customModelForm] = Form.useForm<CustomModelFormValues>();
   const [verifyGroupForm] = Form.useForm<VerifyGroupFormValues>();
@@ -481,6 +486,7 @@ export default function ModelProviderPage() {
   const [verifyingGroupIds, setVerifyingGroupIds] = useState<Record<string, boolean>>({});
   const [expandedGroupIds, setExpandedGroupIds] = useState<Record<string, boolean>>({});
   const [loadingGroupModelIds, setLoadingGroupModelIds] = useState<Record<string, boolean>>({});
+  const [sensenovaBaseUrlPreset, setSensenovaBaseUrlPreset] = useState<string>("");
   const watchedProviderBaseUrl = Form.useWatch("baseUrl", providerConfigForm);
   const providerSearchRequestIdRef = useRef(0);
   const initialProvidersLoadedRef = useRef(false);
@@ -520,7 +526,6 @@ export default function ModelProviderPage() {
         }
       } catch (error) {
         if (providerSearchRequestIdRef.current === requestId) {
-          message.error(getLocalizedErrorMessage(error, t("modelProvider.error.searchFailed")));
         }
       } finally {
         if (providerSearchRequestIdRef.current === requestId) {
@@ -531,7 +536,7 @@ export default function ModelProviderPage() {
     [fetchProviderOptions]
   );
 
-  const loadModelProviders = async () => {
+  const loadModelProviders = useCallback(async () => {
     setLoading(true);
     try {
       const providers = await fetchProviderOptions();
@@ -564,16 +569,15 @@ export default function ModelProviderPage() {
         return next;
       });
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.loadProvidersFailed")));
     } finally {
       initialProvidersLoadedRef.current = true;
       setLoading(false);
     }
-  };
+  }, [currentLanguage, fetchProviderOptions, t]);
 
   useEffect(() => {
     void loadModelProviders();
-  }, []);
+  }, [loadModelProviders]);
 
   useEffect(() => {
     if (!initialProvidersLoadedRef.current) {
@@ -592,7 +596,7 @@ export default function ModelProviderPage() {
     [addedProviderList]
   );
 
-  const visibleProviders = providerOptions;
+  const visibleProviders = [...providerOptions].sort((a, b) => b.name.localeCompare(a.name));
 
   const openProviderConfig = (provider: AddedProvider | ProviderOption, group?: ProviderConnectionGroup) => {
     const configuredProvider = addedProviderList.find((item) => item.id === provider.id);
@@ -600,11 +604,26 @@ export default function ModelProviderPage() {
     const groupDraft = group || createConnectionGroup(providerDraft);
 
     setConfigModal({ provider: providerDraft, group });
+    const currentBaseUrl = groupDraft.baseUrl || providerDraft.baseUrl;
     providerConfigForm.setFieldsValue({
       name: groupDraft.name,
       apiKey: "",
-      baseUrl: groupDraft.baseUrl || providerDraft.baseUrl,
+      baseUrl: currentBaseUrl,
     });
+
+    // Sync the sensenova base URL preset Select with the form value.
+    if (isSensenovaProvider(providerDraft)) {
+      const normalized = normalizeFormText(currentBaseUrl);
+      if (normalized === normalizeFormText(SENSENOVA_CLASSIC_BASE_URL)) {
+        setSensenovaBaseUrlPreset(SENSENOVA_CLASSIC_BASE_URL);
+      } else if (normalized === normalizeFormText(SENSENOVA_NEW_BASE_URL)) {
+        setSensenovaBaseUrlPreset(SENSENOVA_NEW_BASE_URL);
+      } else {
+        setSensenovaBaseUrlPreset("");
+      }
+    } else {
+      setSensenovaBaseUrlPreset("");
+    }
   };
 
   const closeProviderConfig = () => {
@@ -613,6 +632,7 @@ export default function ModelProviderPage() {
     }
     setConfigModal(null);
     providerConfigForm.resetFields();
+    setSensenovaBaseUrlPreset("");
   };
 
   const saveProviderConfig = async (values: ProviderConfigFormValues) => {
@@ -686,10 +706,11 @@ export default function ModelProviderPage() {
       );
       setExpandedProviderIds((current) => ({ ...current, [configProvider.id]: true }));
       message.success(t("modelProvider.message.groupSaved", { name: nextGroup.name }));
+
       setConfigModal(null);
       providerConfigForm.resetFields();
+      setSensenovaBaseUrlPreset("");
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.saveFailed")));
     } finally {
       setProviderConfigSaving(false);
     }
@@ -717,17 +738,22 @@ export default function ModelProviderPage() {
         return;
       }
 
-      const payload = {
+      const payload: Record<string, unknown> = {
         provider_name: provider.name,
         base_url: group.baseUrl,
         api_key: apiKey || "",
         dry_run: false,
       };
+      // The new SenseNova platform URL requires a model name for connectivity check.
+      if (isSensenovaProvider(provider) && isSensenovaNewBaseUrl(group.baseUrl)) {
+        payload.model = SENSENOVA_DEFAULT_VERIFY_MODEL;
+      }
       const checkResponse = await modelProvidersApi.apiCoreModelProvidersModelProviderIdGroupsGroupIdCheckPost(
         {
           modelProviderId: provider.id,
           groupId: group.id,
-          checkModelProviderOpenAPIRequest: payload,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          checkModelProviderOpenAPIRequest: payload as any,
         },
         { timeout: 3 * 60 * 1000 },
       );
@@ -754,9 +780,8 @@ export default function ModelProviderPage() {
         message.success(t("modelProvider.message.groupVerified"));
         return;
       }
-      message.error(getCheckFailureMessage(checkResult) || t("modelProvider.message.groupVerifyFailed"));
+      message.error(localizeErrorCode("2000509"));
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.verifyFailed")));
     } finally {
       setVerifyingGroupIds((current) => {
         const next = { ...current };
@@ -825,7 +850,6 @@ export default function ModelProviderPage() {
       });
       message.success(t("modelProvider.message.groupRemoved", { name: group.name }));
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.deleteGroupFailed")));
     }
   };
 
@@ -854,7 +878,6 @@ export default function ModelProviderPage() {
       });
       message.success(t("modelProvider.message.providerRemoved", { name: provider.name }));
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.removeProviderFailed")));
     }
   };
 
@@ -885,7 +908,6 @@ export default function ModelProviderPage() {
         )
       );
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.loadModelsFailed")));
     } finally {
       setLoadingGroupModelIds((current) => {
         const next = { ...current };
@@ -978,7 +1000,6 @@ export default function ModelProviderPage() {
       message.success(t("modelProvider.message.modelAdded"));
       closeCustomModelModal();
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.addModelFailed")));
     }
   };
 
@@ -1008,7 +1029,6 @@ export default function ModelProviderPage() {
       );
       message.success(t("modelProvider.message.modelDeleted"));
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.deleteModelFailed")));
     }
   };
 
@@ -1287,9 +1307,35 @@ export default function ModelProviderPage() {
             <Input maxLength={80} placeholder={configProvider?.name || t("modelProvider.groupNamePlaceholder")} />
           </Form.Item>
 
+          {isSensenovaProvider(configProvider) ? (
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ marginBottom: 8, fontWeight: 500, fontSize: 14, color: "rgba(0,0,0,0.88)" }}>
+                Base URL
+              </div>
+              <Select
+                style={{ width: "100%" }}
+                options={[
+                  { label: t("modelProvider.sensenovaClassicMode"), value: SENSENOVA_CLASSIC_BASE_URL },
+                  { label: t("modelProvider.sensenovaTokenPlanMode"), value: SENSENOVA_NEW_BASE_URL },
+                  { label: t("modelProvider.baseUrlCustomOption"), value: "__custom__" },
+                ]}
+                placeholder={t("modelProvider.baseUrlSelectPlaceholder")}
+                value={sensenovaBaseUrlPreset || undefined}
+                onChange={(value) => {
+                  if (value === "__custom__") {
+                    setSensenovaBaseUrlPreset("");
+                    providerConfigForm.setFieldsValue({ baseUrl: "" });
+                  } else {
+                    setSensenovaBaseUrlPreset(value);
+                    providerConfigForm.setFieldsValue({ baseUrl: value });
+                  }
+                }}
+              />
+            </div>
+          ) : null}
           <Form.Item
             extra={baseUrlChanged ? t("modelProvider.baseUrlCustomExtra") : t("modelProvider.baseUrlDefaultExtra")}
-            label="Base URL"
+            label={isSensenovaProvider(configProvider) ? "" : "Base URL"}
             name="baseUrl"
             normalize={(value: string | undefined) => value?.trim()}
             rules={[

@@ -12,7 +12,7 @@ from evo.artifact_runtime.evo import catalog as C
 from evo.artifact_runtime.evo.adapter import build_evo_artifact_adapter
 from evo.artifact_runtime.evo.flow import EvoFlowSpec
 from evo.artifact_runtime.evo.flow_ops import default_evo_ops
-from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef, SQLiteArtifactStore
+from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef, ConcurrencyLimits, SQLiteArtifactStore
 from evo.operations.abtest import abtest_materializers
 from evo.operations.analysis import analysis_materializers
 from evo.operations.dataset import dataset_materializers
@@ -28,6 +28,8 @@ CONFIG_ARTIFACTS = {
     'repair_policy': C.REPAIR_POLICY,
     'candidate_config': C.ABTEST_CANDIDATE_CONFIG,
 }
+EVO_MAX_IN_FLIGHT = 8
+EVO_PARTITION_OP_LIMIT = 4
 
 
 class RuntimePort:
@@ -55,6 +57,7 @@ class RuntimePort:
                 **repair_materializers(),
                 **abtest_materializers(),
             },
+            concurrency_limits=self._concurrency_limits(),
         )
 
     def flow(self, num_case: int) -> FlowService:
@@ -158,6 +161,21 @@ class RuntimePort:
             store.gc()
         finally:
             store.close()
+
+    def _concurrency_limits(self) -> ConcurrencyLimits:
+        return ConcurrencyLimits(
+            max_in_flight=EVO_MAX_IN_FLIGHT,
+            per_materializer={
+                'dataset.prepare_case': EVO_PARTITION_OP_LIMIT,
+                'dataset.generate_case': EVO_PARTITION_OP_LIMIT,
+                'eval.answer': EVO_PARTITION_OP_LIMIT,
+                'eval.judge': EVO_PARTITION_OP_LIMIT,
+                'analysis.trace_summary': EVO_PARTITION_OP_LIMIT,
+                'analysis.classify_case': EVO_PARTITION_OP_LIMIT,
+                'abtest.candidate_rag_answer': EVO_PARTITION_OP_LIMIT,
+                'abtest.candidate_judge': EVO_PARTITION_OP_LIMIT,
+            },
+        )
 
 
 __all__ = ['RuntimePort']

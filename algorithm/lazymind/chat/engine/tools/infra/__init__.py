@@ -21,11 +21,14 @@ from .skill_identity import (
     skill_identity_from_content,
 )
 from .skill_remote_store import (
-    create_remote_skill,
-    list_skill_files,
-    remove_remote_skill,
-    rename_skill_package,
-    replace_skill_package_files,
+    SkillRemoteStore,
+)
+from .github_skill_installer import (
+    GitHubSkillInstaller,
+)
+from .memory_remote_store import (
+    MEMORY_TARGET_PATHS,
+    MemoryRemoteStore,
 )
 from .skill_validation import (
     normalize_skill_category,
@@ -81,12 +84,13 @@ __all__ = [
     'Suggestion',
     'ActionPlanningModule',
     'ChatHistoryRecord',
+    'MEMORY_TARGET_PATHS',
+    'MemoryRemoteStore',
     'SynonymCandidate',
     'VocabSuggestion',
     'VocabEvolutionRequest',
     'VocabManager',
     'clear_vocab_registry',
-    'create_remote_skill',
     'dedupe_vocab_values_keep_order',
     'dump_suggestion',
     'dump_vocab_suggestion',
@@ -95,7 +99,8 @@ __all__ = [
     'fetch_vocab_groups_for_user_id',
     'get_core_api',
     'get_vocab_manager',
-    'list_skill_files',
+    'GitHubSkillInstaller',
+    'handle_tool_errors',
     'norm_vocab_text',
     'normalize_skill_category',
     'opensearch_search',
@@ -103,15 +108,13 @@ __all__ = [
     'parse_user_preference_frontmatter',
     'post_core_api',
     'prepare_vocab_candidates',
-    'remove_remote_skill',
-    'rename_skill_package',
-    'replace_skill_package_files',
     'resolve_index',
     'resolve_skill_editor_identity',
     'resolve_vocab_user_id',
     'rewrite_skill_identity',
     'safe_evaluate_expression',
     'serialize_vocab_backend_actions',
+    'SkillRemoteStore',
     'skill_identity_from_content',
     'summarize_vocab_action_for_log',
     'summarize_vocab_candidate_for_log',

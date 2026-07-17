@@ -2,8 +2,11 @@ package modelprovider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,17 +19,17 @@ import (
 )
 
 type catalogModel struct {
-	Name           string `yaml:"name"`
-	Type           string `yaml:"type"`
-	MaxInputTokens *int64 `yaml:"max_input_tokens"`
+	Name           string  `yaml:"name"`
+	Type           string  `yaml:"type"`
+	MaxInputTokens *string `yaml:"max_input_tokens"`
 }
 
 type catalogSupplier struct {
-	Name         string         `yaml:"name"`
-	Description  string         `yaml:"description"`
-	BaseURL      string         `yaml:"base_url"`
-	Capabilities []string       `yaml:"capabilities"` // overrides section-level default when non-empty
-	Models       []catalogModel `yaml:"models"`
+	Name         string            `yaml:"name"`
+	Description  map[string]string `yaml:"description"`
+	BaseURL      string            `yaml:"base_url"`
+	Capabilities []string          `yaml:"capabilities"` // overrides section-level default when non-empty
+	Models       []catalogModel    `yaml:"models"`
 }
 
 type catalogSection struct {
@@ -38,6 +41,8 @@ type catalogSection struct {
 type modelCatalog map[string]catalogSection
 
 var endpointPathMarkers = []string{"/embeddings", "/rerank", "/embed"}
+
+var maxInputTokensPattern = regexp.MustCompile(`^[1-9][0-9]*(K|M)$`)
 
 // normalizeBaseURL appends a trailing slash to generic API roots; endpoint-specific URLs are kept as-is.
 func normalizeBaseURL(raw string) string {
@@ -69,6 +74,18 @@ func upsertDefaultProvider(tx *gorm.DB, now time.Time, category string, caps []s
 	if name == "" {
 		return "", errors.New("provider name is required")
 	}
+	descriptionZh := strings.TrimSpace(item.Description[common.LocaleZhCN])
+	descriptionEn := strings.TrimSpace(item.Description[common.LocaleEnUS])
+	if descriptionZh == "" || descriptionEn == "" {
+		return "", fmt.Errorf("provider %q requires non-empty %s and %s descriptions", name, common.LocaleZhCN, common.LocaleEnUS)
+	}
+	descriptionI18n, err := json.Marshal(map[string]string{
+		common.LocaleZhCN: descriptionZh,
+		common.LocaleEnUS: descriptionEn,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal provider %q descriptions: %w", name, err)
+	}
 
 	// Supplier-level capabilities override section-level when present.
 	effectiveCaps := caps
@@ -79,17 +96,18 @@ func upsertDefaultProvider(tx *gorm.DB, now time.Time, category string, caps []s
 
 	baseURL := normalizeBaseURL(item.BaseURL)
 	var row orm.DefaultModelProvider
-	err := tx.Where("name = ?", name).Take(&row).Error
+	err = tx.Where("name = ?", name).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		row = orm.DefaultModelProvider{
-			ID:           common.GenerateID(),
-			Name:         name,
-			Description:  item.Description,
-			BaseURL:      baseURL,
-			Category:     category,
-			Capabilities: capStr,
-			CreatedAt:    now,
-			UpdatedAt:    now,
+			ID:              common.GenerateID(),
+			Name:            name,
+			Description:     descriptionZh,
+			DescriptionI18n: orm.RawJSON(descriptionI18n),
+			BaseURL:         baseURL,
+			Category:        category,
+			Capabilities:    capStr,
+			CreatedAt:       now,
+			UpdatedAt:       now,
 		}
 		return row.ID, tx.Create(&row).Error
 	}
@@ -100,12 +118,13 @@ func upsertDefaultProvider(tx *gorm.DB, now time.Time, category string, caps []s
 	return row.ID, tx.Model(&orm.DefaultModelProvider{}).
 		Where("id = ?", row.ID).
 		Updates(map[string]any{
-			"description":  item.Description,
-			"base_url":     baseURL,
-			"category":     category,
-			"capabilities": capStr,
-			"updated_at":   now,
-			"deleted_at":   nil,
+			"description":      descriptionZh,
+			"description_i18n": orm.RawJSON(descriptionI18n),
+			"base_url":         baseURL,
+			"category":         category,
+			"capabilities":     capStr,
+			"updated_at":       now,
+			"deleted_at":       nil,
 		}).Error
 }
 
@@ -115,8 +134,15 @@ func upsertDefaultModel(tx *gorm.DB, now time.Time, providerID, providerName str
 	if name == "" || modelType == "" {
 		return errors.New("model name and type are required")
 	}
-	if item.MaxInputTokens != nil && *item.MaxInputTokens <= 0 {
-		return errors.New("model max_input_tokens must be greater than zero")
+	if item.MaxInputTokens != nil {
+		if modelType != "llm" && modelType != "vlm" {
+			return errors.New("model max_input_tokens is only supported for llm or vlm models")
+		}
+		maxInputTokens := strings.ToUpper(strings.TrimSpace(*item.MaxInputTokens))
+		if !maxInputTokensPattern.MatchString(maxInputTokens) {
+			return errors.New("model max_input_tokens must use a positive K or M value, for example 128K or 1M")
+		}
+		item.MaxInputTokens = &maxInputTokens
 	}
 
 	var row orm.DefaultModel
@@ -155,87 +181,26 @@ func upsertDefaultModel(tx *gorm.DB, now time.Time, providerID, providerName str
 	return syncDefaultModelMaxInputTokens(tx, now, providerID, name, item.MaxInputTokens)
 }
 
-// syncDefaultModelMaxInputTokens backfills known catalog metadata into default models already
-// copied to user groups. Unknown limits and custom models are intentionally left untouched.
-func syncDefaultModelMaxInputTokens(tx *gorm.DB, now time.Time, providerID, modelName string, maxInputTokens *int64) error {
-	if maxInputTokens == nil {
-		return nil
-	}
+// syncDefaultModelMaxInputTokens mirrors catalog metadata into default models already
+// copied to user groups. Custom user-added models are intentionally left untouched.
+func syncDefaultModelMaxInputTokens(tx *gorm.DB, now time.Time, providerID, modelName string, maxInputTokens *string) error {
 	providerIDs := tx.Model(&orm.UserModelProvider{}).
 		Select("id").
 		Where("default_model_provider_id = ? AND deleted_at IS NULL", providerID)
-	return tx.Model(&orm.UserModelProviderGroupModel{}).
+	query := tx.Model(&orm.UserModelProviderGroupModel{}).
 		Where("is_default = ? AND name = ? AND user_model_provider_id IN (?) AND deleted_at IS NULL", true, modelName, providerIDs).
-		Where("max_input_tokens IS NULL OR max_input_tokens <> ?", *maxInputTokens).
-		Updates(map[string]any{
-			"max_input_tokens": maxInputTokens,
-			"updated_at":       now,
-		}).Error
-}
-
-// syncRemovedDefaultModels soft-deletes catalog models that are no longer present in YAML.
-// It also removes their seeded user-group copies and any selections that reference those
-// copies. Custom user models are preserved.
-func syncRemovedDefaultModels(tx *gorm.DB, now time.Time, providerID string, models []catalogModel) error {
-	desiredNames := make([]string, 0, len(models))
-	seen := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		name := strings.TrimSpace(model.Name)
-		if name == "" {
-			continue
-		}
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		seen[name] = struct{}{}
-		desiredNames = append(desiredNames, name)
+		Where("max_input_tokens IS NOT NULL")
+	updates := map[string]any{
+		"max_input_tokens": nil,
+		"updated_at":       now,
 	}
-
-	query := tx.Model(&orm.DefaultModel{}).
-		Where("default_model_provider_id = ? AND deleted_at IS NULL", providerID)
-	if len(desiredNames) > 0 {
-		query = query.Where("name NOT IN ?", desiredNames)
+	if maxInputTokens != nil {
+		query = tx.Model(&orm.UserModelProviderGroupModel{}).
+			Where("is_default = ? AND name = ? AND user_model_provider_id IN (?) AND deleted_at IS NULL", true, modelName, providerIDs).
+			Where("max_input_tokens IS NULL OR max_input_tokens <> ?", *maxInputTokens)
+		updates["max_input_tokens"] = maxInputTokens
 	}
-
-	var removed []orm.DefaultModel
-	if err := query.Find(&removed).Error; err != nil {
-		return err
-	}
-	if len(removed) == 0 {
-		return nil
-	}
-
-	removedIDs := make([]string, 0, len(removed))
-	removedNames := make([]string, 0, len(removed))
-	for _, model := range removed {
-		removedIDs = append(removedIDs, model.ID)
-		removedNames = append(removedNames, model.Name)
-	}
-
-	providerIDs := tx.Model(&orm.UserModelProvider{}).
-		Select("id").
-		Where("default_model_provider_id = ? AND deleted_at IS NULL", providerID)
-	var userModelIDs []string
-	if err := tx.Model(&orm.UserModelProviderGroupModel{}).
-		Where("is_default = ? AND name IN ? AND user_model_provider_id IN (?) AND deleted_at IS NULL", true, removedNames, providerIDs).
-		Pluck("id", &userModelIDs).Error; err != nil {
-		return err
-	}
-	if len(userModelIDs) > 0 {
-		if err := tx.Where("user_model_provider_group_model_id IN ?", userModelIDs).
-			Delete(&orm.UserSelectedModel{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&orm.UserModelProviderGroupModel{}).
-			Where("id IN ? AND deleted_at IS NULL", userModelIDs).
-			Updates(map[string]any{"deleted_at": now, "updated_at": now}).Error; err != nil {
-			return err
-		}
-	}
-
-	return tx.Model(&orm.DefaultModel{}).
-		Where("id IN ? AND deleted_at IS NULL", removedIDs).
-		Updates(map[string]any{"deleted_at": now, "updated_at": now}).Error
+	return query.Updates(updates).Error
 }
 
 // SeedModelCatalog upserts default_model_providers and default_models from the YAML catalog file.
@@ -280,11 +245,6 @@ func seedCatalog(ctx context.Context, db *gorm.DB, yamlPath, categorySuffix, for
 				}
 				for _, model := range supplier.Models {
 					if err := upsertDefaultModel(tx, now, providerID, supplier.Name, model); err != nil {
-						return err
-					}
-				}
-				if forceCategory == "" {
-					if err := syncRemovedDefaultModels(tx, now, providerID, supplier.Models); err != nil {
 						return err
 					}
 				}

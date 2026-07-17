@@ -456,6 +456,20 @@ async def run_subagent_stream(
             yield 'data: [DONE]\n\n'
             return
 
+        # Go persists an accepted task before launching this request. A user stop
+        # may race with the launch and mark that pending task interrupted first.
+        # Treat the persisted terminal state as authoritative and never revive the
+        # task by emitting task_start after it has already been cancelled.
+        if str(task.get('status') or '') in {'interrupted', 'canceled'}:
+            yield _sse({
+                'type': 'done',
+                'task_id': task_id,
+                'status': 'interrupted',
+                'summary': str(task.get('summary') or 'stopped by user'),
+            })
+            yield 'data: [DONE]\n\n'
+            return
+
         output_keys = _coerce_str_list(task.get('output_slots'))
         input_keys = _coerce_str_list(task.get('input_slots'))
         params = _coerce_dict(task.get('params'))
@@ -640,10 +654,21 @@ async def run_subagent_stream(
             yield _sse({'type': ev_type, 'task_id': task_id,
                         'think': frame.get('think'), 'text': frame.get('text')})
 
+        # Flush required drafts before checking graph material guarantees.
+        if effective_agent_type == 'plugin_step' and required_output_keys:
+            _auto_flush_drafts(ctx, db)
+
         # Completeness check: every required output key must have at least one artifact.
         saved = set(ctx.saved_keys())
         missing = [k for k in required_output_keys if k not in saved]
         if missing:
+            if effective_agent_type == 'plugin_step':
+                cost = round(time.time() - start_time, 3)
+                message = f'缺少必需产出素材: {", ".join(missing)}'
+                yield _sse({'type': 'error', 'task_id': task_id, 'status': 'failed',
+                            'summary': message, 'message': message, 'cost': cost})
+                yield 'data: [DONE]\n\n'
+                return
             steps = db.load_steps(task_id)
             is_ok, eval_summary = _evaluate_completion(
                 llm=llm,
@@ -659,12 +684,10 @@ async def run_subagent_stream(
                 _auto_flush_drafts(ctx, db)
                 yield _sse({'type': 'done', 'task_id': task_id, 'status': 'succeeded',
                             'summary': eval_summary, 'cost': cost})
-                _emit_step_done(effective_agent_type, params, eval_summary, 'succeeded')
             else:
                 yield _sse({'type': 'error', 'task_id': task_id, 'status': 'failed',
                             'summary': eval_summary,
                             'message': f'缺少 artifact: {", ".join(missing)}。{eval_summary}'})
-                _emit_step_done(effective_agent_type, params, eval_summary, 'failed')
             yield 'data: [DONE]\n\n'
             return
 
@@ -674,8 +697,6 @@ async def run_subagent_stream(
         _auto_flush_drafts(ctx, db)
         yield _sse({'type': 'done', 'task_id': task_id, 'status': 'succeeded',
                     'summary': summary, 'cost': cost})
-        # Signal advance_step (dynamic mode) that this step finished.
-        _emit_step_done(effective_agent_type, params, summary, 'succeeded')
         yield 'data: [DONE]\n\n'
     except Exception as exc:  # noqa: BLE001
         LOG.exception('[SubAgent] run failed')
@@ -732,29 +753,6 @@ def _make_cancel_stop_condition():
             pass
         return False
     return _check
-
-
-def _emit_step_done(effective_agent_type: str, params: Dict[str, Any], summary: str, status: str) -> None:
-    """Write step_done signal to FileSystemQueue so advance_step (dynamic mode) can unblock.
-
-    The queue klass is 'step_done_<session_id>_<step_id>'.  The global request sid
-    (task_id) is already set by lazyllm.globals._init_sid at runner entry, so
-    FileSystemQueue picks up the right bucket automatically.
-    """
-    if effective_agent_type != 'plugin_step':
-        return
-    session_id = params.get('session_id', '')
-    step_id = params.get('step_id', '')
-    if not session_id or not step_id:
-        return
-    try:
-        import json as _json
-        from lazyllm.common.queue import FileSystemQueue
-        klass = f'step_done_{session_id}_{step_id}'
-        msg = _json.dumps({'status': status, 'summary': summary}, ensure_ascii=False)
-        FileSystemQueue(klass=klass).enqueue(msg)
-    except Exception:
-        pass
 
 
 def _auto_flush_drafts(ctx: 'SubAgentContext', db: 'SubAgentDB') -> None:

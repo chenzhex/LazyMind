@@ -126,7 +126,8 @@ export default function MemoryManagementListPage() {
     }
 
     const updateTableHeight = () => {
-      const headerElement = contentElement.querySelector<HTMLElement>(".ant-table-thead");
+      const headerElement =
+        contentElement.querySelector<HTMLElement>(".ant-table-thead");
       const paginationElement = contentElement.querySelector<HTMLElement>(
         ".ant-table-pagination",
       );
@@ -185,7 +186,7 @@ export default function MemoryManagementListPage() {
               })}
             </Button>
           ) : null}
-          {activeTab !== "experience" ? (
+          {activeTab !== "experience" && activeTab !== "skills" ? (
             <Button
               type="primary"
               className="admin-page-primary-button"
@@ -236,7 +237,9 @@ export default function MemoryManagementListPage() {
               }`}
             >
               <span className="memory-experience-feature-status-dot" />
-              {experienceFeatureEnabled ? t("admin.enabled") : t("admin.disabled")}
+              {experienceFeatureEnabled
+                ? t("admin.enabled")
+                : t("admin.disabled")}
             </span>
             <div className="memory-experience-feature-text">
               <strong>{t("admin.memoryHabitFeatureToggle")}</strong>

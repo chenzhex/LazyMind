@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
+
+from json_repair import repair_json
 
 from evo.llm import LazyLLMClient
 
@@ -23,6 +26,8 @@ Allowed flow command: continue, pause, resume, cancel, retry.
 Allowed query: progress_snapshot, read_step_root, read_case_artifact.
 Allowed mutation: edit_artifact, rerun_case_stage, rerun_step, invalidate_from_step.
 Allowed config_patch target: run_config, source_config, target_config, eval_policy, repair_policy, candidate_config.
+Use step_catalog as the source of truth for step order, names, and user-facing ordinal references.
+Do not infer step numbers from current_step or from recent progress alone.
 If pending_approval exists, use approval decision approve/reject/amend/replace/unclear,
 or output a replacement executable action with user_message_effect amend/replace.
 When projection.has_pending_approval is true, a user request to cancel/reject/stop
@@ -38,21 +43,24 @@ class StructuredPlanError(ValueError):
 
 def plan_next_turn(context: Mapping[str, Any], llm_config: Mapping[str, Any]) -> TurnPlan:
     schema = TurnPlan.model_json_schema()
-    prompt = (
-        f'{PROMPT}\n'
-        f'TurnPlan JSON schema: {json.dumps(schema, ensure_ascii=False)}\n'
-        f'Context: {json.dumps(context, ensure_ascii=False, sort_keys=True, default=str)}'
-    )
     llm = LazyLLMClient(llm_config=llm_config, model='evo_llm')
-    try:
-        raw = llm(prompt, stream=False, response_format={
-            'type': 'json_schema',
-            'json_schema': {'name': 'TurnPlan', 'strict': True, 'schema': schema},
-        })
-        data = raw if isinstance(raw, Mapping) else json.loads(str(raw))
-        return TurnPlan.model_validate(data)
-    except Exception as exc:
-        raise StructuredPlanError(str(exc)) from exc
+    error = ''
+    raw: Any = None
+    for _ in range(2):
+        retry_note = f'\nPrevious validation error: {error}' if error else ''
+        prompt = (
+            f'{PROMPT}\n'
+            f'TurnPlan JSON schema: {json.dumps(schema, ensure_ascii=False)}\n'
+            f'Context: {json.dumps(context, ensure_ascii=False, sort_keys=True, default=str)}'
+            f'{retry_note}'
+        )
+        try:
+            raw = llm(prompt, stream=False, response_format={'type': 'json_object'})
+            return TurnPlan.model_validate(_json_object(raw))
+        except Exception as exc:
+            error = str(exc)
+    snippet = re.sub(r'\s+', ' ', str(raw or '')).strip()[:500]
+    raise StructuredPlanError(f'{error}; response={snippet}')
 
 
 def answer_query(context: Mapping[str, Any], result: object, llm_config: Mapping[str, Any]) -> str:
@@ -72,3 +80,20 @@ def answer_query(context: Mapping[str, Any], result: object, llm_config: Mapping
 def _json(value: object) -> str:
     text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return text if len(text) <= 12000 else text[:12000]
+
+
+def _json_object(raw: Any) -> Mapping[str, Any]:
+    if isinstance(raw, Mapping):
+        return raw
+    text = re.sub(r'<think>.*?</think>', '', str(raw), flags=re.S).strip()
+    fenced = re.search(r'```(?:json)?\s*(\{.*\})\s*```', text, re.S)
+    if fenced:
+        text = fenced.group(1)
+    else:
+        start, end = text.find('{'), text.rfind('}')
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+    value = repair_json(text, return_objects=True)
+    if not isinstance(value, Mapping):
+        raise ValueError(f'LLM response JSON must be an object, got {type(value).__name__}')
+    return value
