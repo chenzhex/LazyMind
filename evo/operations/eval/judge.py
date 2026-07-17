@@ -418,6 +418,8 @@ def _prompt(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy: Mapp
         'or a contradiction is explicitly detected. '
         'Also return arrays for matched_key_points, missing_points, wrong_points, extra_points, '
         'unsupported_claims, contradicted_claims, evidence_mapping, claims. '
+        'Each evidence_mapping item should use claim, evidence_source, evidence_chunk_id, score; '
+        'evidence_source must be reference_context or retrieved_context. Do not include full evidence text. '
         'Return failure_type, reason, defect. failure_type must be one of none, wrong_answer, '
         'partial_answer, question_not_answered, format_error, hallucination. '
         'First compare rag_answer with key_points and reference_answer. Then check every factual claim '
@@ -497,8 +499,10 @@ def _diagnostics(
     reference = str(case.get('answer') or '')
     contexts = _contexts(rag_answer.get('contexts'))
     reference_contexts = _contexts(case.get('reference_context'))
+    retrieved_evidence = _evidence_contexts(rag_answer.get('contexts'), 'retrieved_context')
+    reference_evidence = _evidence_contexts(case.get('reference_context'), 'reference_context')
     key_point_diag = _key_point_diagnostics(case, answer, scores)
-    claim_diag = _claim_diagnostics(case, answer, contexts, reference_contexts, scores)
+    claim_diag = _claim_diagnostics(case, answer, retrieved_evidence, reference_evidence, scores)
     numeric_accuracy = _numeric_accuracy(answer, reference)
     list_set_f1 = _list_set_f1(case, answer, reference)
     retrieval = _ranked_retrieval(case, rag_answer, policy, reference_contexts)
@@ -549,8 +553,8 @@ def _key_point_diagnostics(case: Mapping[str, Any], answer: str, scores: JudgeSc
 def _claim_diagnostics(
     case: Mapping[str, Any],
     answer: str,
-    retrieved_contexts: list[str],
-    reference_contexts: list[str],
+    retrieved_contexts: list[dict[str, str]],
+    reference_contexts: list[dict[str, str]],
     scores: JudgeScores,
 ) -> dict[str, Any]:
     include_contradiction = bool(case.get('forbidden_claims')) or 'contradiction_rate' in scores.model_fields_set \
@@ -565,7 +569,7 @@ def _claim_diagnostics(
         payload = {
             'claims': claims,
             'unsupported_claims': unsupported,
-            'evidence_mapping': _list_or_default(scores.evidence_mapping, []),
+            'evidence_mapping': _normal_evidence_mapping(scores.evidence_mapping),
             'claim_support_rate': _metric(scores, 'claim_support_rate', support),
             'unsupported_claim_rate': _metric(scores, 'unsupported_claim_rate', 1.0 - support),
         }
@@ -577,10 +581,23 @@ def _claim_diagnostics(
     evidence_pool = [*retrieved_contexts, *reference_contexts]
     supported, unsupported, mapping = [], [], []
     for claim in claims:
-        best = max(((_similarity(claim, context), context) for context in evidence_pool), default=(0.0, ''))
+        best = max(
+            (
+                (_similarity(claim, item['content']), item)
+                for item in evidence_pool
+                if item.get('content')
+            ),
+            key=lambda pair: pair[0],
+            default=(0.0, {}),
+        )
         if best[0] >= 0.45:
             supported.append(claim)
-            mapping.append({'claim': claim, 'evidence': best[1], 'score': _score(best[0])})
+            mapping.append({
+                'claim': claim,
+                'evidence_source': str(best[1].get('source') or ''),
+                'evidence_chunk_id': str(best[1].get('chunk_id') or ''),
+                'score': _score(best[0]),
+            })
         else:
             unsupported.append(claim)
     support_rate = len(supported) / len(claims) if claims else scores.groundedness
@@ -723,6 +740,57 @@ def _contexts(value: Any) -> list[str]:
             text = str(item or '').strip()
         if text:
             result.append(text)
+    return result
+
+
+def _evidence_contexts(value: Any, source: str) -> list[dict[str, str]]:
+    result = []
+    if isinstance(value, Mapping):
+        direct = str(value.get('content') or value.get('text') or value.get('context') or '').strip()
+        if direct:
+            return [{
+                'source': source,
+                'chunk_id': str(value.get('chunk_id') or value.get('id') or '').strip(),
+                'content': direct,
+            }]
+        for key, item in value.items():
+            text = str(item or '').strip()
+            if text:
+                result.append({'source': source, 'chunk_id': str(key).strip(), 'content': text})
+        return result
+    values = value if isinstance(value, list | tuple) else [value] if value else []
+    chunk_ids = list(_ordered_values(value.get('chunk_ids'))) if isinstance(value, Mapping) else []
+    for index, item in enumerate(values):
+        if isinstance(item, Mapping):
+            text = str(item.get('content') or item.get('text') or item.get('context') or '').strip()
+            chunk_id = str(item.get('chunk_id') or item.get('id') or '').strip()
+        else:
+            text = str(item or '').strip()
+            chunk_id = chunk_ids[index] if index < len(chunk_ids) else ''
+        if text:
+            result.append({'source': source, 'chunk_id': chunk_id, 'content': text})
+    return result
+
+
+def _normal_evidence_mapping(value: Any) -> list[dict[str, Any]]:
+    values = value if isinstance(value, list | tuple) else []
+    result = []
+    for item in values:
+        if not isinstance(item, Mapping):
+            continue
+        claim = str(item.get('claim') or item.get('text') or '').strip()
+        source = str(item.get('evidence_source') or item.get('source') or '').strip()
+        chunk_id = str(item.get('evidence_chunk_id') or item.get('chunk_id') or item.get('id') or '').strip()
+        if not claim:
+            continue
+        entry: dict[str, Any] = {'claim': claim}
+        if source:
+            entry['evidence_source'] = source
+        if chunk_id:
+            entry['evidence_chunk_id'] = chunk_id
+        if item.get('score') is not None:
+            entry['score'] = _score(float(item.get('score') or 0.0))
+        result.append(entry)
     return result
 
 
