@@ -1,7 +1,5 @@
 import os
 import re
-from copy import deepcopy
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -24,20 +22,6 @@ _TYPE_TO_SLOT: Dict[str, str] = {
     'image_editing': 'multimodal',
     'text2video': 'multimodal',
 }
-_DEFAULT_INDEX_KWARGS: Dict[str, Any] = {
-    'index_type': 'IVF_FLAT',
-    'metric_type': 'COSINE',
-    'params': {'nlist': 128},
-}
-
-
-@dataclass(frozen=True)
-class RetrievalSettings:
-    embed_keys: list[str]
-    index_kwargs: list[Dict[str, Any]]
-    retriever_configs: list[Dict[str, Any]]
-    temp_doc_embed_key: str
-    file_search_embed_key: str
 
 
 def _role_entry(entries: Any) -> Optional[Dict[str, Any]]:
@@ -101,40 +85,6 @@ def load_model_config(config_path: str | None = None, *, expand_env: bool = Fals
     return raw
 
 
-@lru_cache(maxsize=32)
-def get_retrieval_settings(config_path: str | None = None) -> RetrievalSettings:
-    cfg = load_model_config(config_path, expand_env=True)
-    embed_keys, index_kwargs = [], []
-    for key, entries in cfg.items():
-        entry = _role_entry(entries)
-        if not entry or str(entry.get('type') or '').lower() != 'embed':
-            continue
-        embed_keys.append(key)
-        index = deepcopy(entry.get('index_kwargs')) if isinstance(entry.get('index_kwargs'), dict) else deepcopy(_DEFAULT_INDEX_KWARGS)
-        index['embed_key'] = key
-        index_kwargs.append(index)
-    if not embed_keys:
-        raise ValueError('At least one embedding role must be configured.')
-
-    retrieval = cfg.get('retrieval') if isinstance(cfg.get('retrieval'), dict) else {}
-    temp_doc_embed_key = str(retrieval.get('temp_doc_embed_key') or embed_keys[0])
-    file_search_embed_key = str(retrieval.get('file_search_embed_key') or _file_search_embed_key(embed_keys, index_kwargs))
-    retriever_configs = retrieval.get('retriever_configs')
-    if retriever_configs is None:
-        topk = int(retrieval.get('default_topk') or 20)
-        retriever_configs = [
-            {'group_name': 'line', 'embed_keys': list(embed_keys), 'topk': topk, 'target': 'block'},
-            {'group_name': 'block', 'embed_keys': list(embed_keys), 'topk': topk},
-        ]
-    return RetrievalSettings(
-        embed_keys=embed_keys,
-        index_kwargs=index_kwargs,
-        retriever_configs=list(retriever_configs),
-        temp_doc_embed_key=_known_embed_key(temp_doc_embed_key, embed_keys, 'temp_doc_embed_key'),
-        file_search_embed_key=_known_embed_key(file_search_embed_key, embed_keys, 'file_search_embed_key'),
-    )
-
-
 def extract_skill_fs_source(path: Any) -> str:
     raw = str(path or '').strip()
     if not raw:
@@ -143,19 +93,6 @@ def extract_skill_fs_source(path: Any) -> str:
     if protocol == 'remote':
         return 'remote'
     return protocol or 'file'
-
-
-def _file_search_embed_key(embed_keys: list[str], index_kwargs: list[Dict[str, Any]]) -> str:
-    for index in index_kwargs:
-        if 'SPARSE' in str(index.get('index_type') or '').upper():
-            return str(index['embed_key'])
-    return embed_keys[-1]
-
-
-def _known_embed_key(value: str, embed_keys: list[str], field: str) -> str:
-    if value not in embed_keys:
-        raise ValueError(f'{field} `{value}` not in active embeds: {embed_keys}')
-    return value
 
 
 @lru_cache(maxsize=1)

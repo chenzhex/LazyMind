@@ -174,16 +174,12 @@ func (p *DBTaskPlanner) queueManualSyncs(ctx context.Context, req GenerateReques
 	}
 	result := GenerateResult{RequestedCount: len(scopes), TaskIDs: []string{}}
 	for idx, scope := range scopes {
-		bID := scope.bindingID
-		if bID == "" {
-			bID = bindingID
-		}
 		syncReq := sourceengine.TriggerSourceSyncRequest{
 			CallerID:  req.CallerID,
 			TenantID:  req.TenantID,
 			RequestID: syncRequestID(syncReqBase, scope, idx),
 			SourceID:  req.SourceID,
-			BindingID: bID,
+			BindingID: bindingID,
 			ScopeType: scope.scopeType,
 			ScopeRef:  scope.scopeRef,
 		}
@@ -224,13 +220,12 @@ func (p *DBTaskPlanner) resolveBindingID(ctx context.Context, sourceID, bindingI
 type manualSyncScope struct {
 	scopeType string
 	scopeRef  map[string]any
-	bindingID string
 }
 
 func manualSyncScopes(req GenerateRequest, bindingID string) []manualSyncScope {
 	mode := strings.ToLower(strings.TrimSpace(req.Mode))
 	if mode == "full" || mode == "all" || (mode == "" && len(req.Paths) == 0 && len(req.ObjectKeys) == 0 && len(req.Scopes) == 0) {
-		return []manualSyncScope{{scopeType: string(connector.ScopeTypeFull), bindingID: bindingID}}
+		return []manualSyncScope{{scopeType: string(connector.ScopeTypeFull)}}
 	}
 	scopes := make([]manualSyncScope, 0, len(req.Scopes)+len(req.Paths)+len(req.ObjectKeys))
 	for _, scope := range req.Scopes {
@@ -240,34 +235,29 @@ func manualSyncScopes(req GenerateRequest, bindingID string) []manualSyncScope {
 	}
 	for _, path := range compactStrings(req.Paths) {
 		if objectKey := objectKeyFromTreeKey(path, bindingID); objectKey != "" {
-			scopePathBindingID := bindingIDFromKey(path, bindingID)
 			scopes = append(scopes, manualSyncScope{
 				scopeType: string(connector.ScopeTypePartial),
 				scopeRef:  map[string]any{"object_key": objectKey},
-				bindingID: scopePathBindingID,
 			})
 			continue
 		}
 		scopes = append(scopes, manualSyncScope{
 			scopeType: string(connector.ScopeTypePartial),
 			scopeRef:  map[string]any{"path": path},
-			bindingID: bindingID,
 		})
 	}
 	for _, objectKey := range compactStrings(req.ObjectKeys) {
 		scopes = append(scopes, manualSyncScope{
 			scopeType: string(connector.ScopeTypePartial),
 			scopeRef:  map[string]any{"object_key": objectKey},
-			bindingID: bindingID,
 		})
 	}
 	return scopes
 }
 
-func manualSyncScopeFromGenerateScope(scope GenerateScope, requestBindingID string) (manualSyncScope, bool) {
-	scopeBindingID := bindingIDFromKey(scope.Key, requestBindingID)
+func manualSyncScopeFromGenerateScope(scope GenerateScope, bindingID string) (manualSyncScope, bool) {
 	scopeRef := map[string]any{}
-	objectKey := firstNonBlank(scope.ObjectKey, objectKeyFromTreeKey(scope.Key, requestBindingID))
+	objectKey := firstNonBlank(scope.ObjectKey, objectKeyFromTreeKey(scope.Key, bindingID))
 	if scope.IsContainer {
 		nodeRef := firstNonBlank(scope.NodeRef, scope.Path, objectKey)
 		if nodeRef == "" {
@@ -277,19 +267,19 @@ func manualSyncScopeFromGenerateScope(scope GenerateScope, requestBindingID stri
 		if objectKey != "" {
 			scopeRef["subtree_root"] = objectKey
 		}
-		return manualSyncScope{scopeType: string(connector.ScopeTypePartial), scopeRef: scopeRef, bindingID: scopeBindingID}, true
+		return manualSyncScope{scopeType: string(connector.ScopeTypePartial), scopeRef: scopeRef}, true
 	}
 	if objectKey != "" {
 		scopeRef["object_key"] = objectKey
-		return manualSyncScope{scopeType: string(connector.ScopeTypePartial), scopeRef: scopeRef, bindingID: scopeBindingID}, true
+		return manualSyncScope{scopeType: string(connector.ScopeTypePartial), scopeRef: scopeRef}, true
 	}
 	if path := strings.TrimSpace(scope.Path); path != "" {
 		scopeRef["path"] = path
-		return manualSyncScope{scopeType: string(connector.ScopeTypePartial), scopeRef: scopeRef, bindingID: scopeBindingID}, true
+		return manualSyncScope{scopeType: string(connector.ScopeTypePartial), scopeRef: scopeRef}, true
 	}
 	if nodeRef := strings.TrimSpace(scope.NodeRef); nodeRef != "" {
 		scopeRef["node_ref"] = nodeRef
-		return manualSyncScope{scopeType: string(connector.ScopeTypePartial), scopeRef: scopeRef, bindingID: scopeBindingID}, true
+		return manualSyncScope{scopeType: string(connector.ScopeTypePartial), scopeRef: scopeRef}, true
 	}
 	return manualSyncScope{}, false
 }
@@ -301,19 +291,6 @@ func objectKeyFromTreeKey(key, bindingID string) string {
 		return ""
 	}
 	return strings.TrimPrefix(key, bindingID+":")
-}
-
-
-
-func bindingIDFromKey(key, fallback string) string {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return fallback
-	}
-	if idx := strings.Index(key, ":"); idx >= 0 {
-		return key[:idx]
-	}
-	return key
 }
 
 func firstNonBlank(values ...string) string {

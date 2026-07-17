@@ -232,7 +232,7 @@ dataset_gen → eval → run (analysis) → apply (code fix) → merge → deplo
 **Natural-language driven:**
 
 ```bash
-curl -sX POST "$BASE/api/core/agent/threads/$THREAD_ID/messages" \
+curl -sX POST "$BASE/v1/evo/threads/$THREAD_ID/messages" \
   -H "Content-Type: application/json" \
   -d '{"content":"Generate an eval set from KB_ID, analyze the report, fix the code, and run an A/B test"}'
 ```

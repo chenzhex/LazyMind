@@ -2,7 +2,6 @@ package source
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -39,15 +38,6 @@ func (r *SQLRepository) EnqueueSyncRun(ctx context.Context, run SyncRun) (SyncRu
 		}
 		if shouldDedupeActiveSyncRun(run) {
 			existing, ok, err := queryActiveSyncRunORM(tx, run.BindingID, run.BindingGeneration)
-			if err != nil || ok {
-				out = existing
-				return err
-			}
-		}
-
-		// Scope-aware dedup for manual syncs: prevent duplicate runs for the same binding + scope.
-		if !shouldDedupeActiveSyncRun(run) && run.TriggerType == "manual" {
-			existing, ok, err := queryActiveSyncRunByScopeORM(tx, run.BindingID, run.BindingGeneration, run.ScopeType, run.ScopeRef)
 			if err != nil || ok {
 				out = existing
 				return err
@@ -260,31 +250,6 @@ func queryActiveSyncRunORM(db *gorm.DB, bindingID string, generation int64) (Syn
 			return SyncRun{}, false, nil
 		}
 		return SyncRun{}, false, mapSQLConstraint(err)
-	}
-	return syncRunFromORM(model), true, nil
-}
-
-func queryActiveSyncRunByScopeORM(db *gorm.DB, bindingID string, generation int64, scopeType string, scopeRef JSON) (SyncRun, bool, error) {
-	var model ormSyncRun
-	query := db.Where("binding_id = ? AND binding_generation = ? AND scope_type = ?", bindingID, generation, scopeType).
-		Where("status IN ?", []string{SyncRunStatusPending, SyncRunStatusRunning})
-
-	if len(scopeRef) == 0 {
-		query = query.Where("(scope_ref_json IS NULL OR scope_ref_json::text = '{}')")
-	} else {
-		refText, err := json.Marshal(scopeRef)
-		if err != nil {
-			return SyncRun{}, false, err
-		}
-		query = query.Where("scope_ref_json::text = ?", string(refText))
-	}
-
-	err := query.Order("started_at, run_id").Limit(1).First(&model).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return SyncRun{}, false, nil
-		}
-		return SyncRun{}, false, err
 	}
 	return syncRunFromORM(model), true, nil
 }

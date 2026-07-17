@@ -211,7 +211,7 @@ dataset_gen → eval → run（分析）→ apply（代码修改）→ merge →
 **自然语言驱动：**
 
 ```bash
-curl -sX POST "$BASE/api/core/agent/threads/$THREAD_ID/messages" \
+curl -sX POST "$BASE/v1/evo/threads/$THREAD_ID/messages" \
   -H "Content-Type: application/json" \
   -d '{"content":"从知识库 KB_ID 生成评测集，分析报告后修改代码，做 ABTest 验证效果"}'
 ```
