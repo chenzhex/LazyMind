@@ -189,7 +189,7 @@ brew install colima docker docker-compose docker-buildx
 Start Colima:
 
 ```bash
-colima start --runtime docker --vm-type vz --mount-type virtiofs --cpu 6 --memory 10 --disk 80
+colima start --runtime docker --vm-type vz --mount-type virtiofs --cpu 4 --memory 6 --disk 80
 ```
 
 Verify the environment:
