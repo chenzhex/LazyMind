@@ -20,6 +20,7 @@ sys.modules.setdefault('json_repair', fake_repair)
 
 from evo.operations.eval.judge import judge_case
 from evo.operations.eval.materializers import build_eval_detail_summary, eval_materializers
+from evo.operations.eval.answer import _with_case
 
 
 class FakeLLM:
@@ -92,6 +93,90 @@ class FakeClaimsWithoutMappingLLM(FakeLLM):
             'claims': [{'text': 'The supported fact is alpha.', 'supported': True}],
             'evidence_mapping': [],
         })
+
+
+class FakeZeroDiagnosticsLLM(FakeLLM):
+    def __call__(self, prompt, **kwargs):
+        return json.dumps({
+            'answer_correctness': 0.9,
+            'answer_relevance': 1.0,
+            'completeness': 0.9,
+            'groundedness': 0.9,
+            'format_compliance': 1.0,
+            'failure_type': 'none',
+            'reason': 'diagnostic zero values are intentional',
+            'defect': '',
+            'key_point_recall': 0.0,
+            'claim_support_rate': 0.0,
+            'semantic_similarity': 0.0,
+            'retrieval_recall_at_k': 0.0,
+            'retrieval_mrr': 0.0,
+            'retrieval_ndcg': 0.0,
+            'context_relevance_avg': 0.0,
+            'claims': [{'text': 'Unsupported claim.', 'supported': False}],
+            'unsupported_claims': ['Unsupported claim.'],
+        })
+
+
+def test_eval_answer_keeps_context_chunk_alignment_for_duplicate_text():
+    result = {
+        'status': 'ok',
+        'answer': 'final answer',
+        'target': {'trace_id': 'trace-router', 'algorithm_id': 'algo-a', 'kb_id': 'kb-a'},
+        'sources': [
+            {'content': 'same text', 'doc_id': 'doc-a', 'chunk_id': 'chunk-a'},
+            {'content': 'same text', 'doc_id': 'doc-b', 'chunk_id': 'chunk-b'},
+            {'content': 'other text', 'doc_id': 'doc-c', 'chunk_id': 'chunk-c'},
+        ],
+    }
+
+    answer = _with_case({'id': 'case-align', 'question': 'q'}, result)
+
+    assert answer['contexts'] == [
+        {'content': 'same text', 'doc_id': 'kb-a:doc-a', 'chunk_id': 'kb-a:doc-a:chunk-a'},
+        {'content': 'same text', 'doc_id': 'kb-a:doc-b', 'chunk_id': 'kb-a:doc-b:chunk-b'},
+        {'content': 'other text', 'doc_id': 'kb-a:doc-c', 'chunk_id': 'kb-a:doc-c:chunk-c'},
+    ]
+    assert answer['chunk_ids'] == [
+        'kb-a:doc-a:chunk-a',
+        'kb-a:doc-b:chunk-b',
+        'kb-a:doc-c:chunk-c',
+    ]
+
+
+def test_zero_diagnostic_scores_do_not_fallback_to_positive_defaults(monkeypatch):
+    import evo.llm
+
+    monkeypatch.setattr(evo.llm, 'LazyLLMClient', FakeZeroDiagnosticsLLM)
+    case = {
+        'id': 'case_zero',
+        'question': 'What fact is supported?',
+        'answer': 'The supported fact is alpha.',
+        'question_type': 'single_hop',
+        'difficulty': 'medium',
+        'key_points': [
+            {'id': 'alpha', 'statement': 'The supported fact is alpha.', 'evidence_chunk_ids': ['chunk-a']},
+        ],
+        'reference_chunk_ids': ['chunk-a'],
+        'reference_context': {'chunk-a': 'The supported fact is alpha.'},
+    }
+    answer = {
+        'status': 'ok',
+        'case_id': 'case_zero',
+        'answer': 'Unsupported claim.',
+        'contexts': [{'chunk_id': 'chunk-a', 'content': 'The supported fact is alpha.', 'rank': 1}],
+        'chunk_ids': ['chunk-a'],
+        'doc_ids': [],
+        'trace_id': 'trace-zero',
+        'target': {'algorithm_id': 'algo-a', 'kb_id': 'kb-a'},
+    }
+
+    result = judge_case(case, answer, {'judge_llm_config': {'evo_llm': {'model': 'fake'}}})
+
+    assert result['answer_quality_score'] == 0.555
+    assert result['overall_score'] == 0.644
+    assert result['quality_label'] == 'partial'
+    assert result['failure_type'] == 'partial_answer'
 
 
 def test_judge_prompt_passes_contexts_with_chunk_ids(monkeypatch):

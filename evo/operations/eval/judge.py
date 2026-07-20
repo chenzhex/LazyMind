@@ -257,23 +257,23 @@ def judge_answer(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy:
     else:
         retrieval_failure = 'none'
 
-    contradiction_penalty = 0.20 * float(score_payload.get('contradiction_rate') or 0.0)
+    contradiction_penalty = 0.20 * _payload_float(score_payload, 'contradiction_rate', 0.0)
     answer_quality = _score(
         0.30 * scores.answer_correctness
-        + 0.20 * float(score_payload.get('key_point_recall') or scores.answer_correctness)
+        + 0.20 * _payload_float(score_payload, 'key_point_recall', scores.answer_correctness)
         + 0.15 * scores.completeness
-        + 0.15 * float(score_payload.get('claim_support_rate') or scores.groundedness)
+        + 0.15 * _payload_float(score_payload, 'claim_support_rate', scores.groundedness)
         + 0.10 * scores.answer_relevance
-        + 0.05 * float(score_payload.get('semantic_similarity') or scores.answer_correctness)
+        + 0.05 * _payload_float(score_payload, 'semantic_similarity', scores.answer_correctness)
         + 0.05 * scores.format_compliance
         - contradiction_penalty
     )
     retrieval_quality = _score(
-        0.35 * float(score_payload.get('retrieval_recall_at_k') or recall)
-        + 0.25 * float(score_payload.get('retrieval_ndcg') or recall)
-        + 0.20 * float(score_payload.get('retrieval_mrr') or recall)
+        0.35 * _payload_float(score_payload, 'retrieval_recall_at_k', recall)
+        + 0.25 * _payload_float(score_payload, 'retrieval_ndcg', recall)
+        + 0.20 * _payload_float(score_payload, 'retrieval_mrr', recall)
         + 0.10 * precision
-        + 0.10 * float(score_payload.get('context_relevance_avg') or recall)
+        + 0.10 * _payload_float(score_payload, 'context_relevance_avg', recall)
     )
     overall = answer_quality if retrieval_failure == 'not_applicable' else _score(
         0.80 * answer_quality + 0.20 * retrieval_quality
@@ -287,20 +287,20 @@ def judge_answer(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy:
             'partial_answer' if scores.completeness < 0.6 else
             'none'
         )
-    if failure == 'none' and case.get('key_points') and float(score_payload.get('key_point_recall') or 0.0) < float(
-        policy.get('key_point_recall_floor') or 0.8
+    if failure == 'none' and case.get('key_points') and _payload_float(score_payload, 'key_point_recall', 0.0) < _policy_float(
+        policy, 'key_point_recall_floor', 0.8
     ):
         failure = 'partial_answer'
-    if failure == 'none' and float(score_payload.get('contradiction_rate') or 0.0) > float(
-        policy.get('contradiction_rate_ceiling') or 0.0
+    if failure == 'none' and _payload_float(score_payload, 'contradiction_rate', 0.0) > _policy_float(
+        policy, 'contradiction_rate_ceiling', 0.0
     ):
         failure = 'hallucination'
-    unsupported_claim_rate = float(score_payload.get('unsupported_claim_rate') or 0.0)
-    claim_support_rate = float(score_payload.get('claim_support_rate') or 1.0)
+    unsupported_claim_rate = _payload_float(score_payload, 'unsupported_claim_rate', 0.0)
+    claim_support_rate = _payload_float(score_payload, 'claim_support_rate', 1.0)
     has_claims = bool(score_payload.get('claims'))
     if failure == 'none' and has_claims and (
-        unsupported_claim_rate > float(policy.get('unsupported_claim_rate_ceiling') or 0.0)
-        or claim_support_rate < float(policy.get('claim_support_rate_floor') or 0.8)
+        unsupported_claim_rate > _policy_float(policy, 'unsupported_claim_rate_ceiling', 0.0)
+        or claim_support_rate < _policy_float(policy, 'claim_support_rate_floor', 0.8)
     ):
         failure = 'partial_answer'
     if scores.format_compliance < 1.0:
@@ -308,19 +308,19 @@ def judge_answer(case: Mapping[str, Any], rag_answer: Mapping[str, Any], policy:
 
     gates_ok = (
         failure == 'none'
-        and scores.answer_correctness >= float(policy.get('answer_correctness_floor') or 0.6)
-        and scores.groundedness >= float(policy.get('groundedness_floor') or 0.6)
-        and scores.answer_relevance >= float(policy.get('answer_relevance_floor') or 0.6)
+        and scores.answer_correctness >= _policy_float(policy, 'answer_correctness_floor', 0.6)
+        and scores.groundedness >= _policy_float(policy, 'groundedness_floor', 0.6)
+        and scores.answer_relevance >= _policy_float(policy, 'answer_relevance_floor', 0.6)
         and (
             not case.get('key_points')
-            or float(score_payload.get('key_point_recall') or 0.0) >= float(
-                policy.get('key_point_recall_floor') or 0.8
+            or _payload_float(score_payload, 'key_point_recall', 0.0) >= _policy_float(
+                policy, 'key_point_recall_floor', 0.8
             )
         )
     )
-    if gates_ok and overall >= float(policy.get('answer_good_threshold') or 0.8):
+    if gates_ok and overall >= _policy_float(policy, 'answer_good_threshold', 0.8):
         label, failure = 'good', 'none'
-    elif overall >= float(policy.get('answer_partial_threshold') or 0.5):
+    elif overall >= _policy_float(policy, 'answer_partial_threshold', 0.5):
         label, failure = 'partial', failure if failure != 'none' else 'partial_answer'
     else:
         label, failure = 'bad', failure if failure != 'none' else 'wrong_answer'
@@ -457,6 +457,20 @@ def _score(value: float) -> float:
     if not math.isfinite(float(value)):
         raise ValueError('score must be finite')
     return round(max(0.0, min(1.0, float(value))), 4)
+
+
+def _payload_float(payload: Mapping[str, Any], key: str, default: float) -> float:
+    value = payload.get(key) if key in payload else default
+    if value is None:
+        value = default
+    return float(value)
+
+
+def _policy_float(policy: Mapping[str, Any], key: str, default: float) -> float:
+    value = policy.get(key) if key in policy else default
+    if value in (None, ''):
+        value = default
+    return float(value)
 
 
 def _score_payload(scores: JudgeScores) -> dict[str, Any]:

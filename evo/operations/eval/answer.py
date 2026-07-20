@@ -107,6 +107,7 @@ def _with_case(case: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, 
     stream = {'answer': result.get('answer') or '', 'frames': result.get('frames') or []}
     answer = _answer_base(case, stream, result.get('target') if isinstance(result.get('target'), Mapping) else {})
     answer.update(dict(result))
+    _align_evidence_refs(answer)
     answer['case_id'] = str(case.get('id') or answer.get('case_id') or '')
     answer['question'] = str(case.get('question') or '')
     answer['evidence_status'] = _evidence_status(answer)
@@ -156,6 +157,80 @@ def _answer_base(case: Mapping[str, Any], stream: Mapping[str, Any], target: Map
         'trace_id': str(target.get('trace_id') or ''),
         'target': dict(target),
     }
+
+
+def _align_evidence_refs(answer: dict[str, Any]) -> None:
+    refs = _source_refs(answer.get('sources'), answer.get('target') if isinstance(answer.get('target'), Mapping) else {})
+    if not refs:
+        refs = _zipped_refs(answer.get('contexts'), answer.get('doc_ids'), answer.get('chunk_ids'))
+    if not refs:
+        return
+    answer['contexts'] = refs
+    answer['doc_ids'] = _unique(ref.get('doc_id') for ref in refs)
+    answer['chunk_ids'] = _unique(ref.get('chunk_id') for ref in refs)
+
+
+def _source_refs(sources: Any, target: Mapping[str, Any]) -> list[dict[str, str]]:
+    values = sources if isinstance(sources, list | tuple) else []
+    target_kbs = [item for item in str(target.get('kb_id') or '').split(';') if item]
+    fallback_kb = target_kbs[0] if len(target_kbs) == 1 else ''
+    refs = []
+    seen: set[tuple[str, str, str]] = set()
+    for source in values:
+        if not isinstance(source, Mapping):
+            continue
+        metadata = source.get('global_metadata') if isinstance(source.get('global_metadata'), Mapping) else {}
+        kb_id = str(source.get('kb_id') or source.get('dataset_id') or metadata.get('kb_id')
+                    or metadata.get('dataset_id') or fallback_kb).strip()
+        doc = str(source.get('doc_id') or source.get('docid') or source.get('document_id')
+                  or metadata.get('docid') or metadata.get('core_document_id') or '').strip()
+        chunk = str(source.get('chunk_id') or source.get('chunkid') or source.get('segment_id')
+                    or source.get('segement_id') or source.get('uid') or source.get('id') or '').strip()
+        doc_ref = doc if ':' in doc else f'{kb_id}:{doc}' if kb_id and doc else doc
+        chunk_ref = chunk if ':' in chunk else f'{doc_ref}:{chunk}' if doc_ref and chunk else chunk
+        content = str(source.get('content') or source.get('text') or source.get('chunk') or '').strip()
+        key = (content, doc_ref, chunk_ref)
+        if (not any(key)) or key in seen:
+            continue
+        seen.add(key)
+        refs.append({'content': content, 'doc_id': doc_ref, 'chunk_id': chunk_ref})
+    return refs
+
+
+def _zipped_refs(contexts: Any, doc_ids: Any, chunk_ids: Any) -> list[dict[str, str]]:
+    context_values = contexts if isinstance(contexts, list | tuple) else [contexts] if contexts else []
+    doc_values = list(_ordered_values(doc_ids))
+    chunk_values = list(_ordered_values(chunk_ids))
+    refs = []
+    seen: set[tuple[str, str, str]] = set()
+    for index, context in enumerate(context_values):
+        if isinstance(context, Mapping):
+            content = str(context.get('content') or context.get('text') or context.get('context') or '').strip()
+            doc_id = str(context.get('doc_id') or '').strip()
+            chunk_id = str(context.get('chunk_id') or context.get('id') or '').strip()
+        else:
+            content = str(context or '').strip()
+            doc_id = ''
+            chunk_id = ''
+        if index < len(doc_values) and not doc_id:
+            doc_id = doc_values[index]
+        if index < len(chunk_values) and not chunk_id:
+            chunk_id = chunk_values[index]
+        key = (content, doc_id, chunk_id)
+        if (not any(key)) or key in seen:
+            continue
+        seen.add(key)
+        refs.append({'content': content, 'doc_id': doc_id, 'chunk_id': chunk_id})
+    return refs
+
+
+def _ordered_values(value: Any) -> list[str]:
+    values = [value] if isinstance(value, str) else list(value or [])
+    return [str(item).strip() for item in values if str(item or '').strip()]
+
+
+def _unique(values: Any) -> list[str]:
+    return list(dict.fromkeys(str(value).strip() for value in values if str(value or '').strip()))
 
 
 def _evidence_status(answer: Mapping[str, Any]) -> str:
